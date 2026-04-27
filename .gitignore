@@ -1,1 +1,7 @@
 /target
+
+# Project conventions and spec-kit skills are tracked here, overriding
+# the user's global gitignore (which usually skips agent-config files).
+!CLAUDE.md
+!.claude/
+!.claude/**

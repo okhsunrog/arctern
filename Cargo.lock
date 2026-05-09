@@ -3,5 +3,13 @@
 version = 4
 
 [[package]]
-name = "arctern"
+name = "arctern-api"
+version = "0.1.0"
+
+[[package]]
+name = "arctern-client"
+version = "0.1.0"
+
+[[package]]
+name = "arctern-daemon"
 version = "0.1.0"

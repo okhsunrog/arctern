@@ -1,0 +1,5 @@
+[package]
+name = "arctern-client"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true

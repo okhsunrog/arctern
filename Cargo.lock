@@ -76,9 +76,13 @@ name = "arctern-client"
 version = "0.1.0"
 dependencies = [
  "arctern-api",
- "reqwest",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "serde_json",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

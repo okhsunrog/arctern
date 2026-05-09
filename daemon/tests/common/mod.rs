@@ -182,17 +182,33 @@ fn sync_ssh(target: &str, password: Option<&str>, remote_cmd: &str) -> std::io::
 /// Daemon binary path comes from `CARGO_BIN_EXE_arctern`, which cargo
 /// sets at compile time for tests in the same package as the bin.
 pub fn spawn_daemon_uds(socket: Option<PathBuf>) -> (Child, PathBuf) {
+    spawn_daemon_uds_with_config(socket, None)
+}
+
+/// Slice 003: the daemon now requires `--config <path>`. If the caller
+/// does not supply one, write a minimal zero-jobs TOML so existing
+/// slice-001 / slice-002 tests stay valid without knowing about config.
+pub fn spawn_daemon_uds_with_config(
+    socket: Option<PathBuf>,
+    config: Option<PathBuf>,
+) -> (Child, PathBuf) {
     let socket_path = socket.unwrap_or_else(|| {
         PathBuf::from(format!("/tmp/arctern_test_{}.sock", unique_suffix()))
     });
-    // Best-effort cleanup of any prior file at the same path; the daemon
-    // also unlinks before bind, but doing it here too keeps stderr clean.
     let _ = std::fs::remove_file(&socket_path);
+
+    let config_path = config.unwrap_or_else(|| {
+        let p = PathBuf::from(format!("/tmp/arctern_test_{}.toml", unique_suffix()));
+        std::fs::write(&p, "").expect("write empty config");
+        p
+    });
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_arctern"))
         .arg("daemon")
         .arg("--socket")
         .arg(&socket_path)
+        .arg("--config")
+        .arg(&config_path)
         .env(
             "PALIMPSEST_SSH_TARGET",
             std::env::var("PALIMPSEST_SSH_TARGET").expect("PALIMPSEST_SSH_TARGET must be set"),
@@ -202,7 +218,16 @@ pub fn spawn_daemon_uds(socket: Option<PathBuf>) -> (Child, PathBuf) {
             std::env::var("PALIMPSEST_SSH_PASSWORD").unwrap_or_default(),
         )
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr({
+            // Capture stderr to a per-test file so panics inside tests
+            // surface daemon-side tracing output. Slice 003 needs this
+            // to debug snap-job loops; previously stderr inherited and
+            // got hidden by `cargo test`'s stdout capture.
+            let p = format!("/tmp/arctern_test_{}.stderr", unique_suffix());
+            std::fs::File::create(&p)
+                .map(Into::into)
+                .unwrap_or_else(|_| Stdio::inherit())
+        })
         .spawn()
         .expect("spawn arctern daemon");
 

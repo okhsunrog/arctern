@@ -39,6 +39,26 @@ impl From<palimpsest::dataset::ZfsListEntry> for DatasetSummary {
     }
 }
 
+/// String constant for the `snap` job kind. The wire field is a
+/// `String` (not an enum) so that adding a future job kind in a later
+/// slice does not break clients pinned to an older `JobKind` enum
+/// definition.
+pub const JOB_KIND_SNAP: &str = "snap";
+
+/// One entry in the response of `GET /api/v1/jobs`. RFC3339 timestamps
+/// are nullable: `last_run` is null until the job has completed at
+/// least one cycle; `next_run` is set as soon as the loop knows when
+/// it will fire next; `last_error` is null when the most recent cycle
+/// finished cleanly.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct JobStatus {
+    pub name: String,
+    pub kind: String,
+    pub last_run: Option<String>,
+    pub next_run: Option<String>,
+    pub last_error: Option<String>,
+}
+
 /// Body shape for `4xx`/`5xx` responses from the daemon. `error` is a
 /// short machine-readable category (`spawn`, `dataset_not_found`, …);
 /// `message` is a human-readable description.

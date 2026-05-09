@@ -24,6 +24,7 @@ mod handlers;
 mod jobs;
 mod router;
 mod state;
+mod stdinserver;
 
 #[derive(Parser, Debug)]
 #[command(name = "arctern", version, about = "ZFS replication daemon")]
@@ -48,8 +49,16 @@ enum Command {
         #[arg(long, default_value = "/etc/arctern/arctern.toml")]
         config: PathBuf,
     },
-    /// SSH transport entry point invoked by sshd. Stub through slice 003.
-    Stdinserver { ident: String },
+    /// SSH transport entry point invoked by sshd via authorized_keys
+    /// `command="..."`. The single positional is the identity name —
+    /// the actual command (`arctern stdinserver <job> <op>`) arrives
+    /// via `SSH_ORIGINAL_COMMAND`.
+    StdinserverDispatch {
+        identity: String,
+        /// Path to the daemon's config (same default as `daemon`).
+        #[arg(long, default_value = "/etc/arctern/arctern.toml")]
+        config: PathBuf,
+    },
     /// One-shot validation for CI / pre-deploy.
     Configcheck { path: PathBuf },
 }
@@ -58,12 +67,21 @@ fn main() -> eyre::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Daemon { socket, config } => run_daemon(socket, config),
-        Command::Stdinserver { ident } => {
-            eprintln!("arctern stdinserver {ident}: not implemented in slice 003");
-            Ok(())
+        Command::StdinserverDispatch { identity, config } => {
+            run_stdinserver_dispatch(identity, config)
         }
         Command::Configcheck { path } => configcheck::run(&path),
     }
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn run_stdinserver_dispatch(identity: String, config: PathBuf) -> eyre::Result<()> {
+    // The dispatcher logs structured events; pipe them to stderr so
+    // sshd's wrapping channel only sees the protocol bytes on stdout.
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
+    stdinserver::dispatch::run(&identity, &config).await
 }
 
 /// Resolve the socket path the daemon should bind to.

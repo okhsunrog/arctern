@@ -15,13 +15,40 @@ use crate::grid::GridSpec;
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// Where the daemon stores per-host state (TLS identity, future
-    /// replication cursors). The daemon resolves `None` to its hard-
-    /// coded default `/var/lib/arctern` (see daemon main).
+    /// Where the daemon stores per-host state (SQLite, future replication
+    /// cursors). The daemon resolves `None` to its hard-coded default
+    /// `/var/lib/arctern` (see daemon main).
     #[serde(default)]
     pub state_dir: Option<PathBuf>,
     #[serde(default)]
     pub jobs: Vec<JobConfig>,
+    /// Receiver-side ACL for the SSH transport. `arctern stdinserver-
+    /// dispatch <identity>` looks up the row whose `identity` matches its
+    /// argv before serving any control or recv channel. Empty (the laptop
+    /// host's typical case) means no inbound clients are allowed.
+    #[serde(default, rename = "allowed_clients")]
+    pub allowed_clients: Vec<AllowedClient>,
+}
+
+/// One inbound client entry. `identity` is the literal argv passed to
+/// `stdinserver-dispatch` from the matching `authorized_keys` line.
+/// `jobs` and `operations` are allow-lists; the dispatcher rejects any
+/// `(job, op)` pair that isn't covered. `root_fs`, when set, restricts
+/// recv operations to that subtree.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AllowedClient {
+    pub identity: String,
+    /// Optional defense-in-depth: SHA256 fingerprint of the SSH key the
+    /// client is expected to authenticate with, e.g.
+    /// `"SHA256:abc123..."`. When set, the dispatcher compares it to
+    /// `SSH_AUTH_INFO_0` before granting access.
+    #[serde(default)]
+    pub fingerprint: Option<String>,
+    pub jobs: Vec<String>,
+    pub operations: Vec<String>,
+    #[serde(default)]
+    pub root_fs: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

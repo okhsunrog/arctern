@@ -17,8 +17,8 @@ pub mod schema;
 pub use grid::{GridParseError, GridSpec, KeepCount, RetentionInterval, SnapshotEntry};
 pub use prune::{PruneError, evaluate as evaluate_keep_rules};
 pub use schema::{
-    Config, FilesystemFilter, JobConfig, KeepRule, PruningConfig, PushJobConfig, PushTarget,
-    RecvConfig, RecvProperties, SendFlagsConfig, SinkJobConfig, SnapJobConfig,
+    AllowedClient, Config, FilesystemFilter, JobConfig, KeepRule, PruningConfig, PushJobConfig,
+    PushTarget, RecvConfig, RecvProperties, SendFlagsConfig, SinkJobConfig, SnapJobConfig,
     SnapshotFilterConfig, SnapshottingConfig,
 };
 

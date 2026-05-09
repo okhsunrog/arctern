@@ -19,6 +19,7 @@ use tokio::signal::unix::{SignalKind, signal};
 mod auth;
 mod error;
 mod handlers;
+mod jobs;
 mod router;
 
 #[derive(Parser, Debug)]

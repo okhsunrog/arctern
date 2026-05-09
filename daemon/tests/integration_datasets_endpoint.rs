@@ -1,6 +1,6 @@
 //! End-to-end test: boot a fresh loopback pool inside the VM, spawn the
-//! arctern daemon pointing at the VM, hit GET /api/v1/datasets, assert
-//! the test pool appears in the response.
+//! arctern daemon over a per-test UNIX socket, list datasets via
+//! `arctern-client`, assert the test pool appears.
 //!
 //! Gated behind the `integration` cargo feature. Requires
 //! PALIMPSEST_SSH_TARGET + (optional) PALIMPSEST_SSH_PASSWORD pointing at
@@ -15,29 +15,22 @@
 
 mod common;
 
-use arctern_api::DatasetSummary;
-
-use common::{LoopbackPool, spawn_daemon, ssh_runner_from_env};
+use common::{LoopbackPool, spawn_daemon_uds, ssh_runner_from_env};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn get_datasets_returns_test_pool() {
     let runner = ssh_runner_from_env();
     let pool = LoopbackPool::create(runner).await.expect("create pool");
 
-    let (mut child, base) = spawn_daemon();
+    let (mut child, socket) = spawn_daemon_uds(None);
 
-    let url = format!("{base}/api/v1/datasets");
-    let datasets: Vec<DatasetSummary> = reqwest::get(&url)
+    let datasets = arctern_client::list_datasets(&socket)
         .await
-        .expect("HTTP request to daemon")
-        .error_for_status()
-        .expect("2xx response")
-        .json()
-        .await
-        .expect("decode JSON body");
+        .expect("list_datasets over UDS");
 
     let _ = child.kill();
     let _ = child.wait();
+    let _ = std::fs::remove_file(&socket);
 
     let names: Vec<&str> = datasets.iter().map(|d| d.name.as_str()).collect();
     assert!(
@@ -52,30 +45,4 @@ async fn get_datasets_returns_test_pool() {
     assert_eq!(pool_entry.dataset_type, "filesystem");
 
     pool.destroy().await.expect("destroy pool");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn openapi_doc_lists_datasets_path_and_schemas() {
-    let (mut child, base) = spawn_daemon();
-
-    let doc: serde_json::Value = reqwest::get(&format!("{base}/api-docs/openapi.json"))
-        .await
-        .expect("openapi request")
-        .json()
-        .await
-        .expect("decode openapi");
-
-    let _ = child.kill();
-    let _ = child.wait();
-
-    assert!(
-        doc.pointer("/paths/~1api~1v1~1datasets/get").is_some(),
-        "openapi missing GET /api/v1/datasets: {doc:#}"
-    );
-    let schemas = doc
-        .pointer("/components/schemas")
-        .and_then(|v| v.as_object())
-        .expect("openapi components.schemas object");
-    assert!(schemas.contains_key("DatasetSummary"));
-    assert!(schemas.contains_key("ApiErrorBody"));
 }

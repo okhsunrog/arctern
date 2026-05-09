@@ -11,6 +11,7 @@
 #![allow(dead_code)]
 
 use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -28,7 +29,7 @@ pub fn ssh_runner_from_env() -> SshCommandRunner {
     })
 }
 
-fn unique_suffix() -> String {
+pub fn unique_suffix() -> String {
     static SEQ: AtomicU32 = AtomicU32::new(0);
     let n = SEQ.fetch_add(1, Ordering::Relaxed);
     let nanos = SystemTime::now()
@@ -170,16 +171,28 @@ fn sync_ssh(target: &str, password: Option<&str>, remote_cmd: &str) -> std::io::
 }
 
 /// Spawn the arctern daemon as a subprocess pointing at the same VM the
-/// caller's `SshCommandRunner` targets. Reads stdout until the
-/// `LISTEN <addr>` handshake line arrives, returns `(child, base_url)`
-/// where `base_url` is `http://<addr>`.
+/// caller's `SshCommandRunner` targets, listening on a fresh UNIX socket.
+/// Reads stdout until the `LISTEN unix:<path>` handshake line arrives;
+/// returns `(child, socket_path)`.
+///
+/// `socket` is optional: if `None`, the helper picks a unique
+/// `/tmp/arctern_test_<nanos>_<seq>.sock` path. Pass `Some(path)` to
+/// dictate it (e.g., to test the `--socket` flag explicitly).
 ///
 /// Daemon binary path comes from `CARGO_BIN_EXE_arctern`, which cargo
 /// sets at compile time for tests in the same package as the bin.
-pub fn spawn_daemon() -> (Child, String) {
-    let bin = env!("CARGO_BIN_EXE_arctern");
-    let mut child = Command::new(bin)
+pub fn spawn_daemon_uds(socket: Option<PathBuf>) -> (Child, PathBuf) {
+    let socket_path = socket.unwrap_or_else(|| {
+        PathBuf::from(format!("/tmp/arctern_test_{}.sock", unique_suffix()))
+    });
+    // Best-effort cleanup of any prior file at the same path; the daemon
+    // also unlinks before bind, but doing it here too keeps stderr clean.
+    let _ = std::fs::remove_file(&socket_path);
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_arctern"))
         .arg("daemon")
+        .arg("--socket")
+        .arg(&socket_path)
         .env(
             "PALIMPSEST_SSH_TARGET",
             std::env::var("PALIMPSEST_SSH_TARGET").expect("PALIMPSEST_SSH_TARGET must be set"),
@@ -200,7 +213,7 @@ pub fn spawn_daemon() -> (Child, String) {
     loop {
         if Instant::now() > deadline {
             let _ = child.kill();
-            panic!("daemon did not print LISTEN <addr> within 10s");
+            panic!("daemon did not print LISTEN unix:<path> within 10s");
         }
         line.clear();
         let n = reader.read_line(&mut line).expect("read daemon stdout");
@@ -208,8 +221,10 @@ pub fn spawn_daemon() -> (Child, String) {
             let _ = child.kill();
             panic!("daemon stdout closed before LISTEN line");
         }
-        if let Some(addr) = line.trim().strip_prefix("LISTEN ") {
-            return (child, format!("http://{addr}"));
+        // Path may contain colons or spaces; everything after `unix:` is
+        // taken literally. Split only on the first space.
+        if let Some(rest) = line.trim().strip_prefix("LISTEN unix:") {
+            return (child, PathBuf::from(rest));
         }
     }
 }

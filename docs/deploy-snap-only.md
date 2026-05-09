@@ -1,0 +1,220 @@
+# Snap-only deployment (server, side-by-side with zrepl)
+
+Goal: run arctern as the snapshot+pruning daemon on the server (`okdata`)
+**alongside** zrepl, on disjoint filesystems, for ~1 week. If the snapshots
+arctern produces look identical to zrepl's grid (modulo timing jitter) and
+no errors accumulate in the journal, decommission zrepl's `databak` /
+`rootbak` jobs and let arctern own snapshotting.
+
+This deployment is snap-only. Sink + push come in a later wave (see
+`docs/example-config.toml` for the full schema).
+
+## Pre-flight
+
+- ZFS pool exists, datasets to back up are imported.
+- Server has a Rust toolchain or you have a way to cross-build for it.
+- You have root on the server.
+- Decide: which datasets does arctern manage during the trial, and which
+  stay with zrepl? They MUST NOT overlap. Suggested split: pick one
+  low-traffic dataset (e.g., `okdata/data/nas`) for arctern; leave
+  `okdata/data/{root,home}` and `okdata/ROOT/default` with zrepl. Move
+  more over as confidence grows.
+
+## 1. Build
+
+On a build host with the right libc/glibc as the server:
+
+```bash
+cd /path/to/arctern
+cargo build --release -p arctern-daemon
+# Binary is target/release/arctern.
+```
+
+If the server runs musl or a different libc, build with the matching
+target (`cargo build --release --target x86_64-unknown-linux-musl -p arctern-daemon`).
+
+## 2. Install
+
+On the server:
+
+```bash
+# Binary
+install -m 0755 arctern /usr/local/bin/arctern
+
+# systemd unit
+install -m 0644 packaging/systemd/arctern.service /etc/systemd/system/arctern.service
+
+# Config dir (the unit reads /etc/arctern/arctern.toml)
+install -d -m 0755 /etc/arctern
+```
+
+## 3. Write the trial config
+
+`/etc/arctern/arctern.toml` — a minimal version of `databak` covering ONE
+dataset that is currently NOT in zrepl's job list (or that you've removed
+from zrepl's job list as part of the cutover). Adjust `path` to match the
+dataset you picked above.
+
+```toml
+state_dir = "/var/lib/arctern"
+
+[[jobs]]
+type = "snap"
+name = "arctern_databak_trial"
+
+[[jobs.filesystems]]
+path = "okdata/data/nas"
+
+[jobs.snapshotting]
+type = "periodic"
+interval = "4h"
+prefix = "arctern_"   # NOTE: distinct from zrepl_ to avoid pruning collisions
+
+[[jobs.pruning.keep]]
+type = "grid"
+grid = "6x4h | 14x1d"
+regex = "^arctern_.*"
+
+# Anything not matching ^arctern_.* (manual snapshots, zrepl snapshots,
+# whatever else) is protected — never touched by this rule.
+[[jobs.pruning.keep]]
+type = "regex"
+regex = "^arctern_.*"
+negate = true
+```
+
+**Why `arctern_` prefix instead of `zrepl_`**: protects against the
+unlikely case where someone misconfigures the trial dataset to overlap
+with a zrepl-managed one. The prefix is the firewall — arctern's prune
+will only consider its own snapshots. After the trial, if you want
+wire-compat with old zrepl history, switch the prefix back to `zrepl_`.
+
+Validate before starting:
+
+```bash
+arctern configcheck /etc/arctern/arctern.toml
+```
+
+Expected: prints `ok` and exits 0. Any non-zero exit means fix the file.
+
+## 4. Start
+
+```bash
+systemctl daemon-reload
+systemctl start arctern
+systemctl status arctern
+```
+
+Expected `status` output:
+- Active: active (running)
+- Recent journal lines: `arctern daemon listening`, `LISTEN unix:/run/arctern/arctern.sock`, `creating snapshot dataset=okdata/data/nas snapshot=arctern_<RFC3339>`
+
+## 5. Verify it's actually doing the right thing
+
+Within ~10 minutes (startup-immediate snapshot fires once on first
+launch even if the interval hasn't elapsed):
+
+```bash
+zfs list -t snapshot okdata/data/nas | grep arctern_
+```
+
+Should show one snapshot. Wait 4 hours and re-check; should show two.
+
+Inspect job state via the local API:
+
+```bash
+# socat is the easiest way to talk to the UDS
+socat -U TCP-LISTEN:8765,reuseaddr,fork UNIX-CONNECT:/run/arctern/arctern.sock &
+curl -s http://127.0.0.1:8765/api/v1/jobs | jq .
+```
+
+(Or use `arctern-client` if you've built it.)
+
+Expected response: one job with `kind = "snap"`, `last_run` populated,
+`last_error: null`, `next_run` ~4h in the future.
+
+Tail the journal during normal operation:
+
+```bash
+journalctl -fu arctern
+```
+
+You should see one cycle every 4h, with snapshot creation and pruning
+log lines. Errors should be zero.
+
+## 6. Trial period
+
+Run side-by-side with zrepl for **at least one week** (so the prune
+algorithm has time to actually destroy things — first prune can take
+24h+ depending on grid math). Watch for:
+
+- `last_error` ever becoming non-null in `GET /api/v1/jobs`
+- Snapshots NOT being created on the expected interval (cycle drift bug,
+  flagged in slice 003 D17 / 003 follow-up notes)
+- Snapshots being destroyed that shouldn't be (prune algorithm bug —
+  worst case: filed and revert immediately)
+- Unexpected disk usage on `/var/lib/arctern` (currently only TLS cert +
+  key, ~5 KiB; if it grows, something's wrong)
+- Daemon RSS climbing (currently no large allocations; if it climbs,
+  also something's wrong)
+
+Compare arctern's snapshot timing + retention against zrepl's on the
+control datasets:
+
+```bash
+# zrepl's view
+zfs list -t snapshot -o name,creation okdata/data/home | grep zrepl_
+# arctern's view
+zfs list -t snapshot -o name,creation okdata/data/nas  | grep arctern_
+```
+
+The intervals should match within seconds. The retained set should
+follow the same grid math (6 most-recent 4h slots + 14 most-recent
+daily slots = 20 retained snapshots in steady state, after >14d).
+
+## 7. Cutover (after the trial passes)
+
+1. Stop arctern: `systemctl stop arctern`
+2. Edit `/etc/arctern/arctern.toml`:
+   - Add `okdata/data/{root,home}` (and any other zrepl-owned filesystems)
+     under `[[jobs.filesystems]]`
+   - Optionally rename the job from `arctern_databak_trial` to `databak`
+   - Optionally switch `prefix` from `arctern_` to `zrepl_` — at that
+     point arctern will adopt zrepl's existing snapshot history. Do this
+     ONLY after disabling zrepl's snap jobs (next step), otherwise both
+     daemons will fight over the prune.
+3. Disable zrepl's `databak` job in `/etc/zrepl/zrepl.yml` (comment it
+   out or delete it). Keep the sink job — that's what slice 005's push
+   will eventually replace.
+4. `systemctl restart zrepl` (so zrepl drops the snap loop), then
+   `systemctl start arctern`.
+5. Re-run the verification steps from §5 + §6 for another week with the
+   broader dataset list before unifying further.
+
+## Rollback
+
+If anything goes wrong during the trial:
+
+```bash
+systemctl stop arctern
+systemctl disable arctern
+# zrepl is untouched; it owns everything as before. Trial datasets just
+# accumulate arctern_-prefixed snapshots until you destroy them by hand:
+zfs list -t snapshot okdata/data/nas | awk '/arctern_/ {print $1}' | \
+  xargs -n1 zfs destroy
+```
+
+The TLS cert at `/var/lib/arctern/cert.pem` is harmless; remove the dir
+if you want a clean state: `rm -rf /var/lib/arctern`.
+
+## What this deployment does NOT yet cover
+
+- **Push/sink** (slices 004–006): the receiver-side snapshot retention is
+  arctern's, but actual replication FROM the laptop is still zrepl's
+  push job. Don't disable zrepl on the laptop yet.
+- **HTTP/HTTPS network exposure**: the API is UDS-only. You can SSH-tunnel
+  to read it remotely; there's no plan to expose it on TCP.
+- **Hot reload of config**: no SIGHUP support. To change the config, edit
+  the file then `systemctl restart arctern`.
+- **Multiple concurrent jobs against the same dataset**: undefined
+  behavior. One snap job per dataset.

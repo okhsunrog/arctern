@@ -1,0 +1,43 @@
+[Unit]
+Description=arctern ZFS replication daemon
+Documentation=https://github.com/okhsunrog/arctern
+After=zfs.target network-online.target
+Wants=zfs.target network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/arctern daemon --config /etc/arctern/arctern.toml
+Restart=on-failure
+RestartSec=5s
+
+# Needs root for zfs(8) and to read /var/lib/arctern/{cert,key}.pem (key is 0600).
+User=root
+Group=root
+
+# State (TLS cert + future cursor data) lives here. systemd creates it
+# with mode 0700 if it doesn't exist; arctern keeps key.pem at 0600.
+StateDirectory=arctern
+StateDirectoryMode=0700
+
+# UNIX socket lives under /run; systemd creates it on start, removes on stop.
+RuntimeDirectory=arctern
+RuntimeDirectoryMode=0755
+
+# Logs to stderr -> journald.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=arctern
+
+# Light hardening. Not exhaustive; tighten further once you've verified
+# the daemon works against your config. Do NOT add ProtectSystem=strict
+# without first ensuring StateDirectory + RuntimeDirectory are exempted.
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

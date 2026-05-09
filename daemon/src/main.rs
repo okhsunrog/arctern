@@ -79,7 +79,12 @@ fn main() -> eyre::Result<()> {
 async fn run_stdinserver_dispatch(identity: String, config: PathBuf) -> eyre::Result<()> {
     // The dispatcher logs structured events; pipe them to stderr so
     // sshd's wrapping channel only sees the protocol bytes on stdout.
+    // EnvFilter respects RUST_LOG so operators can crank verbosity for
+    // diagnostics without recompiling.
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt()
+        .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
     stdinserver::dispatch::run(&identity, &config).await
@@ -154,11 +159,15 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
     // Tracing fan-out: stderr fmt for live debugging, SQLite layer for
     // INFO+ persistence. The fmt layer keeps DEBUG/TRACE; the SQLite
     // layer filters those out at `enabled()` so they never reach the DB.
+    use tracing_subscriber::EnvFilter;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let fmt_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
     let sqlite_layer = state::log_events::SqliteLogLayer::new(pool.clone());
     tracing_subscriber::registry()
+        .with(env_filter)
         .with(fmt_layer)
         .with(sqlite_layer)
         .init();

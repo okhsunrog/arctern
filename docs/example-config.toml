@@ -1,0 +1,81 @@
+# arctern.toml — annotated example translating two Go zrepl jobs into
+# arctern's TOML schema. See specs/003-config-and-snap-job/spec.md for
+# the full schema reference.
+#
+# Snapshot tags use `<prefix><RFC3339-utc-no-colons>` (e.g.,
+# `zrepl_20260509T134500Z`). Wire-compatible with Go zrepl per the
+# arctern constitution principle VII — a host migrating from zrepl can
+# keep its existing snapshot history under arctern.
+#
+# IMPORTANT differences from zrepl YAML:
+#
+# 1. The filesystems map `{ "okdata/data/nas": true, ... }` becomes one
+#    `[[jobs.filesystems]]` table per filesystem. Booleans are
+#    inappropriate in TOML for this purpose; explicit per-table `path`
+#    fields are clearer and let us add `recursive` + `exclude` cleanly.
+#
+# 2. zrepl's `path<` recursive include syntax becomes
+#    `recursive = true` plus an explicit `exclude = [...]` array of
+#    paths to skip. To snapshot only the descendants of a recursive
+#    root (not the root itself), include the root path in `exclude`.
+
+# ─── databak: 4-hourly snapshots of three nas/root/home filesystems ──
+
+[[jobs]]
+type = "snap"
+name = "databak"
+
+[[jobs.filesystems]]
+path = "okdata/data/nas"
+[[jobs.filesystems]]
+path = "okdata/data/root"
+[[jobs.filesystems]]
+path = "okdata/data/home"
+
+[jobs.snapshotting]
+type = "periodic"
+interval = "4h"
+prefix = "zrepl_"
+
+# Keep 6 snapshots from the last 24h (one per 4h slot) plus 14 daily
+# snapshots from before that. Snapshots NOT matching `^zrepl_.*` (the
+# user's manual snapshots, snapshots from another tool, etc.) survive
+# unconditionally because the second rule below protects them.
+[[jobs.pruning.keep]]
+type = "grid"
+grid = "6x4h | 14x1d"
+regex = "^zrepl_.*"
+
+# negate = true means "destroy snapshots whose name MATCHES this regex"
+# — so the rule's destroy list is exactly the zrepl_-prefixed ones,
+# and the destroy list across rules is the intersection. Manual
+# snapshots are NOT in this rule's destroy list, so they are NEVER
+# destroyed. This is the standard zrepl idiom paired with a grid rule.
+[[jobs.pruning.keep]]
+type = "regex"
+regex = "^zrepl_.*"
+negate = true
+
+# ─── rootbak: daily snapshots of the system dataset ──────────────────
+
+[[jobs]]
+type = "snap"
+name = "rootbak"
+
+[[jobs.filesystems]]
+path = "okdata/ROOT/default"
+
+[jobs.snapshotting]
+type = "periodic"
+interval = "1d"
+prefix = "zrepl_"
+
+[[jobs.pruning.keep]]
+type = "grid"
+grid = "7x1d"
+regex = "^zrepl_.*"
+
+[[jobs.pruning.keep]]
+type = "regex"
+regex = "^zrepl_.*"
+negate = true

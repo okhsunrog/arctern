@@ -3,3 +3,11 @@ name = "arctern-api"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+
+[dependencies]
+palimpsest = { version = "0.1.0", path = "../../../palimpsest" }
+serde = { version = "1.0.228", features = ["derive"] }
+utoipa = { version = "5.5.0", features = ["preserve_order"] }
+
+[dev-dependencies]
+serde_json = "1.0.149"

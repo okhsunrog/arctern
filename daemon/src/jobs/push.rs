@@ -15,15 +15,17 @@
 
 #![allow(dead_code)]
 
-use arctern_config::SnapshotFilterConfig;
+use arctern_config::{SendFlagsConfig, SnapshotFilterConfig};
 use arctern_transport::{
-    Op, ProtocolError, ReceiveHeader, SnapshotEntry, SnapshotRef, compile_prefix_regex, regex,
-    write_header,
+    Op, ProtocolError, ReceiveHeader, ReceiveResponse, SendFlagsWire, SendHeader, SendKind,
+    SnapshotEntry, SnapshotRef, compile_prefix_regex, read_response, regex, write_header,
 };
 use palimpsest::dataset::ListOptions;
 use palimpsest::models::DatasetType;
 use palimpsest::runner::CommandRunner;
+use palimpsest::send::{SendArgs, send as zfs_send};
 use thiserror::Error;
+use tokio::io::AsyncReadExt;
 
 /// What the planner decided to do for one filesystem this cycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,7 +224,160 @@ pub async fn plan_one_filesystem(
     Ok(pick_plan(&sender, &receiver))
 }
 
-// EXECUTOR + PushJob cycle loop land in T005 + T006.
+#[derive(Debug, Error)]
+pub enum ExecError {
+    #[error("nothing to do")]
+    Nothing,
+    #[error("spawn zfs send: {0}")]
+    SpawnSend(palimpsest::ZfsError),
+    #[error("zfs send failed (exit {exit:?}): {stderr}")]
+    SendFailed { exit: Option<i32>, stderr: String },
+    #[error("io copy stream -> quic: {source}; send stderr: {stderr}")]
+    StreamCopy {
+        #[source]
+        source: std::io::Error,
+        stderr: String,
+    },
+    #[error("wire: {0}")]
+    Wire(#[from] ProtocolError),
+    #[error("quinn: {0}")]
+    Quinn(String),
+    #[error("receiver: {message}")]
+    Receiver { message: String },
+}
+
+/// Build the wire-side SendHeader from a plan + the operator's flag
+/// config. Pure helper, easy to test.
+pub fn build_send_header(plan: &SnapshotPlan, flags: &SendFlagsConfig) -> Option<SendHeader> {
+    let (send_kind, from_snap, to_snap) = match plan {
+        SnapshotPlan::Nothing => return None,
+        SnapshotPlan::Full { to } => (SendKind::Full, None, to.clone()),
+        SnapshotPlan::Incremental { from, to } => {
+            (SendKind::Incremental, Some(from.clone()), to.clone())
+        }
+    };
+    Some(SendHeader {
+        send_kind,
+        from_snap,
+        to_snap,
+        flags: SendFlagsWire {
+            raw: flags.encrypted,
+            embedded: flags.embedded_data,
+            compressed: flags.compressed,
+            large_blocks: flags.large_blocks,
+        },
+    })
+}
+
+/// Build a `palimpsest::send::SendArgs` for the chosen plan against
+/// the sender's dataset path.
+pub fn build_send_args(
+    plan: &SnapshotPlan,
+    sender_dataset: &str,
+    flags: &SendFlagsConfig,
+) -> Option<SendArgs> {
+    let to_full = match plan {
+        SnapshotPlan::Nothing => return None,
+        SnapshotPlan::Full { to } => format!("{sender_dataset}@{}", to.name),
+        SnapshotPlan::Incremental { to, .. } => format!("{sender_dataset}@{}", to.name),
+    };
+    let mut args = SendArgs::new(to_full);
+    if flags.encrypted {
+        args = args.raw();
+    }
+    if flags.embedded_data {
+        args = args.embedded();
+    }
+    if flags.compressed {
+        args = args.compressed();
+    }
+    if flags.large_blocks {
+        args = args.large_blocks();
+    }
+    if let SnapshotPlan::Incremental { from, .. } = plan {
+        args = args.incremental(format!("{sender_dataset}@{}", from.name));
+    }
+    Some(args)
+}
+
+/// Open a SEND stream for one plan, spawn `zfs send` via palimpsest,
+/// pipe its stdout to QUIC, await the receiver's response. Returns
+/// `Ok(())` only if both the send process exits cleanly AND the
+/// receiver replies Ok.
+pub async fn execute_one_plan(
+    runner: &dyn CommandRunner,
+    plan: &SnapshotPlan,
+    target_dataset: &str,
+    sender_dataset: &str,
+    flags: &SendFlagsConfig,
+    connection: &quinn::Connection,
+) -> Result<(), ExecError> {
+    let Some(send_header) = build_send_header(plan, flags) else {
+        return Err(ExecError::Nothing);
+    };
+    let Some(args) = build_send_args(plan, sender_dataset, flags) else {
+        return Err(ExecError::Nothing);
+    };
+
+    let (mut quic_send, mut quic_recv) = connection
+        .open_bi()
+        .await
+        .map_err(|e| ExecError::Quinn(format!("open_bi (send): {e}")))?;
+    let header = ReceiveHeader {
+        version: arctern_transport::PROTOCOL_VERSION,
+        op: Op::Send,
+        target_dataset: target_dataset.to_string(),
+        prefix_regex: None,
+        send: Some(send_header),
+    };
+    write_header(&mut quic_send, &header).await?;
+
+    let mut child = zfs_send(runner, &args).await.map_err(ExecError::SpawnSend)?;
+    let mut child_stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| ExecError::Quinn("no stdout on send child".into()))?;
+    let mut child_stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| ExecError::Quinn("no stderr on send child".into()))?;
+    let stderr_drain = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let _ = child_stderr.read_to_end(&mut buf).await;
+        buf
+    });
+    let copy_res = tokio::io::copy(&mut child_stdout, &mut quic_send).await;
+    quic_send
+        .finish()
+        .map_err(|e| ExecError::Quinn(format!("finish (send): {e}")))?;
+    let stderr_bytes = stderr_drain.await.unwrap_or_default();
+    let exit = child
+        .wait()
+        .await
+        .map_err(|e| ExecError::Quinn(format!("send wait: {e}")))?;
+    if let Err(source) = copy_res {
+        return Err(ExecError::StreamCopy {
+            source,
+            stderr: String::from_utf8_lossy(&stderr_bytes).trim().to_string(),
+        });
+    }
+    if !exit.success() {
+        return Err(ExecError::SendFailed {
+            exit: exit.code(),
+            stderr: String::from_utf8_lossy(&stderr_bytes).trim().to_string(),
+        });
+    }
+
+    // The receiver finishes its send half after writing the response;
+    // read_response consumes until EOF.
+    let resp = read_response(&mut quic_recv).await?;
+    match resp {
+        ReceiveResponse::Ok => Ok(()),
+        ReceiveResponse::Error { message } => Err(ExecError::Receiver { message }),
+    }
+}
+
+// PushJob cycle loop lands in T006.
 
 #[cfg(test)]
 mod tests {
@@ -340,6 +495,77 @@ mod tests {
         assert!(!f.matches("manual_001"));
         // The wire form escapes regex metacharacters in the prefix.
         assert_eq!(f.wire_regex(), Some("^zrepl_"));
+    }
+
+    #[test]
+    fn build_send_header_full_uses_all_default_flags() {
+        let plan = SnapshotPlan::Full {
+            to: s("snap1", 42),
+        };
+        let h = build_send_header(&plan, &SendFlagsConfig::default()).unwrap();
+        assert_eq!(h.send_kind, SendKind::Full);
+        assert!(h.from_snap.is_none());
+        assert_eq!(h.to_snap.guid, 42);
+        assert_eq!(
+            h.flags,
+            SendFlagsWire {
+                raw: true,
+                embedded: true,
+                compressed: true,
+                large_blocks: true
+            }
+        );
+    }
+
+    #[test]
+    fn build_send_header_incremental_carries_from_and_to() {
+        let plan = SnapshotPlan::Incremental {
+            from: s("snap1", 1),
+            to: s("snap2", 2),
+        };
+        let h = build_send_header(&plan, &SendFlagsConfig::default()).unwrap();
+        assert_eq!(h.send_kind, SendKind::Incremental);
+        assert_eq!(h.from_snap.unwrap().guid, 1);
+        assert_eq!(h.to_snap.guid, 2);
+    }
+
+    #[test]
+    fn build_send_header_nothing_yields_none() {
+        assert!(build_send_header(&SnapshotPlan::Nothing, &SendFlagsConfig::default()).is_none());
+    }
+
+    #[test]
+    fn build_send_args_full_with_all_flags() {
+        let plan = SnapshotPlan::Full {
+            to: s("snap1", 1),
+        };
+        let args = build_send_args(&plan, "tank/data", &SendFlagsConfig::default()).unwrap();
+        let v = args.build_args(false).unwrap();
+        // Order matches palimpsest::send::SendArgs::build_args.
+        assert_eq!(v, vec!["send", "-w", "-c", "-L", "-e", "tank/data@snap1"]);
+    }
+
+    #[test]
+    fn build_send_args_incremental_uses_dash_i() {
+        let plan = SnapshotPlan::Incremental {
+            from: s("snap1", 1),
+            to: s("snap2", 2),
+        };
+        let args = build_send_args(&plan, "tank/data", &SendFlagsConfig::default()).unwrap();
+        let v = args.build_args(false).unwrap();
+        assert_eq!(
+            v,
+            vec![
+                "send",
+                "-w",
+                "-c",
+                "-L",
+                "-e",
+                "-i",
+                "tank/data@snap1",
+                "tank/data@snap2"
+            ]
+        );
     }
 
     #[test]

@@ -192,6 +192,26 @@ pub fn spawn_daemon_uds_with_config(
     socket: Option<PathBuf>,
     config: Option<PathBuf>,
 ) -> (Child, PathBuf) {
+    let (child, sock, _quic) = spawn_daemon_full(socket, config, 0);
+    (child, sock)
+}
+
+/// Slice 004: like `spawn_daemon_uds_with_config` but also waits for
+/// `expected_quic` `LISTEN_QUIC <addr>` lines on stdout and returns
+/// them. Use this when the test config declares sink jobs.
+pub fn spawn_daemon_uds_with_quic(
+    socket: Option<PathBuf>,
+    config: Option<PathBuf>,
+    expected_quic: usize,
+) -> (Child, PathBuf, Vec<std::net::SocketAddr>) {
+    spawn_daemon_full(socket, config, expected_quic)
+}
+
+fn spawn_daemon_full(
+    socket: Option<PathBuf>,
+    config: Option<PathBuf>,
+    expected_quic: usize,
+) -> (Child, PathBuf, Vec<std::net::SocketAddr>) {
     let socket_path = socket.unwrap_or_else(|| {
         PathBuf::from(format!("/tmp/arctern_test_{}.sock", unique_suffix()))
     });
@@ -199,7 +219,11 @@ pub fn spawn_daemon_uds_with_config(
 
     let config_path = config.unwrap_or_else(|| {
         let p = PathBuf::from(format!("/tmp/arctern_test_{}.toml", unique_suffix()));
-        std::fs::write(&p, "").expect("write empty config");
+        // Slice 004: state_dir defaults to /var/lib/arctern at the
+        // daemon, which is unwritable by an unprivileged test user.
+        // Steer it under /tmp so empty-config helpers keep working.
+        let state = format!("/tmp/arctern_test_state_{}", unique_suffix());
+        std::fs::write(&p, format!("state_dir = {state:?}\n")).expect("write empty config");
         p
     });
 
@@ -233,23 +257,34 @@ pub fn spawn_daemon_uds_with_config(
 
     let stdout = child.stdout.take().expect("daemon stdout piped");
     let mut reader = BufReader::new(stdout);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(15);
     let mut line = String::new();
+    let mut socket_path: Option<PathBuf> = None;
+    let mut quic: Vec<std::net::SocketAddr> = Vec::new();
     loop {
         if Instant::now() > deadline {
             let _ = child.kill();
-            panic!("daemon did not print LISTEN unix:<path> within 10s");
+            panic!(
+                "daemon did not print LISTEN handshake (got socket={:?}, quic={:?}) within 15s",
+                socket_path, quic
+            );
         }
         line.clear();
         let n = reader.read_line(&mut line).expect("read daemon stdout");
         if n == 0 {
             let _ = child.kill();
-            panic!("daemon stdout closed before LISTEN line");
+            panic!("daemon stdout closed before LISTEN handshake completed");
         }
-        // Path may contain colons or spaces; everything after `unix:` is
-        // taken literally. Split only on the first space.
-        if let Some(rest) = line.trim().strip_prefix("LISTEN unix:") {
-            return (child, PathBuf::from(rest));
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("LISTEN unix:") {
+            socket_path = Some(PathBuf::from(rest));
+        } else if let Some(rest) = trimmed.strip_prefix("LISTEN_QUIC ") {
+            quic.push(rest.parse().expect("LISTEN_QUIC addr parses"));
+        }
+        if let Some(p) = &socket_path
+            && quic.len() >= expected_quic
+        {
+            return (child, p.clone(), quic);
         }
     }
 }

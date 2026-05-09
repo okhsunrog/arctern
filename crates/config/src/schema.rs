@@ -113,10 +113,10 @@ pub struct RecvConfig {
     pub properties: RecvProperties,
 }
 
-/// Mirrors zrepl's `recv.properties.{override, inherit}`. Slice 004
-/// parses + validates these fields but does not yet wire them into
-/// `palimpsest::recv` invocations — that lands in slice 005 alongside
-/// the matching send-side flags (see plan 004 D22).
+/// Mirrors zrepl's `recv.properties.{override, inherit}`. Slice 005
+/// closes the wiring (see slice 005 plan D22 → T008): both fields are
+/// passed to palimpsest's RecvArgs::property_override / property_inherit
+/// builders inside SinkJob::handle_send.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecvProperties {

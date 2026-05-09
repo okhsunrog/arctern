@@ -38,8 +38,12 @@ async fn snap_job_creates_snapshots_and_prunes() {
 
     let prefix = format!("test_{}_", unique_suffix());
     let cfg_path = PathBuf::from(format!("/tmp/arctern_test_snap_{}.toml", unique_suffix()));
+    // Slice 004: explicit state_dir so the daemon does not try to
+    // mkdir /var/lib/arctern as an unprivileged test user.
+    let state_dir = format!("/tmp/arctern_test_state_{}", unique_suffix());
     let cfg = format!(
         r#"
+state_dir = "{state_dir}"
 [[jobs]]
 type = "snap"
 name = "snap_test"

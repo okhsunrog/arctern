@@ -324,8 +324,32 @@ pub async fn plan_one_filesystem(
         return Ok(SnapshotPlan::Nothing);
     }
     let (receiver, token) = fetch_receiver_snaps(connection, target_dataset, filter).await?;
+    // `zfs send -nvt <token>` itself enforces "the snapshots encoded
+    // in this token still exist on the sender" — if the source snap
+    // was pruned between the partial recv and now, decode fails with
+    // `cannot resume send: '<snap>' no longer exists`. Treat any
+    // decode failure as "token is stale" rather than as a hard
+    // planner error: fall through to a fresh Full/Incremental with
+    // discard_partial_recv = true. The sink runs `zfs recv -A` and
+    // accepts the fresh stream. (Matches the spec's stale-token
+    // recovery story; supersedes the slice-006 plan's earlier
+    // "operator-driven recovery on decode failure" stance — zfs
+    // send -nvt's failure mode IS the stale-token signal we need to
+    // act on automatically.)
     let decoded = match token.as_deref() {
-        Some(t) => Some(palimpsest::resume_token::decode(runner, t).await?),
+        Some(t) => match palimpsest::resume_token::decode(runner, t).await {
+            Ok(d) => Some(d),
+            Err(e) => {
+                tracing::info!(
+                    target = %target_dataset,
+                    error = %e,
+                    "push: receiver token failed to decode, treating as stale"
+                );
+                // Fall through to pick_plan_with_discard(true) by
+                // emulating "decoded=None but we still need discard".
+                return Ok(pick_plan_with_discard(&sender, &receiver, true));
+            }
+        },
         None => None,
     };
     Ok(pick_plan_with_token(

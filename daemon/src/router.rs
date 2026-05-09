@@ -1,10 +1,10 @@
 //! Axum router + utoipa OpenAPI doc.
 
-use axum::{Json, Router, routing::get};
+use axum::{Json, Router, middleware, routing::get};
 use utoipa::OpenApi;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use crate::handlers;
+use crate::{auth, handlers};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -21,8 +21,13 @@ pub fn build_router() -> Router {
         .routes(routes!(handlers::datasets::list_datasets))
         .split_for_parts();
 
-    router.route(
-        "/api-docs/openapi.json",
-        get(move || async move { Json(api.clone()) }),
-    )
+    router
+        .route(
+            "/api-docs/openapi.json",
+            get(move || async move { Json(api.clone()) }),
+        )
+        // Layer the entire router (including the OpenAPI doc) so every
+        // route inherits the same-uid check by construction. New routes
+        // do not need to remember to opt in.
+        .layer(middleware::from_fn(auth::enforce_same_uid))
 }

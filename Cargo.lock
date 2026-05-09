@@ -89,6 +89,7 @@ dependencies = [
  "axum",
  "clap",
  "eyre",
+ "libc",
  "palimpsest",
  "reqwest",
  "serde",

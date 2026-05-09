@@ -165,6 +165,14 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
                 manager.spawn(job.clone(), ctx.clone());
                 sinks.push(job);
             }
+            arctern_config::JobConfig::Push(_) => {
+                // Wired in T006 (PushJob construction + cycle loop).
+                // This stub keeps T003 + T004 + T005 commits independently
+                // buildable; the explicit unimplemented! prevents a daemon
+                // started against a push-job config from silently doing
+                // nothing.
+                unimplemented!("push job is wired in T006 of slice 005");
+            }
         }
     }
 

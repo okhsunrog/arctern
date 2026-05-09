@@ -17,8 +17,9 @@ pub mod schema;
 pub use grid::{GridParseError, GridSpec, KeepCount, RetentionInterval, SnapshotEntry};
 pub use prune::{PruneError, evaluate as evaluate_keep_rules};
 pub use schema::{
-    Config, FilesystemFilter, JobConfig, KeepRule, PruningConfig, RecvConfig, RecvProperties,
-    SinkJobConfig, SnapJobConfig, SnapshottingConfig,
+    Config, FilesystemFilter, JobConfig, KeepRule, PruningConfig, PushJobConfig, PushTarget,
+    RecvConfig, RecvProperties, SendFlagsConfig, SinkJobConfig, SnapJobConfig,
+    SnapshotFilterConfig, SnapshottingConfig,
 };
 
 #[derive(Debug, Error)]
@@ -69,9 +70,69 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
         match job {
             JobConfig::Snap(s) => validate_snap(i, s)?,
             JobConfig::Sink(s) => validate_sink(i, s)?,
+            JobConfig::Push(s) => validate_push(i, s)?,
         }
     }
     validate_sink_listen_overlaps(cfg)?;
+    Ok(())
+}
+
+fn validate_push(idx: usize, s: &PushJobConfig) -> Result<(), String> {
+    if s.name.is_empty() {
+        return Err(format!("jobs[{idx}].name: must not be empty"));
+    }
+    if s.target.root_fs.is_empty() {
+        return Err(format!("jobs[{idx}].target.root_fs: must not be empty"));
+    }
+    if s.target.root_fs.starts_with('/') || s.target.root_fs.ends_with('/') {
+        return Err(format!(
+            "jobs[{idx}].target.root_fs: {:?} must not start or end with '/'",
+            s.target.root_fs
+        ));
+    }
+    // Reuse snap's filesystem-filter validation. The shapes are identical;
+    // calling through validate_snap would also try to read pruning, so we
+    // walk filesystems explicitly here.
+    for (fi, f) in s.filesystems.iter().enumerate() {
+        if !f.exclude.is_empty() && !f.recursive {
+            return Err(format!(
+                "jobs[{idx}].filesystems[{fi}]: exclude requires recursive = true"
+            ));
+        }
+        if f.recursive {
+            for (ei, e) in f.exclude.iter().enumerate() {
+                let same = e == &f.path;
+                let descendant = e.starts_with(&format!("{}/", f.path));
+                if !(same || descendant) {
+                    return Err(format!(
+                        "jobs[{idx}].filesystems[{fi}].exclude[{ei}]: {e:?} is not a descendant of {:?}",
+                        f.path
+                    ));
+                }
+            }
+        }
+    }
+    // Snapshot filter: exactly one of prefix xor regex.
+    match (&s.snapshot_filter.prefix, &s.snapshot_filter.regex) {
+        (None, None) => {
+            return Err(format!(
+                "jobs[{idx}].snapshot_filter: exactly one of prefix or regex required"
+            ));
+        }
+        (Some(_), Some(_)) => {
+            return Err(format!(
+                "jobs[{idx}].snapshot_filter: prefix and regex are mutually exclusive"
+            ));
+        }
+        (None, Some(re)) => {
+            if let Err(e) = regex::Regex::new(re) {
+                return Err(format!(
+                    "jobs[{idx}].snapshot_filter.regex: {re:?}: {e}"
+                ));
+            }
+        }
+        (Some(_), None) => {}
+    }
     Ok(())
 }
 
@@ -471,6 +532,200 @@ root_fs = "tank/b"
             c.state_dir.as_deref().map(|p| p.display().to_string()),
             Some("/var/lib/arctern".to_string())
         );
+    }
+
+    const PUSH_OK: &str = r#"
+[[jobs]]
+type = "push"
+name = "push_to_server"
+connect = "10.77.77.100:8888"
+interval = "15m"
+[[jobs.filesystems]]
+path = "okdata/data/home"
+[jobs.target]
+root_fs = "okdata/backups/laptop"
+[jobs.snapshot_filter]
+prefix = "zrepl_"
+"#;
+
+    #[test]
+    fn minimal_push_parses() {
+        let c = parse(PUSH_OK).unwrap();
+        let JobConfig::Push(p) = &c.jobs[0] else {
+            panic!("expected Push")
+        };
+        assert_eq!(p.name, "push_to_server");
+        assert_eq!(p.connect.port(), 8888);
+        assert_eq!(p.target.root_fs, "okdata/backups/laptop");
+        assert_eq!(p.snapshot_filter.prefix.as_deref(), Some("zrepl_"));
+        assert_eq!(p.server_name, "arctern");
+    }
+
+    #[test]
+    fn push_send_flags_default_true_when_omitted() {
+        let c = parse(PUSH_OK).unwrap();
+        let JobConfig::Push(p) = &c.jobs[0] else {
+            panic!("expected Push")
+        };
+        assert!(p.send.encrypted);
+        assert!(p.send.embedded_data);
+        assert!(p.send.compressed);
+        assert!(p.send.large_blocks);
+    }
+
+    #[test]
+    fn push_send_flags_can_be_overridden() {
+        let s = r#"
+[[jobs]]
+type = "push"
+name = "p"
+connect = "127.0.0.1:1"
+interval = "1s"
+[[jobs.filesystems]]
+path = "tank/data"
+[jobs.target]
+root_fs = "tank/sink"
+[jobs.send]
+encrypted = false
+[jobs.snapshot_filter]
+prefix = "x_"
+"#;
+        let c = parse(s).unwrap();
+        let JobConfig::Push(p) = &c.jobs[0] else {
+            panic!("expected Push")
+        };
+        assert!(!p.send.encrypted);
+        assert!(p.send.embedded_data);
+    }
+
+    #[test]
+    fn push_filter_neither_prefix_nor_regex_rejected() {
+        let s = r#"
+[[jobs]]
+type = "push"
+name = "p"
+connect = "127.0.0.1:1"
+interval = "1s"
+[[jobs.filesystems]]
+path = "tank/data"
+[jobs.target]
+root_fs = "tank/sink"
+[jobs.snapshot_filter]
+"#;
+        let err = parse(s).unwrap_err();
+        assert!(format!("{err}").contains("exactly one"));
+    }
+
+    #[test]
+    fn push_filter_both_prefix_and_regex_rejected() {
+        let s = r#"
+[[jobs]]
+type = "push"
+name = "p"
+connect = "127.0.0.1:1"
+interval = "1s"
+[[jobs.filesystems]]
+path = "tank/data"
+[jobs.target]
+root_fs = "tank/sink"
+[jobs.snapshot_filter]
+prefix = "zrepl_"
+regex = "^zrepl_.*"
+"#;
+        let err = parse(s).unwrap_err();
+        assert!(format!("{err}").contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn push_bad_regex_rejected() {
+        let s = r#"
+[[jobs]]
+type = "push"
+name = "p"
+connect = "127.0.0.1:1"
+interval = "1s"
+[[jobs.filesystems]]
+path = "tank/data"
+[jobs.target]
+root_fs = "tank/sink"
+[jobs.snapshot_filter]
+regex = "("
+"#;
+        assert!(parse(s).is_err());
+    }
+
+    #[test]
+    fn push_bad_root_fs_rejected() {
+        for root in &["", "/tank", "tank/"] {
+            let s = format!(
+                r#"
+[[jobs]]
+type = "push"
+name = "p"
+connect = "127.0.0.1:1"
+interval = "1s"
+[[jobs.filesystems]]
+path = "tank/data"
+[jobs.target]
+root_fs = "{root}"
+[jobs.snapshot_filter]
+prefix = "x_"
+"#
+            );
+            let err = parse(&s).unwrap_err();
+            assert!(format!("{err}").contains("root_fs"), "expected root_fs error for {root:?}");
+        }
+    }
+
+    #[test]
+    fn push_bad_connect_rejected() {
+        let s = r#"
+[[jobs]]
+type = "push"
+name = "p"
+connect = "not-a-socket-addr"
+interval = "1s"
+[[jobs.filesystems]]
+path = "tank/data"
+[jobs.target]
+root_fs = "tank/sink"
+[jobs.snapshot_filter]
+prefix = "x_"
+"#;
+        assert!(parse(s).is_err());
+    }
+
+    #[test]
+    fn push_bad_interval_rejected() {
+        let s = r#"
+[[jobs]]
+type = "push"
+name = "p"
+connect = "127.0.0.1:1"
+interval = "4 fortnights"
+[[jobs.filesystems]]
+path = "tank/data"
+[jobs.target]
+root_fs = "tank/sink"
+[jobs.snapshot_filter]
+prefix = "x_"
+"#;
+        assert!(parse(s).is_err());
+    }
+
+    #[test]
+    fn push_filter_as_regex_str_escapes_prefix() {
+        let f = SnapshotFilterConfig {
+            prefix: Some("zrepl_".into()),
+            regex: None,
+        };
+        assert_eq!(f.as_regex_str().as_deref(), Some("^zrepl_"));
+        // Special regex chars in the prefix must be escaped.
+        let f = SnapshotFilterConfig {
+            prefix: Some("a.b".into()),
+            regex: None,
+        };
+        assert_eq!(f.as_regex_str().as_deref(), Some("^a\\.b"));
     }
 
     #[test]

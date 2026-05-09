@@ -29,6 +29,7 @@ pub struct Config {
 pub enum JobConfig {
     Snap(SnapJobConfig),
     Sink(SinkJobConfig),
+    Push(PushJobConfig),
 }
 
 impl JobConfig {
@@ -36,6 +37,7 @@ impl JobConfig {
         match self {
             JobConfig::Snap(s) => &s.name,
             JobConfig::Sink(s) => &s.name,
+            JobConfig::Push(s) => &s.name,
         }
     }
 }
@@ -124,4 +126,102 @@ pub struct RecvProperties {
     /// `-x property` inheritance — drop the property from the stream.
     #[serde(default)]
     pub inherit: Vec<String>,
+}
+
+/// Push job — active sender. Each cycle, lists local matching snapshots
+/// per filesystem, opens a QUIC LIST request to the peer to learn what
+/// it already has, intersects by GUID, and emits a full or incremental
+/// `zfs send` over a second QUIC stream into the peer's sink.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PushJobConfig {
+    pub name: String,
+    /// Sink peer's QUIC address. One peer per push job; multi-peer
+    /// fan-out is one job per peer (deferred to a later slice).
+    pub connect: SocketAddr,
+    /// How often the planner cycle fires. The wakeup endpoint
+    /// (POST /api/v1/jobs/{name}/wakeup) re-enters the cycle on demand.
+    #[serde(with = "humantime_serde")]
+    pub interval: Duration,
+    /// SNI sent at QUIC handshake time. Defaults to "arctern" — the
+    /// CN/SAN baked into transport's self-signed cert. The accept-any
+    /// verifier doesn't actually check SAN, but rustls still requires
+    /// a legal SNI string.
+    #[serde(default = "default_server_name")]
+    pub server_name: String,
+    pub filesystems: Vec<FilesystemFilter>,
+    pub target: PushTarget,
+    #[serde(default)]
+    pub send: SendFlagsConfig,
+    pub snapshot_filter: SnapshotFilterConfig,
+}
+
+fn default_server_name() -> String {
+    "arctern".into()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PushTarget {
+    /// Receiver-side root. Target dataset = `<root_fs>/<sender_path>`
+    /// (literal concatenation, no path stripping). Documented in
+    /// docs/example-config.toml.
+    pub root_fs: String,
+}
+
+/// `zfs send` replication flags. All four default `true` because the
+/// canonical zrepl push job uses all four; off-by-default would force
+/// most operators to type a 5-line block to get behaviour they want
+/// anyway.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SendFlagsConfig {
+    #[serde(default = "yes")]
+    pub encrypted: bool,
+    #[serde(default = "yes")]
+    pub embedded_data: bool,
+    #[serde(default = "yes")]
+    pub compressed: bool,
+    #[serde(default = "yes")]
+    pub large_blocks: bool,
+}
+
+impl Default for SendFlagsConfig {
+    fn default() -> Self {
+        Self {
+            encrypted: true,
+            embedded_data: true,
+            compressed: true,
+            large_blocks: true,
+        }
+    }
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// Per-job snapshot filter. Exactly one of `prefix` (sugar for
+/// `^<prefix>`) or `regex` must be present — enforced in `validate`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotFilterConfig {
+    #[serde(default)]
+    pub prefix: Option<String>,
+    #[serde(default)]
+    pub regex: Option<String>,
+}
+
+impl SnapshotFilterConfig {
+    /// Materialise the filter as a regex string ready to send on the
+    /// wire (and to compile on the planner side). `prefix = "zrepl_"`
+    /// becomes `^zrepl_`. `regex` passes through verbatim. Returns
+    /// `None` if neither is set; xor-validation in `validate_push`
+    /// makes that path unreachable from a valid config.
+    pub fn as_regex_str(&self) -> Option<String> {
+        if let Some(p) = &self.prefix {
+            return Some(format!("^{}", regex::escape(p)));
+        }
+        self.regex.clone()
+    }
 }

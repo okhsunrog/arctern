@@ -7,10 +7,12 @@
 pub mod protocol;
 
 pub use protocol::{
-    ListResponse, MAX_HEADER_LEN, Op, PROTOCOL_VERSION, ProtocolError, ReceiveHeader,
-    ReceiveResponse, SendFlagsWire, SendHeader, SendKind, SnapshotEntry, SnapshotRef,
-    compile_prefix_regex, read_header, read_list_response, read_response, write_header,
-    write_list_response, write_response,
+    EventWire, ErrorCode, JobStatusWire, ListResponse, MAX_FRAME_LEN, MAX_HEADER_LEN, Op,
+    PROTOCOL_VERSION, ProtocolError, ReceiveHeader, ReceiveResponse, RecvHeader, Request,
+    RequestFrame, Response, ResponseFrame, SendFlagsWire, SendHeader, SendKind, SnapshotEntry,
+    SnapshotRef, compile_prefix_regex, control_codec, read_frame, read_header, read_list_response,
+    read_request, read_response, recv_header_codec, write_frame, write_header,
+    write_list_response, write_request, write_response,
 };
 pub use regex;
 

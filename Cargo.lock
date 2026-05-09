@@ -128,11 +128,13 @@ dependencies = [
 name = "arctern-transport"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "regex",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

@@ -99,8 +99,10 @@ root_fs = "{sink_root}"
         server_addr,
         ReceiveHeader {
             version: PROTOCOL_VERSION,
+            op: arctern_transport::Op::Send,
             target_dataset: target_dataset.clone(),
-            send_flags: None,
+            prefix_regex: None,
+            send: None,
         },
         send_bytes,
     )

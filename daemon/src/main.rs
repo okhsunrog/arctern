@@ -165,6 +165,11 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
                 manager.spawn(job.clone(), ctx.clone());
                 sinks.push(job);
             }
+            arctern_config::JobConfig::Push(s) => {
+                let job = jobs::push::PushJob::new(s)
+                    .map_err(|e| eyre::eyre!("push job filter regex: {e}"))?;
+                manager.spawn(Arc::new(job), ctx.clone());
+            }
         }
     }
 

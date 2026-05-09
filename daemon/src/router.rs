@@ -29,6 +29,7 @@ pub fn build_router(manager: Arc<JobManager>) -> Router {
         .routes(routes!(handlers::datasets::list_datasets))
         .routes(routes!(handlers::snapshots::create_snapshot))
         .routes(routes!(handlers::jobs::list_jobs))
+        .routes(routes!(handlers::jobs::wakeup))
         .with_state(manager)
         .split_for_parts();
 

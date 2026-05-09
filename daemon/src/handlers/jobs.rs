@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use arctern_api::JobStatus;
-use axum::{Json, extract::State};
+use axum::{Json, extract::Path, extract::State, http::StatusCode};
 use time::format_description::well_known::Rfc3339;
 
 use crate::jobs::JobManager;
@@ -30,4 +30,25 @@ pub async fn list_jobs(State(manager): State<Arc<JobManager>>) -> Json<Vec<JobSt
         })
         .collect();
     Json(out)
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/jobs/{name}/wakeup",
+    tag = "jobs",
+    params(("name" = String, Path, description = "Job name as declared in arctern.toml")),
+    responses(
+        (status = 204, description = "Job's cycle loop was woken up"),
+        (status = 404, description = "No job with that name is registered"),
+    ),
+)]
+pub async fn wakeup(
+    State(manager): State<Arc<JobManager>>,
+    Path(name): Path<String>,
+) -> StatusCode {
+    if manager.wakeup_by_name(&name) {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    }
 }

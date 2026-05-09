@@ -79,3 +79,58 @@ regex = "^zrepl_.*"
 type = "regex"
 regex = "^zrepl_.*"
 negate = true
+
+# ─── push_to_local: replicate snapshots to a sink peer ──────────────
+#
+# This is the active sender side. The peer ("10.77.77.100:8888")
+# runs an arctern daemon with a `[[jobs]] type = "sink"` block
+# bound to the same port. WireGuard sits underneath; the QUIC TLS
+# layer accepts any cert (constitution V — WG is the perimeter).
+#
+# Path mapping is literal concatenation:
+#   sender path  okdata/data/home
+#   target.root_fs  okdata/backups/laptop
+#   becomes      okdata/backups/laptop/okdata/data/home
+# on the receiver. NO path stripping. The full sender path is
+# preserved under the receiver's root_fs so a single sink can host
+# many sender peers without name collisions.
+#
+# `interval` is the planner-cycle interval — the snap job above
+# decides snapshot frequency. The push job's only job is to ferry
+# whatever the sender currently has across to the receiver. Use
+# `POST /api/v1/jobs/push_to_local/wakeup` (or the dashboard
+# button) to trigger an immediate cycle.
+
+[[jobs]]
+type = "push"
+name = "push_to_local"
+connect = "10.77.77.100:8888"
+interval = "15m"
+# server_name defaults to "arctern" — matches the sink's self-signed
+# cert CN. Override only if the peer is using a different identity.
+
+[[jobs.filesystems]]
+path = "okdata/data/home"
+[[jobs.filesystems]]
+path = "okdata/data/nas"
+[[jobs.filesystems]]
+path = "okdata/data/root"
+
+[jobs.target]
+root_fs = "okdata/backups/laptop"
+
+# All four flags default true — they map to `zfs send -w -e -c -L`
+# which is what zrepl's canonical push job uses. Set `encrypted = false`
+# only if the source dataset isn't encrypted and you want the receiver
+# to see the property values in cleartext.
+[jobs.send]
+encrypted = true
+embedded_data = true
+compressed = true
+large_blocks = true
+
+# Exactly one of `prefix` (sugar for `^<escaped>`) or `regex`. The
+# planner only considers snapshots matching this filter — keeps user-
+# created or system-created snapshots out of the replication loop.
+[jobs.snapshot_filter]
+prefix = "zrepl_"

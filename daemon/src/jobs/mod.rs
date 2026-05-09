@@ -5,6 +5,7 @@
 //! Slice 003 introduces this; only `SnapJob` implements it. Future
 //! slices add push/pull/source/sink as siblings.
 
+pub mod push;
 pub mod sink;
 pub mod snap;
 
@@ -47,6 +48,10 @@ pub trait Job: Send + Sync + 'static {
         ctx: JobContext,
         cancel: CancellationToken,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+    /// Wake the job's cycle loop early. Default no-op so kinds that
+    /// don't have a cycle (sink — event-driven) absorb the call
+    /// harmlessly. Snap and push override.
+    fn wakeup(&self) {}
 }
 
 struct JobHandle {
@@ -54,18 +59,7 @@ struct JobHandle {
     kind: &'static str,
     cancel: CancellationToken,
     task: JoinHandle<()>,
-    status_ref: Arc<dyn StatusRead>,
-}
-
-trait StatusRead: Send + Sync {
-    fn read(&self) -> JobStatusInner;
-}
-
-struct JobStatusFromJob<J: Job + ?Sized>(Arc<J>);
-impl<J: Job + ?Sized> StatusRead for JobStatusFromJob<J> {
-    fn read(&self) -> JobStatusInner {
-        self.0.status()
-    }
+    job: Arc<dyn Job>,
 }
 
 /// Owned by the daemon's `AppState`; cloned (via `Arc`) into the HTTP
@@ -98,13 +92,13 @@ impl JobManager {
         let task = tokio::spawn(async move {
             job_for_task.run(ctx, cancel_for_task).await;
         });
-        let status_ref: Arc<dyn StatusRead> = Arc::new(JobStatusFromJob(job));
+        let job_dyn: Arc<dyn Job> = job;
         self.handles.lock().unwrap().push(JobHandle {
             name,
             kind,
             cancel,
             task,
-            status_ref,
+            job: job_dyn,
         });
     }
 
@@ -113,8 +107,21 @@ impl JobManager {
             .lock()
             .unwrap()
             .iter()
-            .map(|h| (h.name.clone(), h.kind, h.status_ref.read()))
+            .map(|h| (h.name.clone(), h.kind, h.job.status()))
             .collect()
+    }
+
+    /// Trigger the named job's `wakeup()`. Returns false if no job
+    /// with that name is registered. Cheap to call (microseconds for
+    /// the lookup + a `Notify::notify_one`).
+    pub fn wakeup_by_name(&self, name: &str) -> bool {
+        let handles = self.handles.lock().unwrap();
+        if let Some(h) = handles.iter().find(|h| h.name == name) {
+            h.job.wakeup();
+            true
+        } else {
+            false
+        }
     }
 
     /// Trigger every cancellation token, then wait up to `deadline`
@@ -143,6 +150,7 @@ mod tests {
 
     struct NoopJob {
         flag: AtomicBool,
+        woken: AtomicBool,
     }
 
     impl Job for NoopJob {
@@ -154,6 +162,9 @@ mod tests {
         }
         fn status(&self) -> JobStatusInner {
             JobStatusInner::default()
+        }
+        fn wakeup(&self) {
+            self.woken.store(true, Ordering::SeqCst);
         }
         fn run(
             self: Arc<Self>,
@@ -184,6 +195,7 @@ mod tests {
         let mgr = JobManager::new();
         let job = Arc::new(NoopJob {
             flag: AtomicBool::new(false),
+            woken: AtomicBool::new(false),
         });
         mgr.spawn(
             job.clone(),
@@ -193,5 +205,34 @@ mod tests {
         );
         mgr.shutdown(Duration::from_secs(2)).await;
         assert!(job.flag.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn wakeup_by_name_dispatches_to_named_job() {
+        struct FakeRunner;
+        #[async_trait::async_trait]
+        impl CommandRunner for FakeRunner {
+            async fn run(
+                &self,
+                _cmd: palimpsest::runner::Cmd,
+            ) -> Result<std::process::Output, std::io::Error> {
+                unreachable!()
+            }
+        }
+        let mgr = JobManager::new();
+        let job = Arc::new(NoopJob {
+            flag: AtomicBool::new(false),
+            woken: AtomicBool::new(false),
+        });
+        mgr.spawn(
+            job.clone(),
+            JobContext {
+                runner: Arc::new(FakeRunner) as Arc<dyn CommandRunner>,
+            },
+        );
+        assert!(mgr.wakeup_by_name("noop"));
+        assert!(!mgr.wakeup_by_name("does-not-exist"));
+        assert!(job.woken.load(Ordering::SeqCst));
+        mgr.shutdown(Duration::from_secs(2)).await;
     }
 }

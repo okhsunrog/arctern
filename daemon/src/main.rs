@@ -80,15 +80,47 @@ fn main() -> eyre::Result<()> {
 async fn run_stdinserver_dispatch(identity: String, config: PathBuf) -> eyre::Result<()> {
     // The dispatcher logs structured events; pipe them to stderr so
     // sshd's wrapping channel only sees the protocol bytes on stdout.
-    // EnvFilter respects RUST_LOG so operators can crank verbosity for
-    // diagnostics without recompiling.
+    // EnvFilter respects RUST_LOG so operators can crank verbosity.
+    // The SQLite layer mirrors INFO+ events into the per-host state.db
+    // so the receiver-side SubscribeEvents handler can stream them back.
     use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    // Resolve config + state_dir up front so the subscriber has access
+    // to the same SQLite the daemon writes to. A failure to open the
+    // pool falls back to stderr-only tracing so the dispatch still runs.
+    let cfg = arctern_config::load_from_path(&config)
+        .map_err(|e| eyre::eyre!("config load: {e}"))?;
+    let state_dir = cfg
+        .state_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("/var/lib/arctern"));
+    let pool = match state::open(&state_dir).await {
+        Ok(p) => Some(Arc::new(p)),
+        Err(e) => {
+            eprintln!("stdinserver-dispatch: state open failed ({e}); continuing without SQLite event log");
+            None
+        }
+    };
+
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .init();
-    stdinserver::dispatch::run(&identity, &config).await
+    let fmt_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
+    if let Some(p) = pool.clone() {
+        let sqlite_layer = state::log_events::SqliteLogLayer::new(p);
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt_layer)
+            .with(sqlite_layer)
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt_layer)
+            .init();
+    }
+
+    stdinserver::dispatch::run_with(&identity, cfg, pool).await
 }
 
 /// Resolve the socket path the daemon should bind to.

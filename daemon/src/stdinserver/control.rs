@@ -12,14 +12,16 @@ use std::sync::Arc;
 
 use arctern_config::{AllowedClient, Config};
 use arctern_transport::{
-    ErrorCode, JobStatusWire, Request, RequestFrame, Response, ResponseFrame, SnapshotEntry,
-    compile_prefix_regex, read_request, write_response,
+    ErrorCode, EventWire, JobStatusWire, Request, RequestFrame, Response, ResponseFrame,
+    SnapshotEntry, compile_prefix_regex, read_request, write_response,
 };
+use palimpsest::ZfsError;
 use palimpsest::dataset::ListOptions;
 use palimpsest::models::DatasetType;
 use palimpsest::runner::CommandRunner;
-use palimpsest::ZfsError;
-use tokio::io::{AsyncRead, AsyncWrite, BufWriter};
+use sqlx::SqlitePool;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufWriter};
+use tokio::sync::Mutex;
 
 /// Run the control channel until stdin EOF or a fatal write error.
 /// `acl` scopes destroy / discard operations; `runner` is the
@@ -29,54 +31,144 @@ pub async fn run<R, W>(
     runner: Arc<dyn CommandRunner>,
     config: Arc<Config>,
     acl: AllowedClient,
+    pool: Option<Arc<SqlitePool>>,
     mut reader: R,
     writer: W,
 ) -> std::io::Result<()>
 where
     R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
 {
-    let mut writer = BufWriter::new(writer);
-    loop {
+    // Stdout is shared between the main request/response loop and any
+    // background SubscribeEvents pusher; serialise writes through one
+    // mutex so frames never interleave on the wire.
+    let writer = Arc::new(Mutex::new(BufWriter::new(writer)));
+    let mut event_pushers: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    let result = loop {
         let frame: RequestFrame = match read_request(&mut reader).await {
             Ok(f) => f,
-            Err(arctern_transport::ProtocolError::UnexpectedEof) => return Ok(()),
+            Err(arctern_transport::ProtocolError::UnexpectedEof) => break Ok(()),
             Err(arctern_transport::ProtocolError::Io(e))
                 if e.kind() == std::io::ErrorKind::UnexpectedEof =>
             {
-                return Ok(());
+                break Ok(());
             }
             Err(e) => {
                 tracing::warn!(error = %e, "control: bad request frame; closing channel");
-                return Ok(());
+                break Ok(());
             }
         };
         let RequestFrame { id, body } = frame;
         if matches!(body, Request::Shutdown) {
-            // Reply Ok then exit so the caller sees the ack before EOF.
             let resp = ResponseFrame {
                 request_id: Some(id),
                 body: Response::Ok,
             };
-            let _ = write_response(&mut writer, &resp).await;
-            use tokio::io::AsyncWriteExt;
-            let _ = writer.flush().await;
-            return Ok(());
+            let mut w = writer.lock().await;
+            let _ = write_response(&mut *w, &resp).await;
+            let _ = w.flush().await;
+            break Ok(());
         }
-        let resp_body = dispatch(runner.as_ref(), &config, &acl, body).await;
+        // SubscribeEvents is special: reply Ok immediately, then spawn
+        // a background task that polls log_events and writes Event
+        // frames into the shared writer.
+        if let Request::SubscribeEvents { since } = &body {
+            let since = since.unwrap_or(0);
+            match pool.clone() {
+                Some(p) => {
+                    let resp = ResponseFrame {
+                        request_id: Some(id),
+                        body: Response::Ok,
+                    };
+                    {
+                        let mut w = writer.lock().await;
+                        let _ = write_response(&mut *w, &resp).await;
+                        let _ = w.flush().await;
+                    }
+                    let writer_for_task = writer.clone();
+                    event_pushers.push(tokio::spawn(async move {
+                        push_events(p, since, writer_for_task).await;
+                    }));
+                    continue;
+                }
+                None => {
+                    let resp = ResponseFrame {
+                        request_id: Some(id),
+                        body: Response::Error {
+                            code: ErrorCode::Internal,
+                            message: "stdinserver has no SQLite log layer".into(),
+                        },
+                    };
+                    let mut w = writer.lock().await;
+                    let _ = write_response(&mut *w, &resp).await;
+                    let _ = w.flush().await;
+                    continue;
+                }
+            }
+        }
+        let resp_body = dispatch(runner.as_ref(), &config, &acl, pool.as_deref(), body).await;
         let resp = ResponseFrame {
             request_id: Some(id),
             body: resp_body,
         };
-        if let Err(e) = write_response(&mut writer, &resp).await {
+        let mut w = writer.lock().await;
+        if let Err(e) = write_response(&mut *w, &resp).await {
             tracing::warn!(error = %e, "control: write_response failed; closing");
-            return Ok(());
+            break Ok(());
         }
-        use tokio::io::AsyncWriteExt;
-        if let Err(e) = writer.flush().await {
+        if let Err(e) = w.flush().await {
             tracing::warn!(error = %e, "control: flush failed; closing");
-            return Ok(());
+            break Ok(());
         }
+    };
+    for h in event_pushers {
+        h.abort();
+    }
+    result
+}
+
+/// Background task: poll log_events for new rows since `since` and push
+/// them as Event frames (request_id = None) until the writer breaks.
+async fn push_events<W>(
+    pool: Arc<SqlitePool>,
+    mut since: u64,
+    writer: Arc<Mutex<BufWriter<W>>>,
+) where
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    use std::time::Duration;
+    let poll_interval = Duration::from_millis(500);
+    loop {
+        let rows = match crate::state::log_events::since(&pool, since as i64, 256).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "control: log_events poll failed");
+                tokio::time::sleep(poll_interval).await;
+                continue;
+            }
+        };
+        for row in &rows {
+            let ev = EventWire {
+                id: row.id as u64,
+                timestamp: row.timestamp,
+                level: row.level.clone(),
+                job_name: row.job_name.clone(),
+                message: row.message.clone(),
+            };
+            let frame = ResponseFrame {
+                request_id: None,
+                body: Response::Event(ev),
+            };
+            let mut w = writer.lock().await;
+            if write_response(&mut *w, &frame).await.is_err() {
+                return;
+            }
+            if w.flush().await.is_err() {
+                return;
+            }
+            since = row.id as u64;
+        }
+        tokio::time::sleep(poll_interval).await;
     }
 }
 
@@ -84,6 +176,7 @@ async fn dispatch(
     runner: &dyn CommandRunner,
     _config: &Config,
     acl: &AllowedClient,
+    pool: Option<&SqlitePool>,
     req: Request,
 ) -> Response {
     match req {
@@ -109,11 +202,17 @@ async fn dispatch(
             code: ErrorCode::NotFound,
             message: "WakeupJob not yet implemented on the receiver".into(),
         },
-        Request::SubscribeEvents { since: _ } => Response::Error {
-            code: ErrorCode::Internal,
-            message: "SubscribeEvents requires the SSE bridge (step 11)".into(),
+        Request::SubscribeEvents { .. } => unreachable!("handled in run()"),
+        Request::GetLogCursor => match pool {
+            Some(p) => match crate::state::log_events::cursor(p).await {
+                Ok(id) => Response::GetLogCursorOk { id: id as u64 },
+                Err(e) => Response::Error {
+                    code: ErrorCode::Internal,
+                    message: format!("log_events cursor: {e}"),
+                },
+            },
+            None => Response::GetLogCursorOk { id: 0 },
         },
-        Request::GetLogCursor => Response::GetLogCursorOk { id: 0 },
         Request::Shutdown => unreachable!("handled in run()"),
     }
 }
@@ -330,7 +429,7 @@ mod tests {
         let (areader, awriter) = tokio::io::split(a);
         let (mut breader, mut bwriter) = tokio::io::split(b);
         let server =
-            tokio::spawn(async move { run(runner, cfg(), acl, areader, awriter).await });
+            tokio::spawn(async move { run(runner, cfg(), acl, None, areader, awriter).await });
         let frame = RequestFrame { id: 1, body: req };
         write_request(&mut bwriter, &frame).await.unwrap();
         // Send Shutdown to make the server exit cleanly after the reply.

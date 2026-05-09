@@ -35,12 +35,23 @@ pub enum DispatchError {
 }
 
 /// Top-level entry. Loads config, parses argv + env, validates ACL,
-/// dispatches. Stub: control/recv handlers come in steps 7/8.
+/// dispatches. Test/legacy callers without a SQLite pool use this entry.
+#[allow(dead_code)]
 pub async fn run(identity: &str, config_path: &Path) -> eyre::Result<()> {
-    let original = std::env::var("SSH_ORIGINAL_COMMAND").unwrap_or_default();
     let config = arctern_config::load_from_path(config_path)
         .map_err(|e| eyre::eyre!("config load: {e}"))?;
+    run_with(identity, config, None).await
+}
 
+/// Entry used by main.rs once it has resolved config + opened the
+/// optional SQLite pool. Splitting this out keeps the subscriber setup
+/// (which needs the pool) and the dispatch logic in one process tree.
+pub async fn run_with(
+    identity: &str,
+    config: Config,
+    pool: Option<Arc<sqlx::SqlitePool>>,
+) -> eyre::Result<()> {
+    let original = std::env::var("SSH_ORIGINAL_COMMAND").unwrap_or_default();
     let action = match decide(identity, &original, &config) {
         Ok(a) => a,
         Err(e) => {
@@ -58,7 +69,7 @@ pub async fn run(identity: &str, config_path: &Path) -> eyre::Result<()> {
             tracing::info!(identity, job, "stdinserver control: opening channel");
             let stdin = tokio::io::stdin();
             let stdout = tokio::io::stdout();
-            super::control::run(runner, config, acl, stdin, stdout)
+            super::control::run(runner, config, acl, pool, stdin, stdout)
                 .await
                 .map_err(|e| eyre::eyre!("control channel: {e}"))?;
             Ok(())

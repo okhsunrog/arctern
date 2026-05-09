@@ -327,10 +327,6 @@ where
     Ok(serde_json::from_slice(&body)?)
 }
 
-// Backwards-compatible thin wrappers used by the legacy code paths.
-// They are typed to the SSH-pivot frame shapes (RequestFrame / RecvHeader)
-// rather than the deleted ReceiveHeader / ReceiveResponse pair.
-
 pub async fn write_header<W: AsyncWrite + Unpin>(
     w: &mut W,
     h: &RecvHeader,
@@ -366,70 +362,6 @@ pub async fn write_request<W: AsyncWrite + Unpin>(
 
 pub async fn read_request<R: AsyncRead + Unpin>(r: &mut R) -> Result<RequestFrame, ProtocolError> {
     read_frame(r).await
-}
-
-// ─── Compatibility shims (legacy LIST response shape) ──────────────
-//
-// These are kept as thin aliases so push.rs's planner module — which
-// still imports them — keeps compiling. Step 9 deletes the imports;
-// the aliases evaporate naturally then.
-
-pub type ListResponse = LegacyListResponse;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum LegacyListResponse {
-    Ok {
-        snapshots: Vec<SnapshotEntry>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        receive_resume_token: Option<String>,
-    },
-    Error {
-        message: String,
-    },
-}
-
-pub async fn write_list_response<W: AsyncWrite + Unpin>(
-    w: &mut W,
-    r: &LegacyListResponse,
-) -> Result<(), ProtocolError> {
-    write_frame(w, r).await
-}
-
-pub async fn read_list_response<R: AsyncRead + Unpin>(
-    r: &mut R,
-) -> Result<LegacyListResponse, ProtocolError> {
-    read_frame(r).await
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum ReceiveResponse {
-    Ok,
-    Error { message: String },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Op {
-    Send,
-    List,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReceiveHeader {
-    pub version: u32,
-    #[serde(default = "default_op")]
-    pub op: Op,
-    pub target_dataset: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefix_regex: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub send: Option<SendHeader>,
-}
-
-fn default_op() -> Op {
-    Op::Send
 }
 
 #[cfg(test)]

@@ -82,6 +82,51 @@ pub async fn cursor(pool: &SqlitePool) -> Result<i64, StateError> {
     Ok(v.unwrap_or(0))
 }
 
+/// Spawn a background task that polls `log_events` every 500ms and
+/// broadcasts each new row as `arctern_api::LogEvent` to subscribers.
+/// Stops when `cancel` fires.
+pub fn spawn_poller(
+    pool: Arc<SqlitePool>,
+    sender: tokio::sync::broadcast::Sender<arctern_api::LogEvent>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    use std::time::Duration;
+    tokio::spawn(async move {
+        // Start from the current cursor — the broadcast is for live
+        // events; backlog replay is the SSE handler's job (it queries
+        // `since` directly before subscribing).
+        let mut cursor = cursor(&pool).await.unwrap_or(0);
+        let interval = Duration::from_millis(500);
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return,
+                _ = tokio::time::sleep(interval) => {}
+            }
+            let rows = match since(&pool, cursor, 256).await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("log_events poller: {e}");
+                    continue;
+                }
+            };
+            for row in rows {
+                cursor = row.id;
+                let ev = arctern_api::LogEvent {
+                    id: row.id as u64,
+                    timestamp: row.timestamp,
+                    level: row.level,
+                    job_name: row.job_name,
+                    message: row.message,
+                };
+                // Best-effort send; if there are no subscribers the
+                // broadcast::Sender swallows the value harmlessly.
+                let _ = sender.send(ev);
+            }
+        }
+    })
+}
+
 /// Trim rows older than `cutoff_unix_seconds` (typically `now - 24h`).
 pub async fn trim_older_than(
     pool: &SqlitePool,

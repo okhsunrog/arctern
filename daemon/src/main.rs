@@ -257,9 +257,19 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
         }
     }
 
+    // Local SSE broadcast: a poller drains new log_events rows every
+    // 500ms and fans them out to subscribed handlers.
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<arctern_api::LogEvent>(256);
+    let events_cancel = tokio_util::sync::CancellationToken::new();
+    let events_poller = state::log_events::spawn_poller(
+        pool.clone(),
+        events_tx.clone(),
+        events_cancel.clone(),
+    );
     let app_state = app_state::AppState {
         manager: manager.clone(),
         peers: peers_state.clone(),
+        events: events_tx,
     };
     let app = router::build_router(app_state);
 
@@ -290,6 +300,8 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
     for h in reconnect_handles {
         let _ = h.await;
     }
+    events_cancel.cancel();
+    let _ = events_poller.await;
     let _ = std::fs::remove_file(&cleanup_path);
     result?;
     Ok(())

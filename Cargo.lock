@@ -132,6 +132,7 @@ dependencies = [
  "chrono",
  "clap",
  "eyre",
+ "futures-util",
  "libc",
  "openssh",
  "palimpsest",
@@ -141,6 +142,7 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
@@ -2184,6 +2186,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

@@ -6,7 +6,7 @@ Wants=zfs.target network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/arctern daemon --config /etc/arctern/arctern.toml
+ExecStart=/usr/local/bin/arctern daemon --config /etc/arctern/arctern.toml --socket /run/arctern/arctern.sock
 Restart=on-failure
 RestartSec=5s
 

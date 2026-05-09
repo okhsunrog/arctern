@@ -123,9 +123,8 @@ Should show one snapshot. Wait 4 hours and re-check; should show two.
 Inspect job state via the local API:
 
 ```bash
-# socat is the easiest way to talk to the UDS
-socat -U TCP-LISTEN:8765,reuseaddr,fork UNIX-CONNECT:/run/arctern/arctern.sock &
-curl -s http://127.0.0.1:8765/api/v1/jobs | jq .
+# curl speaks UDS directly with --unix-socket; no socat tunneling needed.
+curl -s --unix-socket /run/arctern/arctern.sock http://localhost/api/v1/jobs | jq .
 ```
 
 (Or use `arctern-client` if you've built it.)

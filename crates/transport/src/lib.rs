@@ -10,8 +10,9 @@ pub mod tls;
 
 pub use identity::{TransportIdentity, load_or_generate_identity};
 pub use protocol::{
-    MAX_HEADER_LEN, PROTOCOL_VERSION, ProtocolError, ReceiveHeader, ReceiveResponse, SendFlags,
-    read_header, read_response, write_header, write_response,
+    ListResponse, MAX_HEADER_LEN, Op, PROTOCOL_VERSION, ProtocolError, ReceiveHeader,
+    ReceiveResponse, SendFlagsWire, SendHeader, SendKind, SnapshotEntry, SnapshotRef, read_header,
+    read_list_response, read_response, write_header, write_list_response, write_response,
 };
 pub use tls::{ALPN, client_config_accept_any, server_config};
 

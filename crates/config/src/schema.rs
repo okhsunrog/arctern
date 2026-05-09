@@ -3,15 +3,23 @@
 //! the mapping. `#[serde(deny_unknown_fields)]` everywhere so a typo in
 //! the operator's file fails loud, not silent.
 
+use std::collections::BTreeMap;
+use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Deserialize;
 
 use crate::grid::GridSpec;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Where the daemon stores per-host state (TLS identity, future
+    /// replication cursors). The daemon resolves `None` to its hard-
+    /// coded default `/var/lib/arctern` (see daemon main).
+    #[serde(default)]
+    pub state_dir: Option<PathBuf>,
     #[serde(default)]
     pub jobs: Vec<JobConfig>,
 }
@@ -20,12 +28,14 @@ pub struct Config {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum JobConfig {
     Snap(SnapJobConfig),
+    Sink(SinkJobConfig),
 }
 
 impl JobConfig {
     pub fn name(&self) -> &str {
         match self {
             JobConfig::Snap(s) => &s.name,
+            JobConfig::Sink(s) => &s.name,
         }
     }
 }
@@ -79,4 +89,39 @@ pub enum KeepRule {
         #[serde(default)]
         negate: bool,
     },
+}
+
+/// Sink job — passive receiver. Binds a QUIC listener on `listen` and
+/// writes inbound `zfs send` streams under `root_fs` (target dataset
+/// path comes from the wire header).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SinkJobConfig {
+    pub name: String,
+    pub listen: SocketAddr,
+    pub root_fs: String,
+    #[serde(default)]
+    pub recv: RecvConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecvConfig {
+    #[serde(default)]
+    pub properties: RecvProperties,
+}
+
+/// Mirrors zrepl's `recv.properties.{override, inherit}`. Slice 004
+/// parses + validates these fields but does not yet wire them into
+/// `palimpsest::recv` invocations — that lands in slice 005 alongside
+/// the matching send-side flags (see plan 004 D22).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecvProperties {
+    /// `-o property=value` overrides applied at recv time.
+    #[serde(default, rename = "override")]
+    pub overrides: BTreeMap<String, String>,
+    /// `-x property` inheritance — drop the property from the stream.
+    #[serde(default)]
+    pub inherit: Vec<String>,
 }

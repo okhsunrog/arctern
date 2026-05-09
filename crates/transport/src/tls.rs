@@ -33,7 +33,9 @@ pub fn server_config(identity: &TransportIdentity) -> Result<quinn::ServerConfig
     // ALPN — match what the client_config below advertises.
     tls.alpn_protocols = vec![ALPN.to_vec()];
     let qsc = QuicServerConfig::try_from(tls).map_err(|e| TransportError::Rustls(e.to_string()))?;
-    Ok(quinn::ServerConfig::with_crypto(Arc::new(qsc)))
+    let mut sc = quinn::ServerConfig::with_crypto(Arc::new(qsc));
+    sc.transport_config(transport_config());
+    Ok(sc)
 }
 
 pub fn client_config_accept_any() -> Result<quinn::ClientConfig, TransportError> {
@@ -45,7 +47,27 @@ pub fn client_config_accept_any() -> Result<quinn::ClientConfig, TransportError>
         .with_no_client_auth();
     tls.alpn_protocols = vec![ALPN.to_vec()];
     let qcc = QuicClientConfig::try_from(tls).map_err(|e| TransportError::Rustls(e.to_string()))?;
-    Ok(quinn::ClientConfig::new(Arc::new(qcc)))
+    let mut cc = quinn::ClientConfig::new(Arc::new(qcc));
+    cc.transport_config(transport_config());
+    Ok(cc)
+}
+
+/// Shared QUIC transport config for both ends. quinn's defaults give
+/// ~30 s max_idle_timeout, which closes the connection during a
+/// long-lived `zfs send`/recv pump if no application-level data
+/// happens to flow within the window (the SSH-mediated test runner
+/// makes this trivially reproducible; production WG links can hit
+/// the same edge during a multi-GB initial bootstrap). Bump to
+/// 10 minutes and enable a 30 s keep-alive so the connection stays
+/// up across slow batches without spamming the network.
+fn transport_config() -> Arc<quinn::TransportConfig> {
+    let mut t = quinn::TransportConfig::default();
+    t.max_idle_timeout(Some(
+        quinn::IdleTimeout::try_from(std::time::Duration::from_secs(600))
+            .expect("600 s fits in QUIC's idle-timeout encoding"),
+    ));
+    t.keep_alive_interval(Some(std::time::Duration::from_secs(30)));
+    Arc::new(t)
 }
 
 /// Application-Layer Protocol Negotiation byte string. The exact value

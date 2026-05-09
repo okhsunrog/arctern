@@ -76,6 +76,14 @@ pub struct SendHeader {
     pub from_snap: Option<SnapshotRef>,
     pub to_snap: SnapshotRef,
     pub flags: SendFlagsWire,
+    /// Sink-side directive: when true, run `palimpsest::recv::abort_partial`
+    /// on `target_dataset` before spawning the new `zfs recv`. Set by the
+    /// planner when a stale resume token is present on the receiver and
+    /// the chosen plan is a fresh Full / Incremental rather than a
+    /// continuation of the partial. Default `false` for slice-005 wire
+    /// compatibility (a slice-005 sender omits the field).
+    #[serde(default)]
+    pub discard_partial_recv: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +91,12 @@ pub struct SendHeader {
 pub enum SendKind {
     Full,
     Incremental,
+    /// `zfs send -t <token>` resume of a prior partial recv. The wire
+    /// `from_snap` is None and `to_snap` carries the decoded token's
+    /// to-snapshot identity for logging only — the sink does not
+    /// validate it (the actual stream content is determined by the
+    /// token, not the header).
+    Resume,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -112,8 +126,21 @@ pub enum ReceiveResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ListResponse {
-    Ok { snapshots: Vec<SnapshotEntry> },
-    Error { message: String },
+    Ok {
+        snapshots: Vec<SnapshotEntry>,
+        /// Receiver-side `receive_resume_token` user property for the
+        /// queried dataset, if a partial `zfs recv -s` is in flight.
+        /// `None` means no partial OR the dataset doesn't exist yet
+        /// (D19 — token query failures inside the sink are also
+        /// soft-mapped to None so the planner can fall through).
+        /// Slice-005 senders/sinks omit this field; serde defaults to
+        /// `None` on the way in and skips on the way out.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receive_resume_token: Option<String>,
+    },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -293,6 +320,7 @@ mod tests {
                     compressed: true,
                     large_blocks: true,
                 },
+                discard_partial_recv: false,
             }),
         };
         let mut buf = Vec::new();
@@ -325,6 +353,7 @@ mod tests {
                     compressed: false,
                     large_blocks: true,
                 },
+                discard_partial_recv: false,
             }),
         };
         let mut buf = Vec::new();
@@ -349,6 +378,7 @@ mod tests {
                     createtxg: 9,
                 },
             ],
+            receive_resume_token: None,
         };
         let mut buf = Vec::new();
         write_list_response(&mut buf, &r).await.unwrap();
@@ -437,9 +467,124 @@ mod tests {
                 guid: 1,
                 createtxg: 2,
             }],
+            receive_resume_token: None,
         };
         let s = serde_json::to_string(&r).unwrap();
+        // The token field is `skip_serializing_if = "Option::is_none"`,
+        // so a None token does not appear on the wire — matches the
+        // slice-005 byte shape exactly for backward compat.
         assert_eq!(s, r#"{"status":"ok","snapshots":[{"name":"s","guid":1,"createtxg":2}]}"#);
+    }
+
+    /// T001 — slice-005 wire shape (no `receive_resume_token` field)
+    /// must deserialize cleanly with the field defaulting to None.
+    #[test]
+    fn list_response_default_token_is_none() {
+        let json = r#"{"status":"ok","snapshots":[]}"#;
+        let r: ListResponse = serde_json::from_str(json).unwrap();
+        match r {
+            ListResponse::Ok { snapshots, receive_resume_token } => {
+                assert!(snapshots.is_empty());
+                assert_eq!(receive_resume_token, None);
+            }
+            _ => panic!("expected Ok"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_response_with_token_roundtrip() {
+        let r = ListResponse::Ok {
+            snapshots: vec![],
+            receive_resume_token: Some(
+                "1-bada404f7-b8-789c636064000310a500c4ec50360710e72765a526973".into(),
+            ),
+        };
+        let mut buf = Vec::new();
+        write_list_response(&mut buf, &r).await.unwrap();
+        let mut cur = Cursor::new(buf);
+        let back = read_list_response(&mut cur).await.unwrap();
+        assert_eq!(back, r);
+    }
+
+    /// T001 — slice-005 SendHeader (no `discard_partial_recv` field)
+    /// deserializes with `false` so old senders keep working.
+    #[tokio::test]
+    async fn send_header_default_discard_is_false() {
+        let body = br#"{"version":1,"target_dataset":"tank/sink/data","send":{"send_kind":"full","to_snap":{"name":"s","guid":1},"flags":{"raw":true,"embedded":true,"compressed":true,"large_blocks":true}}}"#;
+        let mut buf = Vec::new();
+        let len = (body.len() as u32).to_be_bytes();
+        buf.extend_from_slice(&len);
+        buf.extend_from_slice(body);
+        let mut cur = Cursor::new(buf);
+        let h = read_header(&mut cur).await.unwrap();
+        let send = h.send.expect("send header present");
+        assert!(!send.discard_partial_recv);
+    }
+
+    #[tokio::test]
+    async fn send_header_with_discard_roundtrip() {
+        let h = ReceiveHeader {
+            version: 1,
+            op: Op::Send,
+            target_dataset: "tank/sink/data".into(),
+            prefix_regex: None,
+            send: Some(SendHeader {
+                send_kind: SendKind::Full,
+                from_snap: None,
+                to_snap: SnapshotRef {
+                    name: "snap1".into(),
+                    guid: 42,
+                },
+                flags: SendFlagsWire {
+                    raw: true,
+                    embedded: true,
+                    compressed: true,
+                    large_blocks: true,
+                },
+                discard_partial_recv: true,
+            }),
+        };
+        let mut buf = Vec::new();
+        write_header(&mut buf, &h).await.unwrap();
+        let mut cur = Cursor::new(buf);
+        let back = read_header(&mut cur).await.unwrap();
+        assert_eq!(back, h);
+    }
+
+    #[tokio::test]
+    async fn send_header_resume_kind_roundtrip() {
+        let h = ReceiveHeader {
+            version: 1,
+            op: Op::Send,
+            target_dataset: "tank/sink/data".into(),
+            prefix_regex: None,
+            send: Some(SendHeader {
+                send_kind: SendKind::Resume,
+                from_snap: None,
+                to_snap: SnapshotRef {
+                    name: "tank/data@snap1".into(),
+                    guid: 0xd3b96c8266d7cfe6,
+                },
+                flags: SendFlagsWire {
+                    raw: true,
+                    embedded: true,
+                    compressed: true,
+                    large_blocks: true,
+                },
+                discard_partial_recv: false,
+            }),
+        };
+        let mut buf = Vec::new();
+        write_header(&mut buf, &h).await.unwrap();
+        let mut cur = Cursor::new(buf);
+        let back = read_header(&mut cur).await.unwrap();
+        assert_eq!(back, h);
+    }
+
+    #[test]
+    fn send_kind_resume_serializes_as_lowercase() {
+        let s = serde_json::to_string(&SendKind::Resume).unwrap();
+        assert_eq!(s, r#""resume""#);
     }
 
     /// D19 risk verification: serde_json must round-trip a u64 GUID

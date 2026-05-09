@@ -35,6 +35,7 @@ pub const KIND: &str = "snap";
 pub struct SnapJob {
     config: SnapJobConfig,
     status: Mutex<JobStatusInner>,
+    wakeup: Arc<tokio::sync::Notify>,
 }
 
 impl SnapJob {
@@ -42,6 +43,7 @@ impl SnapJob {
         Self {
             config,
             status: Mutex::new(JobStatusInner::default()),
+            wakeup: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -76,6 +78,9 @@ impl Job for SnapJob {
     fn status(&self) -> JobStatusInner {
         self.status.lock().unwrap().clone()
     }
+    fn wakeup(&self) {
+        self.wakeup.notify_one();
+    }
     fn run(
         self: Arc<Self>,
         ctx: JobContext,
@@ -96,6 +101,7 @@ impl Job for SnapJob {
                     tokio::select! {
                         _ = cancel.cancelled() => break,
                         _ = sleep(interval) => {}
+                        _ = self.wakeup.notified() => {}
                     }
                     let result = self.run_cycle(&ctx).await;
                     let last_err = result.err();

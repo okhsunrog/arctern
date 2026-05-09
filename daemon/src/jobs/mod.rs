@@ -48,6 +48,10 @@ pub trait Job: Send + Sync + 'static {
         ctx: JobContext,
         cancel: CancellationToken,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+    /// Wake the job's cycle loop early. Default no-op so kinds that
+    /// don't have a cycle (sink — event-driven) absorb the call
+    /// harmlessly. Snap and push override.
+    fn wakeup(&self) {}
 }
 
 struct JobHandle {
@@ -55,18 +59,7 @@ struct JobHandle {
     kind: &'static str,
     cancel: CancellationToken,
     task: JoinHandle<()>,
-    status_ref: Arc<dyn StatusRead>,
-}
-
-trait StatusRead: Send + Sync {
-    fn read(&self) -> JobStatusInner;
-}
-
-struct JobStatusFromJob<J: Job + ?Sized>(Arc<J>);
-impl<J: Job + ?Sized> StatusRead for JobStatusFromJob<J> {
-    fn read(&self) -> JobStatusInner {
-        self.0.status()
-    }
+    job: Arc<dyn Job>,
 }
 
 /// Owned by the daemon's `AppState`; cloned (via `Arc`) into the HTTP
@@ -99,13 +92,13 @@ impl JobManager {
         let task = tokio::spawn(async move {
             job_for_task.run(ctx, cancel_for_task).await;
         });
-        let status_ref: Arc<dyn StatusRead> = Arc::new(JobStatusFromJob(job));
+        let job_dyn: Arc<dyn Job> = job;
         self.handles.lock().unwrap().push(JobHandle {
             name,
             kind,
             cancel,
             task,
-            status_ref,
+            job: job_dyn,
         });
     }
 
@@ -114,8 +107,21 @@ impl JobManager {
             .lock()
             .unwrap()
             .iter()
-            .map(|h| (h.name.clone(), h.kind, h.status_ref.read()))
+            .map(|h| (h.name.clone(), h.kind, h.job.status()))
             .collect()
+    }
+
+    /// Trigger the named job's `wakeup()`. Returns false if no job
+    /// with that name is registered. Cheap to call (microseconds for
+    /// the lookup + a `Notify::notify_one`).
+    pub fn wakeup_by_name(&self, name: &str) -> bool {
+        let handles = self.handles.lock().unwrap();
+        if let Some(h) = handles.iter().find(|h| h.name == name) {
+            h.job.wakeup();
+            true
+        } else {
+            false
+        }
     }
 
     /// Trigger every cancellation token, then wait up to `deadline`

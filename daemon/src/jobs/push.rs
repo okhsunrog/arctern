@@ -9,11 +9,23 @@
 //! re-exports than it saves; the surface stays inside one file
 //! together with its tests.
 //!
-//! T004 lands the planner only — the executor consumes `PlanError`,
-//! `plan_one_filesystem`, etc. in T005, so the dead_code allowance
-//! holds the bin compileable until then.
+//! T004 landed the planner; T005 the executor; T006 wires both into
+//! a PushJob with cycle loop + wakeup.
 
-#![allow(dead_code)]
+use std::net::Ipv4Addr;
+use std::pin::Pin;
+use std::sync::Mutex;
+use std::sync::Arc;
+use std::time::Duration as StdDuration;
+
+use arctern_config::{FilesystemFilter, PushJobConfig};
+use arctern_transport::client_config_accept_any;
+use time::OffsetDateTime;
+use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
+use tracing::{Instrument, info_span, warn};
+
+use super::{Job, JobContext, JobStatusInner};
 
 use arctern_config::{SendFlagsConfig, SnapshotFilterConfig};
 use arctern_transport::{
@@ -377,7 +389,187 @@ pub async fn execute_one_plan(
     }
 }
 
-// PushJob cycle loop lands in T006.
+pub const KIND: &str = arctern_api::JOB_KIND_PUSH;
+
+pub struct PushJob {
+    config: PushJobConfig,
+    filter: CompiledFilter,
+    status: Mutex<JobStatusInner>,
+    wakeup: Arc<tokio::sync::Notify>,
+}
+
+impl PushJob {
+    pub fn new(config: PushJobConfig) -> Result<Self, regex::Error> {
+        let filter = CompiledFilter::from_config(&config.snapshot_filter)?;
+        Ok(Self {
+            config,
+            filter,
+            status: Mutex::new(JobStatusInner::default()),
+            wakeup: Arc::new(tokio::sync::Notify::new()),
+        })
+    }
+
+    fn record_cycle(&self, last_error: Option<String>, interval: StdDuration) {
+        let mut s = self.status.lock().unwrap();
+        let now = OffsetDateTime::now_utc();
+        s.last_run = Some(now);
+        s.next_run = Some(now + time::Duration::try_from(interval).unwrap_or(time::Duration::ZERO));
+        s.last_error = last_error;
+    }
+}
+
+impl Job for PushJob {
+    fn name(&self) -> &str {
+        &self.config.name
+    }
+    fn kind(&self) -> &'static str {
+        KIND
+    }
+    fn status(&self) -> JobStatusInner {
+        self.status.lock().unwrap().clone()
+    }
+    fn wakeup(&self) {
+        self.wakeup.notify_one();
+    }
+    fn run(
+        self: Arc<Self>,
+        ctx: JobContext,
+        cancel: CancellationToken,
+    ) -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        let span = info_span!("push_job", name = %self.config.name);
+        Box::pin(
+            async move {
+                let interval = self.config.interval;
+                loop {
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        _ = sleep(interval) => {}
+                        _ = self.wakeup.notified() => {}
+                    }
+                    let outcome = self.run_cycle(&ctx).await;
+                    self.record_cycle(outcome.err(), interval);
+                }
+            }
+            .instrument(span),
+        )
+    }
+}
+
+impl PushJob {
+    async fn run_cycle(&self, ctx: &JobContext) -> Result<(), String> {
+        // Open one QUIC connection per cycle, used across every
+        // configured filesystem in declared order. Closing at the end
+        // of the cycle keeps connection state from leaking across
+        // cycle boundaries (next cycle starts with a fresh handshake).
+        let mut endpoint = quinn::Endpoint::client((Ipv4Addr::UNSPECIFIED, 0).into())
+            .map_err(|e| format!("client endpoint: {e}"))?;
+        let client_cfg = client_config_accept_any()
+            .map_err(|e| format!("client TLS config: {e}"))?;
+        endpoint.set_default_client_config(client_cfg);
+        let connection = endpoint
+            .connect(self.config.connect, &self.config.server_name)
+            .map_err(|e| format!("connect {} ({}): {e}", self.config.connect, self.config.server_name))?
+            .await
+            .map_err(|e| format!("handshake {}: {e}", self.config.connect))?;
+
+        let runner = ctx.runner.as_ref();
+        let mut errors: Vec<String> = Vec::new();
+        let sender_paths = self.expand_filesystems(runner).await.map_err(|e| {
+            format!("expand filesystems: {e}")
+        })?;
+        for sender_path in &sender_paths {
+            // D5/FR-005: literal concat — target = root_fs/sender_path.
+            let target = format!("{}/{}", self.config.target.root_fs, sender_path);
+            tracing::info!(sender = %sender_path, target = %target, "push: planning");
+            let plan = match plan_one_filesystem(
+                runner,
+                sender_path,
+                &target,
+                &self.filter,
+                &connection,
+            )
+            .await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    let msg = format!("plan {sender_path}: {e}");
+                    warn!(error = %msg);
+                    errors.push(msg);
+                    continue;
+                }
+            };
+            match &plan {
+                SnapshotPlan::Nothing => {
+                    tracing::info!(sender = %sender_path, "push: nothing to do");
+                    continue;
+                }
+                SnapshotPlan::Full { to } => {
+                    tracing::info!(sender = %sender_path, to = %to.name, "push: full send");
+                }
+                SnapshotPlan::Incremental { from, to } => {
+                    tracing::info!(
+                        sender = %sender_path, from = %from.name, to = %to.name,
+                        "push: incremental send"
+                    );
+                }
+            }
+            if let Err(e) = execute_one_plan(
+                runner,
+                &plan,
+                &target,
+                sender_path,
+                &self.config.send,
+                &connection,
+            )
+            .await
+            {
+                let msg = format!("execute {sender_path}: {e}");
+                warn!(error = %msg);
+                errors.push(msg);
+            }
+        }
+
+        connection.close(0u32.into(), b"cycle done");
+        endpoint.wait_idle().await;
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+
+    /// Resolve the configured `[[jobs.filesystems]]` entries into
+    /// concrete sender dataset paths. Reuses the same
+    /// recursive+exclude semantics as snap by querying palimpsest's
+    /// dataset list per declared filter.
+    async fn expand_filesystems(
+        &self,
+        runner: &dyn CommandRunner,
+    ) -> Result<Vec<String>, String> {
+        let mut pools: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        for f in &self.config.filesystems {
+            let pool = f.path.split('/').next().unwrap_or(&f.path).to_string();
+            pools.insert(pool);
+        }
+        let opts = ListOptions {
+            recursive: true,
+            types: vec![DatasetType::Filesystem, DatasetType::Volume],
+            roots: pools.into_iter().collect(),
+            ..ListOptions::default()
+        };
+        let entries = palimpsest::dataset::list(runner, &opts)
+            .await
+            .map_err(|e| format!("list datasets: {e}"))?;
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        Ok(
+            arctern_config::filter::resolve_all(&self.config.filesystems, &names)
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        )
+    }
+}
 
 #[cfg(test)]
 mod tests {

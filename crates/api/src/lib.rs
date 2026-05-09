@@ -48,6 +48,19 @@ pub struct ApiErrorBody {
     pub message: String,
 }
 
+/// Request body for `POST /api/v1/datasets/{name}/snapshots`. The path
+/// segment carries the parent dataset; this struct carries everything
+/// else. `recursive` and `properties` default so a minimal client can
+/// post `{"snapshot_name":"…"}` and get the common case.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct CreateSnapshotRequest {
+    pub snapshot_name: String,
+    #[serde(default)]
+    pub recursive: bool,
+    #[serde(default)]
+    pub properties: BTreeMap<String, String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,6 +82,31 @@ mod tests {
         let s = DatasetSummary::from(list_entry("tank", palimpsest::models::DatasetType::Filesystem));
         assert_eq!(s.name, "tank");
         assert_eq!(s.dataset_type, "filesystem");
+    }
+
+    #[test]
+    fn create_snapshot_request_defaults() {
+        let req: CreateSnapshotRequest =
+            serde_json::from_str(r#"{"snapshot_name":"s1"}"#).unwrap();
+        assert_eq!(req.snapshot_name, "s1");
+        assert!(!req.recursive);
+        assert!(req.properties.is_empty());
+    }
+
+    #[test]
+    fn create_snapshot_request_full_roundtrip() {
+        let req = CreateSnapshotRequest {
+            snapshot_name: "manual-2026-05-09".into(),
+            recursive: true,
+            properties: [("user:reason".to_string(), "manual".to_string())]
+                .into_iter()
+                .collect(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: CreateSnapshotRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.snapshot_name, req.snapshot_name);
+        assert!(back.recursive);
+        assert_eq!(back.properties.get("user:reason").map(String::as_str), Some("manual"));
     }
 
     #[test]

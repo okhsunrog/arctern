@@ -323,14 +323,72 @@ pub async fn destroy_peer_snapshot(
     }
 }
 
-// LogEvent appears in OpenAPI via the events SSE handler in events.rs.
-// Re-export here so the type registers under the peers tag too.
-#[allow(dead_code)]
-fn _log_event_marker(_: LogEvent) {}
+/// `GET /api/v1/peers/{peer}/events` — proxied SSE. Sends
+/// SubscribeEvents to the peer's control channel and yields each
+/// pushed Event frame as an SSE frame.
+#[utoipa::path(
+    get,
+    path = "/api/v1/peers/{peer}/events",
+    tag = "peers",
+    params(("peer" = String, Path, description = "Peer name from [[peers]]")),
+    responses(
+        (status = 200, description = "SSE stream of LogEvent JSON frames from the peer"),
+        (status = 404, description = "No such peer", body = ApiErrorBody),
+        (status = 503, description = "Peer not currently connected", body = ApiErrorBody),
+    ),
+)]
+pub async fn stream_peer_events(
+    State(state): State<AppState>,
+    Path(peer): Path<String>,
+) -> Result<
+    axum::response::Sse<
+        impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+    >,
+    (StatusCode, HeaderMap, Json<ApiErrorBody>),
+> {
+    use std::time::Duration;
+    use axum::response::Sse;
+    use axum::response::sse::{Event, KeepAlive};
+    use tokio_stream::StreamExt;
+    use tokio_stream::wrappers::BroadcastStream;
 
-// Unused-import suppressors keep IntoResponse available if step 11
-// extends this module to render error variants directly.
+    let link = require_link(&state, &peer).await?;
+    // Subscribe before sending the SubscribeEvents request so we don't
+    // miss frames pushed between the request landing and our subscribe.
+    let rx = link.subscribe_events();
+    let resp = link
+        .rpc(Request::SubscribeEvents { since: None })
+        .await
+        .map_err(|e| rpc_error_to_http(format!("{e}")))?;
+    if let Response::Error { code, message } = resp {
+        return Err(map_response_error(code, message));
+    }
+    let stream = BroadcastStream::new(rx).filter_map(|r| match r {
+        Ok(ev) => {
+            let api_ev = LogEvent {
+                id: ev.id,
+                timestamp: ev.timestamp,
+                level: ev.level,
+                job_name: ev.job_name,
+                message: ev.message,
+            };
+            let payload = serde_json::to_string(&api_ev).unwrap_or_else(|_| "{}".into());
+            Some(Ok(Event::default().id(api_ev.id.to_string()).data(payload)))
+        }
+        Err(_) => None,
+    });
+    Ok(Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keep-alive"),
+    ))
+}
+
+// Unused-import suppressors keep IntoResponse + PeerLink available
+// for ergonomic re-use in subsequent handlers.
 #[allow(dead_code)]
 fn _into_response_marker(r: impl IntoResponse) -> axum::response::Response {
     r.into_response()
 }
+#[allow(dead_code)]
+fn _peer_link_marker(_: Arc<PeerLink>) {}

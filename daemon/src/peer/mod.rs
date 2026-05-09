@@ -106,6 +106,13 @@ impl PeerLink {
         self.control.send(req).await
     }
 
+    /// Subscribe to server-pushed Event frames on this peer's control
+    /// channel. New subscribers see events that arrive after they
+    /// subscribe; backlog replay is the SSE bridge's responsibility.
+    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<arctern_transport::EventWire> {
+        self.control.subscribe_events()
+    }
+
     /// Open a fresh recv channel to the receiver, write the RecvHeader,
     /// and return the channel (caller pipes the `zfs send` byte stream
     /// into `stdin`, then awaits `finish` to get the receiver's final

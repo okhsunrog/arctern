@@ -38,6 +38,7 @@ pub fn build_router(state: AppState) -> Router {
         .routes(routes!(handlers::peers::wakeup_peer_job))
         .routes(routes!(handlers::peers::list_peer_snapshots))
         .routes(routes!(handlers::peers::destroy_peer_snapshot))
+        .routes(routes!(handlers::peers::stream_peer_events))
         .routes(routes!(handlers::events::stream_events))
         .with_state(state)
         .split_for_parts();

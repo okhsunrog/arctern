@@ -23,6 +23,7 @@ mod error;
 mod handlers;
 mod jobs;
 mod router;
+mod state;
 
 #[derive(Parser, Debug)]
 #[command(name = "arctern", version, about = "ZFS replication daemon")]
@@ -80,14 +81,6 @@ fn resolve_socket_path(arg: Option<PathBuf>) -> PathBuf {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::Result<()> {
-    // Tracing on stderr — stdout is reserved for the LISTEN handshake
-    // line (a single line then unused; integration tests close their
-    // read end of the pipe immediately after parsing it). Writing
-    // tracing to stdout produces "broken pipe" warnings under tests.
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .init();
-
     // Load and validate the config BEFORE binding any socket — fail
     // loudly if the operator's file is missing or malformed.
     let config = arctern_config::load_from_path(&config_path)
@@ -117,8 +110,8 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
             eyre::eyre!("PALIMPSEST_SSH_TARGET configuration: {e}")
         })?);
 
-    // Resolve the state directory and ensure it exists; future steps
-    // park SQLite + tracing layer state under this path.
+    // Resolve the state directory and ensure it exists; SQLite + the
+    // tracing layer's table both live under this path.
     let state_dir = config
         .state_dir
         .clone()
@@ -127,9 +120,28 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
         eyre::eyre!("create state_dir {}: {e}", state_dir.display())
     })?;
 
+    let pool = Arc::new(
+        state::open(&state_dir)
+            .await
+            .map_err(|e| eyre::eyre!("state open: {e}"))?,
+    );
+
+    // Tracing fan-out: stderr fmt for live debugging, SQLite layer for
+    // INFO+ persistence. The fmt layer keeps DEBUG/TRACE; the SQLite
+    // layer filters those out at `enabled()` so they never reach the DB.
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    let fmt_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
+    let sqlite_layer = state::log_events::SqliteLogLayer::new(pool.clone());
+    tracing_subscriber::registry()
+        .with(fmt_layer)
+        .with(sqlite_layer)
+        .init();
+
     let manager = Arc::new(jobs::JobManager::new());
     let ctx = jobs::JobContext {
         runner: runner.clone(),
+        state: Some(pool.clone()),
     };
     for job in config.jobs {
         match job {

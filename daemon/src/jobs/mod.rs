@@ -25,8 +25,13 @@ pub struct JobStatusInner {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)] // `state` is consumed by the push job in step 9.
 pub struct JobContext {
     pub runner: Arc<dyn CommandRunner>,
+    /// Per-daemon SQLite pool. None inside test-only `JobManager` setups
+    /// that don't care about persistence; production code paths always
+    /// pass `Some(pool)` from `daemon::main::run_daemon`.
+    pub state: Option<Arc<sqlx::SqlitePool>>,
 }
 
 pub trait Job: Send + Sync + 'static {
@@ -194,6 +199,7 @@ mod tests {
             job.clone(),
             JobContext {
                 runner: Arc::new(FakeRunner) as Arc<dyn CommandRunner>,
+                state: None,
             },
         );
         mgr.shutdown(Duration::from_secs(2)).await;
@@ -221,6 +227,7 @@ mod tests {
             job.clone(),
             JobContext {
                 runner: Arc::new(FakeRunner) as Arc<dyn CommandRunner>,
+                state: None,
             },
         );
         assert!(mgr.wakeup_by_name("noop"));

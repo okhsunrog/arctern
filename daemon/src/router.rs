@@ -12,13 +12,18 @@ use crate::{auth, handlers};
         title = "arctern",
         description = "ZFS replication daemon HTTP API",
     ),
-    components(schemas(arctern_api::DatasetSummary, arctern_api::ApiErrorBody)),
+    components(schemas(
+        arctern_api::DatasetSummary,
+        arctern_api::ApiErrorBody,
+        arctern_api::CreateSnapshotRequest,
+    )),
 )]
 struct ApiDoc;
 
 pub fn build_router() -> Router {
     let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(handlers::datasets::list_datasets))
+        .routes(routes!(handlers::snapshots::create_snapshot))
         .split_for_parts();
 
     router

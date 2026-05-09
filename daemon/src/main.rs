@@ -177,29 +177,21 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
         runner: runner.clone(),
         state: Some(pool.clone()),
     };
-    // Connect once per [[peers]] entry; push jobs reference these by name.
-    // A failed connect is non-fatal — the job's run_cycle reports it on
-    // every tick and the operator can fix the SSH config and restart.
-    let mut peer_links: std::collections::BTreeMap<String, Arc<peer::PeerLink>> =
-        std::collections::BTreeMap::new();
+    // One eager-reconnect background task per [[peers]] entry. Each
+    // task owns its peer's PeerLink lifecycle and updates the shared
+    // peers map; push jobs and HTTP handlers read from there. A
+    // CancellationToken drives graceful shutdown.
+    let peers_state = peer::state::new_state();
+    let peers_cancel = tokio_util::sync::CancellationToken::new();
+    let mut reconnect_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     for p in &config.peers {
-        // The job-name namespace passed to stdinserver-dispatch is
-        // synthesised from the receiver-side allowed_clients ACL; the
-        // push job carries it on PushJobConfig.name. Connect uses a
-        // placeholder "control" job because the openssh::Session is
-        // shared across recv channels — the per-job arg only matters
-        // when opening individual children. To keep the connect step
-        // simple and avoid waiting for the first push job, we connect
-        // with a sentinel job name here; open_recv passes the real
-        // job name on each recv channel.
-        match peer::PeerLink::connect(p.name.clone(), &p.ssh_target, "control").await {
-            Ok(link) => {
-                peer_links.insert(p.name.clone(), Arc::new(link));
-            }
-            Err(e) => {
-                tracing::warn!(peer = %p.name, error = %e, "peer connect failed; push jobs targeting this peer will retry on each cycle");
-            }
-        }
+        let state_for_task = peers_state.clone();
+        let cancel = peers_cancel.clone();
+        let name = p.name.clone();
+        let target = p.ssh_target.clone();
+        reconnect_handles.push(tokio::spawn(async move {
+            peer::reconnect::run_for_peer(state_for_task, name, target, cancel).await;
+        }));
     }
     for job in config.jobs {
         match job {
@@ -219,18 +211,13 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
                 );
             }
             arctern_config::JobConfig::Push(s) => {
-                let peer_link = s
-                    .peer
-                    .as_deref()
-                    .and_then(|name| peer_links.get(name).cloned());
-                if peer_link.is_none() {
+                if s.peer.is_none() {
                     tracing::warn!(
                         name = %s.name,
-                        peer = ?s.peer,
-                        "push job has no resolvable peer; cycles will report errors"
+                        "push job has no `peer` field; cycles will report errors"
                     );
                 }
-                let job = jobs::push::PushJob::new(s, peer_link)
+                let job = jobs::push::PushJob::new(s, Some(peers_state.clone()))
                     .map_err(|e| eyre::eyre!("push job filter regex: {e}"))?;
                 manager.spawn(Arc::new(job), ctx.clone());
             }
@@ -262,6 +249,10 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
 
     let result = serve.await;
     manager.shutdown(Duration::from_secs(5)).await;
+    peers_cancel.cancel();
+    for h in reconnect_handles {
+        let _ = h.await;
+    }
     let _ = std::fs::remove_file(&cleanup_path);
     result?;
     Ok(())

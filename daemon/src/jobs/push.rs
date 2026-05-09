@@ -41,6 +41,7 @@ use tracing::{Instrument, info_span, warn};
 
 use super::{Job, JobContext, JobStatusInner};
 use crate::peer::PeerLink;
+use crate::peer::state::PeersState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SnapshotPlan {
@@ -535,22 +536,29 @@ pub struct PushJob {
     filter: CompiledFilter,
     status: Mutex<JobStatusInner>,
     wakeup: Arc<tokio::sync::Notify>,
-    /// Optional pre-connected PeerLink. Set by `main.rs` after resolving
-    /// the `peer` field against `[[peers]]`. None disables the cycle
-    /// (no transport configured).
-    peer: Option<Arc<PeerLink>>,
+    /// Shared peers state. Each cycle looks up the configured peer name
+    /// here so that a reconnect performed by the background task takes
+    /// effect on the next cycle without restarting the job.
+    peers: Option<PeersState>,
 }
 
 impl PushJob {
-    pub fn new(config: PushJobConfig, peer: Option<Arc<PeerLink>>) -> Result<Self, regex::Error> {
+    pub fn new(config: PushJobConfig, peers: Option<PeersState>) -> Result<Self, regex::Error> {
         let filter = CompiledFilter::from_config(&config.snapshot_filter)?;
         Ok(Self {
             config,
             filter,
             status: Mutex::new(JobStatusInner::default()),
             wakeup: Arc::new(tokio::sync::Notify::new()),
-            peer,
+            peers,
         })
+    }
+
+    async fn current_link(&self) -> Option<Arc<PeerLink>> {
+        let peers = self.peers.as_ref()?;
+        let name = self.config.peer.as_deref()?;
+        let g = peers.read().await;
+        g.get(name).and_then(|e| e.link.clone())
     }
 
     fn record_cycle(&self, last_error: Option<String>, interval: StdDuration) {
@@ -584,8 +592,12 @@ impl PushJob {
     }
 
     async fn run_cycle(&self, ctx: &JobContext, cancel: &CancellationToken) -> Result<(), String> {
-        let Some(peer) = &self.peer else {
-            return Err("push job has no PeerLink configured".into());
+        let Some(peer) = self.current_link().await else {
+            return Err(format!(
+                "push job {:?}: peer {:?} not currently connected",
+                self.config.name,
+                self.config.peer.as_deref().unwrap_or("<unset>")
+            ));
         };
         let runner = ctx.runner.as_ref();
         let mut errors: Vec<String> = Vec::new();

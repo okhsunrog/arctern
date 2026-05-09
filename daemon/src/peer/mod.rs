@@ -16,6 +16,7 @@
 
 pub mod control;
 pub mod reconnect;
+pub mod state;
 
 use std::sync::Arc;
 
@@ -30,15 +31,15 @@ pub use control::{ControlClient, RpcError};
 /// Outbound link to one peer. Cheaply cloneable — handlers and the
 /// scheduler share the same Arc.
 #[derive(Clone)]
-#[allow(dead_code)] // Constructor + recv plumbing land in step 9.
 pub struct PeerLink {
+    #[allow(dead_code)]
     pub(crate) name: String,
     pub(crate) session: Arc<openssh::Session>,
     pub(crate) control: ControlClient,
 }
 
-#[allow(dead_code)] // Methods land alongside step 9/10 wiring.
 impl PeerLink {
+    #[allow(dead_code)]
     pub fn name(&self) -> &str {
         &self.name
     }

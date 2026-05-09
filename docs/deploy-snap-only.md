@@ -19,6 +19,21 @@ This deployment is snap-only. Sink + push come in a later wave (see
   low-traffic dataset (e.g., `okdata/data/nas`) for arctern; leave
   `okdata/data/{root,home}` and `okdata/ROOT/default` with zrepl. Move
   more over as confidence grows.
+- Encrypted `root_fs` parents: when sink eventually lands (this slice is
+  snap-only — no sink yet), arctern's sink creates intermediate parent
+  datasets between `root_fs` and the sender's path with `zfs create -p`.
+  zrepl's config has `recv.placeholder.encryption=off` to force those
+  intermediates to `encryption=off` so that raw-encrypted streams
+  (`zfs send -w`) can land beneath an encrypted `root_fs`. **On
+  OpenZFS >= 2.4.1 this workaround is unnecessary**: a raw-encrypted
+  recv beneath an encrypted parent succeeds, and the received dataset
+  retains its own encryptionroot and key (verified in the palimpsest
+  test VM, zfs-2.4.1). Both full and incremental raw streams replicate
+  cleanly. The user's existing zrepl `placeholder.encryption=off`
+  setting is therefore defensive on modern OpenZFS; arctern does not
+  need an equivalent knob unless a regression is observed on an older
+  OpenZFS release. (zrepl's setting predates several OpenZFS encryption
+  fixes; if you're on OpenZFS < 2.2 this may still matter.)
 
 ## 1. Build
 

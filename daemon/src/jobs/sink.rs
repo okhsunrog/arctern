@@ -247,6 +247,29 @@ async fn handle_send(
         tracing::info!(target = %header.target_dataset, "sink: invoking zfs recv (no SendHeader)");
     }
 
+    // The receiver-side path is `<root_fs>/<sender_path>` (slice 005
+    // FR-005); intermediate datasets typically don't exist on first
+    // replication. Ensure they do before invoking recv. `zfs create -p`
+    // is idempotent on existing parents; the leaf would error if it
+    // already exists, so target the parent dataset, not the target
+    // itself. zfs recv creates the leaf.
+    if let Some((parent, _)) = header.target_dataset.rsplit_once('/')
+        && parent != job.config.root_fs
+    {
+        let opts = palimpsest::dataset::CreateOptions::new()
+            .create_parents()
+            .property("mountpoint", "none");
+        match palimpsest::dataset::create(runner, parent, &opts).await {
+            Ok(()) => {}
+            Err(e) => {
+                let stderr = format!("{e}");
+                if !stderr.contains("already exists") {
+                    return Err(format!("ensure parent {parent}: {e}"));
+                }
+            }
+        }
+    }
+
     // T008 wires RecvProperties through palimpsest's new -o/-x flags;
     // -u (unmounted) is unconditional because the sink doesn't know
     // the operator's mountpoint policy.

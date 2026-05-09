@@ -22,6 +22,7 @@ mod configcheck;
 mod error;
 mod handlers;
 mod jobs;
+mod peer;
 mod router;
 mod state;
 mod stdinserver;

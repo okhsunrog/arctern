@@ -17,9 +17,9 @@ pub mod schema;
 pub use grid::{GridParseError, GridSpec, KeepCount, RetentionInterval, SnapshotEntry};
 pub use prune::{PruneError, evaluate as evaluate_keep_rules};
 pub use schema::{
-    AllowedClient, Config, FilesystemFilter, JobConfig, KeepRule, PruningConfig, PushJobConfig,
-    PushTarget, RecvConfig, RecvProperties, SendFlagsConfig, SinkJobConfig, SnapJobConfig,
-    SnapshotFilterConfig, SnapshottingConfig,
+    AllowedClient, Config, FilesystemFilter, JobConfig, KeepRule, PeerConfig, PruningConfig,
+    PushJobConfig, PushTarget, RecvConfig, RecvProperties, SendFlagsConfig, SinkJobConfig,
+    SnapJobConfig, SnapshotFilterConfig, SnapshottingConfig,
 };
 
 #[derive(Debug, Error)]
@@ -555,7 +555,7 @@ prefix = "zrepl_"
             panic!("expected Push")
         };
         assert_eq!(p.name, "push_to_server");
-        assert_eq!(p.connect.port(), 8888);
+        assert_eq!(p.connect.unwrap().port(), 8888);
         assert_eq!(p.target.root_fs, "okdata/backups/laptop");
         assert_eq!(p.snapshot_filter.prefix.as_deref(), Some("zrepl_"));
         assert_eq!(p.server_name, "arctern");

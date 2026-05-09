@@ -4,19 +4,21 @@
 //! - `daemon` runs the axum server (the only fully-implemented subcommand
 //!   this slice).
 //! - `stdinserver <ident>` is the SSH transport entry point invoked by sshd
-//!   via authorized_keys `command="..."`. Stub this slice.
-//! - `configcheck <path>` validates a config file for CI / pre-deploy. Stub
-//!   this slice.
+//!   via authorized_keys `command="..."`. Stub through slice 003.
+//! - `configcheck <path>` validates a config file for CI / pre-deploy.
 
 use std::io::{ErrorKind, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use tokio::net::UnixListener;
 use tokio::signal::unix::{SignalKind, signal};
 
 mod auth;
+mod configcheck;
 mod error;
 mod handlers;
 mod jobs;
@@ -38,33 +40,32 @@ enum Command {
         /// `/run/arctern.sock` when `$XDG_RUNTIME_DIR` is unset.
         #[arg(long)]
         socket: Option<PathBuf>,
+
+        /// Path to the TOML configuration file. Defaults to
+        /// `/etc/arctern/arctern.toml`. The daemon refuses to start
+        /// without a readable, valid config.
+        #[arg(long, default_value = "/etc/arctern/arctern.toml")]
+        config: PathBuf,
     },
-    /// SSH transport entry point invoked by sshd. Stub this slice.
+    /// SSH transport entry point invoked by sshd. Stub through slice 003.
     Stdinserver { ident: String },
-    /// One-shot YAML validation for CI / pre-deploy. Stub this slice.
+    /// One-shot validation for CI / pre-deploy.
     Configcheck { path: PathBuf },
 }
 
 fn main() -> eyre::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Daemon { socket } => run_daemon(socket),
+        Command::Daemon { socket, config } => run_daemon(socket, config),
         Command::Stdinserver { ident } => {
-            eprintln!("arctern stdinserver {ident}: not implemented in slice 002");
+            eprintln!("arctern stdinserver {ident}: not implemented in slice 003");
             Ok(())
         }
-        Command::Configcheck { path } => {
-            eprintln!("arctern configcheck {}: not implemented in slice 002", path.display());
-            Ok(())
-        }
+        Command::Configcheck { path } => configcheck::run(&path),
     }
 }
 
 /// Resolve the socket path the daemon should bind to.
-///
-/// Returns the explicit `--socket` argument if present; otherwise
-/// `$XDG_RUNTIME_DIR/arctern.sock` if `$XDG_RUNTIME_DIR` is set;
-/// otherwise `/run/arctern.sock`.
 fn resolve_socket_path(arg: Option<PathBuf>) -> PathBuf {
     if let Some(p) = arg {
         return p;
@@ -78,14 +79,16 @@ fn resolve_socket_path(arg: Option<PathBuf>) -> PathBuf {
 }
 
 #[tokio::main(flavor = "multi_thread")]
-async fn run_daemon(socket_arg: Option<PathBuf>) -> eyre::Result<()> {
+async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::Result<()> {
     tracing_subscriber::fmt::init();
+
+    // Load and validate the config BEFORE binding any socket — fail
+    // loudly if the operator's file is missing or malformed.
+    let config = arctern_config::load_from_path(&config_path)
+        .map_err(|e| eyre::eyre!("config load: {e}"))?;
 
     let socket_path = resolve_socket_path(socket_arg);
 
-    // Best-effort cleanup of a stale socket from a prior crash. ENOENT is
-    // expected on the happy path; anything else is fatal because we cannot
-    // know the path is safe to reuse.
     match std::fs::remove_file(&socket_path) {
         Ok(()) => {}
         Err(e) if e.kind() == ErrorKind::NotFound => {}
@@ -98,15 +101,31 @@ async fn run_daemon(socket_arg: Option<PathBuf>) -> eyre::Result<()> {
     }
 
     let listener = UnixListener::bind(&socket_path)?;
-    // Owner-only — same-uid policy is also enforced at the protocol layer
-    // by `auth::PeerAuth`, but defence in depth never hurts.
     std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
 
-    let app = router::build_router();
+    // Construct a single shared CommandRunner for jobs (D14 in plan).
+    // Handlers continue to construct their own per-request runners
+    // (slice-002 behaviour preserved).
+    let runner: Arc<dyn palimpsest::runner::CommandRunner> =
+        Arc::new(palimpsest::SshCommandRunner::from_env().map_err(|e| {
+            eyre::eyre!("PALIMPSEST_SSH_TARGET configuration: {e}")
+        })?);
 
-    // Single-line, line-buffered handshake the integration test parses.
-    // Path may legally contain spaces or colons; everything after `unix:`
-    // is taken literally.
+    let manager = Arc::new(jobs::JobManager::new());
+    let ctx = jobs::JobContext {
+        runner: runner.clone(),
+    };
+    for job in config.jobs {
+        match job {
+            arctern_config::JobConfig::Snap(s) => {
+                let job = Arc::new(jobs::snap::SnapJob::new(s));
+                manager.spawn(job, ctx.clone());
+            }
+        }
+    }
+
+    let app = router::build_router(manager.clone());
+
     println!("LISTEN unix:{}", socket_path.display());
     std::io::stdout().flush().ok();
 
@@ -129,6 +148,7 @@ async fn run_daemon(socket_arg: Option<PathBuf>) -> eyre::Result<()> {
     .with_graceful_shutdown(shutdown);
 
     let result = serve.await;
+    manager.shutdown(Duration::from_secs(5)).await;
     let _ = std::fs::remove_file(&cleanup_path);
     result?;
     Ok(())

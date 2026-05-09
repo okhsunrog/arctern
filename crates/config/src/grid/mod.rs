@@ -76,7 +76,7 @@ impl GridSpec {
             let caps = term_re.captures(trimmed).ok_or_else(|| GridParseError::Term {
                 term_index: idx,
                 term: trimmed.to_string(),
-                message: format!("does not match `<count>x<duration>(keep=...)?`"),
+                message: "does not match `<count>x<duration>(keep=...)?`".to_string(),
             })?;
 
             let count: u32 = caps[1].parse().map_err(|e| GridParseError::Term {

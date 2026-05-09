@@ -2,9 +2,6 @@
 //! the sole writer; HTTP handlers read through `RwLock` to render
 //! `GET /api/v1/peers` and to grab the `PeerLink` for proxied calls.
 
-// PeerStatus + PeerEntry fields are consumed by handlers/peers.rs.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::sync::Arc;
 

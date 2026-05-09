@@ -76,6 +76,59 @@ pub struct ApiErrorBody {
     pub message: String,
 }
 
+/// Reachability classification for one configured peer. The daemon
+/// updates this from its background reconnect loop; the UI surfaces
+/// it in the Peers tab.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PeerReachability {
+    /// SSH session is up and the control channel is responding.
+    Connected,
+    /// Background task is between reconnect attempts.
+    Reconnecting {
+        /// RFC3339 timestamp the link first went down.
+        since: String,
+    },
+    /// Last connect attempt failed; the loop is sleeping before retrying.
+    Failed {
+        /// RFC3339 timestamp the link first went down (or last failed).
+        since: String,
+        last_error: String,
+    },
+}
+
+/// One row in `GET /api/v1/peers`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PeerSummary {
+    pub name: String,
+    pub ssh_target: String,
+    pub reachability: PeerReachability,
+}
+
+/// One snapshot returned by `GET /api/v1/peers/{peer}/snapshots`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PeerSnapshotEntry {
+    pub name: String,
+    /// ZFS GUID, serialized as a u64 string to stay safe across
+    /// JSON parsers that downgrade large integers to f64.
+    pub guid: String,
+    pub createtxg: u64,
+}
+
+/// One row in `GET /api/v1/events` (and the proxied
+/// `GET /api/v1/peers/{peer}/events`). Mirrors
+/// `arctern_transport::EventWire` but lives in the public API surface
+/// so clients don't pull in the transport crate.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct LogEvent {
+    pub id: u64,
+    /// Unix seconds.
+    pub timestamp: i64,
+    pub level: String,
+    pub job_name: Option<String>,
+    pub message: String,
+}
+
 /// Request body for `POST /api/v1/datasets/{name}/snapshots`. The path
 /// segment carries the parent dataset; this struct carries everything
 /// else. `recursive` and `properties` default so a minimal client can

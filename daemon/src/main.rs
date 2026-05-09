@@ -17,6 +17,7 @@ use clap::{Parser, Subcommand};
 use tokio::net::UnixListener;
 use tokio::signal::unix::{SignalKind, signal};
 
+mod app_state;
 mod auth;
 mod configcheck;
 mod error;
@@ -224,7 +225,11 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
         }
     }
 
-    let app = router::build_router(manager.clone());
+    let app_state = app_state::AppState {
+        manager: manager.clone(),
+        peers: peers_state.clone(),
+    };
+    let app = router::build_router(app_state);
 
     println!("LISTEN unix:{}", socket_path.display());
     std::io::stdout().flush().ok();

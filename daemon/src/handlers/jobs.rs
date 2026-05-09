@@ -1,12 +1,10 @@
 //! `GET /api/v1/jobs` — current per-job status snapshot.
 
-use std::sync::Arc;
-
 use arctern_api::JobStatus;
 use axum::{Json, extract::Path, extract::State, http::StatusCode};
 use time::format_description::well_known::Rfc3339;
 
-use crate::jobs::JobManager;
+use crate::app_state::AppState;
 
 #[utoipa::path(
     get,
@@ -17,8 +15,8 @@ use crate::jobs::JobManager;
          body = Vec<JobStatus>),
     ),
 )]
-pub async fn list_jobs(State(manager): State<Arc<JobManager>>) -> Json<Vec<JobStatus>> {
-    let snap = manager.statuses();
+pub async fn list_jobs(State(state): State<AppState>) -> Json<Vec<JobStatus>> {
+    let snap = state.manager.statuses();
     let out = snap
         .into_iter()
         .map(|(name, kind, s)| JobStatus {
@@ -43,10 +41,10 @@ pub async fn list_jobs(State(manager): State<Arc<JobManager>>) -> Json<Vec<JobSt
     ),
 )]
 pub async fn wakeup(
-    State(manager): State<Arc<JobManager>>,
+    State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> StatusCode {
-    if manager.wakeup_by_name(&name) {
+    if state.manager.wakeup_by_name(&name) {
         StatusCode::NO_CONTENT
     } else {
         StatusCode::NOT_FOUND

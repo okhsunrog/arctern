@@ -1,12 +1,10 @@
 //! Axum router + utoipa OpenAPI doc.
 
-use std::sync::Arc;
-
 use axum::{Json, Router, middleware, routing::get};
 use utoipa::OpenApi;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use crate::jobs::JobManager;
+use crate::app_state::AppState;
 use crate::{auth, handlers};
 
 #[derive(OpenApi)]
@@ -20,17 +18,27 @@ use crate::{auth, handlers};
         arctern_api::ApiErrorBody,
         arctern_api::CreateSnapshotRequest,
         arctern_api::JobStatus,
+        arctern_api::PeerSummary,
+        arctern_api::PeerReachability,
+        arctern_api::PeerSnapshotEntry,
+        arctern_api::LogEvent,
     )),
 )]
 struct ApiDoc;
 
-pub fn build_router(manager: Arc<JobManager>) -> Router {
+pub fn build_router(state: AppState) -> Router {
     let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(handlers::datasets::list_datasets))
         .routes(routes!(handlers::snapshots::create_snapshot))
         .routes(routes!(handlers::jobs::list_jobs))
         .routes(routes!(handlers::jobs::wakeup))
-        .with_state(manager)
+        .routes(routes!(handlers::peers::list_peers))
+        .routes(routes!(handlers::peers::list_peer_jobs))
+        .routes(routes!(handlers::peers::get_peer_job))
+        .routes(routes!(handlers::peers::wakeup_peer_job))
+        .routes(routes!(handlers::peers::list_peer_snapshots))
+        .routes(routes!(handlers::peers::destroy_peer_snapshot))
+        .with_state(state)
         .split_for_parts();
 
     router

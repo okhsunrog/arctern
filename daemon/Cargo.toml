@@ -13,6 +13,7 @@ arctern-api = { version = "0.1.0", path = "../crates/api" }
 axum = "0.8.9"
 clap = { version = "4.6.1", features = ["derive"] }
 eyre = "0.6.12"
+libc = "0.2.186"
 palimpsest = { version = "0.1.0", path = "../../palimpsest" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
@@ -23,8 +24,8 @@ utoipa = { version = "5.5.0", features = ["axum_extras"] }
 utoipa-axum = "0.2.0"
 
 [dev-dependencies]
+arctern-client = { path = "../crates/client" }
 palimpsest = { path = "../../palimpsest" }
-reqwest = { version = "0.13.3", default-features = false, features = ["json", "rustls"] }
 
 [features]
 # Enables `daemon/tests/integration_*.rs` against a real ZFS-capable host

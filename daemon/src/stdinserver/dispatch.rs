@@ -6,8 +6,10 @@
 //! exit. The `control` and `recv` handlers land in steps 7 and 8.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use arctern_config::{AllowedClient, Config};
+use palimpsest::runner::{CommandRunner, RealRunner};
 
 /// Outcome of `dispatch::run`. Encoded so step 7/8 can fork on it
 /// without re-parsing the command.
@@ -46,9 +48,19 @@ pub async fn run(identity: &str, config_path: &Path) -> eyre::Result<()> {
             std::process::exit(1);
         }
     };
+    let acl = lookup_identity(&config, identity)
+        .expect("decide() already validated identity")
+        .clone();
+    let config = Arc::new(config);
+    let runner: Arc<dyn CommandRunner> = Arc::new(RealRunner);
     match action {
         DispatchAction::Control { job } => {
-            tracing::info!(identity, job, "stdinserver control: not yet implemented");
+            tracing::info!(identity, job, "stdinserver control: opening channel");
+            let stdin = tokio::io::stdin();
+            let stdout = tokio::io::stdout();
+            super::control::run(runner, config, acl, stdin, stdout)
+                .await
+                .map_err(|e| eyre::eyre!("control channel: {e}"))?;
             Ok(())
         }
         DispatchAction::Recv { job } => {

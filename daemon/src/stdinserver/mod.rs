@@ -9,4 +9,5 @@
 //!   - `control.rs`   — Request/Response handlers (step 7)
 //!   - `recv.rs`      — recv channel (step 8)
 
+pub mod control;
 pub mod dispatch;

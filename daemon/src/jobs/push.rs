@@ -1,36 +1,46 @@
-//! Push job — active sender. The executor is being rewritten on top of
-//! the SSH-based PeerLink (ARCHITECTURE.md, step 9). For now this file
-//! holds only the pure planner + header/args builders so the daemon
-//! still compiles and the planner unit tests stay green.
-
-// The planner + builders below are wired back into the executor in
-// step 9; until then they exist purely for the unit tests in this
-// module.
-#![allow(dead_code)]
+//! Push job — active sender. Each cycle, for every configured filesystem:
+//! list local matching snapshots, ask the receiver via the SSH control
+//! channel what it has, intersect by GUID, then open a recv channel and
+//! pipe `zfs send`'s stdout into it.
+//!
+//! The planner (`pick_plan`, `pick_plan_with_token`, `build_send_header`,
+//! `build_send_args`, `CompiledFilter`) is pure and unchanged from the
+//! QUIC days. Only the executor is rebuilt on top of `peer::PeerLink`.
+//!
+//! Holds and cursor bookmarks (ARCHITECTURE.md "Holds and replication
+//! cursor"):
+//!
+//!   - Step hold tag `arctern_step_J_<jobname>` is placed on the `to`
+//!     snapshot before the send begins. Released on success; left in
+//!     place on failure so a retry can find the snapshot regardless of
+//!     intervening prune.
+//!   - Cursor bookmark `<dataset>#arctern_cursor_J_<jobname>` is created
+//!     from the new `to` snapshot on success; the previous cursor (same
+//!     name, GUID-anchored) is destroyed after the new one lands so the
+//!     transition is crash-safe.
 
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 
-use arctern_config::PushJobConfig;
-use time::OffsetDateTime;
-use tokio::time::sleep;
-use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, info_span};
-
-use super::{Job, JobContext, JobStatusInner};
-
-use arctern_config::{SendFlagsConfig, SnapshotFilterConfig};
+use arctern_config::{PushJobConfig, SendFlagsConfig, SnapshotFilterConfig};
 use arctern_transport::{
-    ProtocolError, SendFlagsWire, SendHeader, SendKind, SnapshotEntry, SnapshotRef,
-    compile_prefix_regex, regex,
+    PROTOCOL_VERSION, ProtocolError, RecvHeader, Request, Response, SendFlagsWire, SendHeader,
+    SendKind, SnapshotEntry, SnapshotRef, compile_prefix_regex, regex,
 };
 use palimpsest::dataset::ListOptions;
 use palimpsest::models::DatasetType;
 use palimpsest::runner::CommandRunner;
-use palimpsest::send::SendArgs;
+use palimpsest::send::{SendArgs, send as zfs_send};
 use thiserror::Error;
+use time::OffsetDateTime;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
+use tracing::{Instrument, info_span, warn};
+
+use super::{Job, JobContext, JobStatusInner};
+use crate::peer::PeerLink;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SnapshotPlan {
@@ -70,12 +80,14 @@ impl CompiledFilter {
         }
     }
 
+    #[allow(dead_code)]
     pub fn wire_regex(&self) -> Option<&str> {
         self.wire.as_deref()
     }
 }
 
 #[derive(Debug, Error)]
+#[allow(dead_code)]
 pub enum PlanError {
     #[error("list sender snapshots on {dataset}: {source}")]
     SenderList {
@@ -240,8 +252,8 @@ pub fn build_send_header(plan: &SnapshotPlan, flags: &SendFlagsConfig) -> Option
                 name: decoded.to_name.clone(),
                 guid: decoded.to_guid,
             },
-            // Resume MUST NOT discard the partial — that IS the
-            // partial we are continuing.
+            // Resume MUST NOT discard the partial — that IS the partial
+            // we are continuing.
             false,
         ),
     };
@@ -304,24 +316,240 @@ pub fn build_send_args(
     Some(args)
 }
 
+/// Naming conventions pinned in ARCHITECTURE.md.
+fn step_hold_tag(job_name: &str) -> String {
+    format!("arctern_step_J_{job_name}")
+}
+
+fn cursor_bookmark_name(dataset: &str, job_name: &str) -> String {
+    format!("{dataset}#arctern_cursor_J_{job_name}")
+}
+
+/// Plan one filesystem cycle against the receiver. Pure planner glue
+/// over palimpsest + the control channel.
+async fn plan_one_filesystem(
+    runner: &dyn CommandRunner,
+    peer: &PeerLink,
+    sender_dataset: &str,
+    target_dataset: &str,
+    filter: &CompiledFilter,
+) -> Result<SnapshotPlan, String> {
+    let sender = list_sender_snaps(runner, sender_dataset, filter)
+        .await
+        .map_err(|e| format!("{e}"))?;
+    if sender.is_empty() {
+        return Ok(SnapshotPlan::Nothing);
+    }
+    let resp = peer
+        .rpc(Request::ListSnapshots {
+            dataset: target_dataset.to_string(),
+            prefix_regex: filter.wire_regex().map(String::from),
+        })
+        .await
+        .map_err(|e| format!("ListSnapshots: {e}"))?;
+    let (receiver, token) = match resp {
+        Response::ListSnapshotsOk {
+            snapshots,
+            receive_resume_token,
+        } => (snapshots, receive_resume_token),
+        Response::Error { message, .. } => {
+            return Err(format!("ListSnapshots receiver error: {message}"));
+        }
+        other => return Err(format!("unexpected ListSnapshots response: {other:?}")),
+    };
+    let decoded = match token.as_deref() {
+        Some(t) => match palimpsest::resume_token::decode(runner, t).await {
+            Ok(d) => Some(d),
+            Err(e) => {
+                tracing::info!(
+                    target = %target_dataset,
+                    error = %e,
+                    "push: receiver token failed to decode, treating as stale"
+                );
+                return Ok(pick_plan_with_discard(&sender, &receiver, true));
+            }
+        },
+        None => None,
+    };
+    Ok(pick_plan_with_token(
+        &sender,
+        &receiver,
+        token.as_deref(),
+        decoded.as_ref(),
+    ))
+}
+
+/// Open a recv channel for one plan, spawn `zfs send` locally, copy
+/// stdout into the channel, await the receiver's terminal Response.
+/// Cancellation: the `cancel` token races against the bulk copy loop;
+/// on cancel we drop the recv channel (closing the SSH child's stdin)
+/// and `start_kill` the local send child.
+#[allow(clippy::too_many_arguments)]
+async fn execute_one_plan(
+    runner: &dyn CommandRunner,
+    peer: &PeerLink,
+    job_name: &str,
+    plan: &SnapshotPlan,
+    target_dataset: &str,
+    sender_dataset: &str,
+    flags: &SendFlagsConfig,
+    cancel: &CancellationToken,
+) -> Result<(), String> {
+    let Some(send_header) = build_send_header(plan, flags) else {
+        return Err("build_send_header returned None for non-Nothing plan".into());
+    };
+    let Some(args) = build_send_args(plan, sender_dataset, flags) else {
+        return Err("build_send_args returned None for non-Nothing plan".into());
+    };
+
+    let header = RecvHeader {
+        version: PROTOCOL_VERSION,
+        target_dataset: target_dataset.to_string(),
+        send: send_header,
+    };
+    let mut channel = peer
+        .open_recv(job_name, &header)
+        .await
+        .map_err(|e| format!("open_recv: {e}"))?;
+
+    let mut child = zfs_send(runner, &args)
+        .await
+        .map_err(|e| format!("spawn zfs send: {e}"))?;
+    let mut child_stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "no stdout on send child".to_string())?;
+    let mut child_stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "no stderr on send child".to_string())?;
+    let stderr_drain = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let _ = child_stderr.read_to_end(&mut buf).await;
+        buf
+    });
+
+    let mut channel_stdin = channel
+        .stdin
+        .take()
+        .ok_or_else(|| "no stdin on recv channel".to_string())?;
+    let copy_res = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            // Drop both halves: the recv channel's stdin closes the SSH
+            // child's stdin, propagating SIGPIPE to the remote zfs recv;
+            // start_kill on the local send child terminates it.
+            let _ = channel_stdin.shutdown().await;
+            let _ = child.start_kill();
+            return Err("cancelled".into());
+        }
+        r = tokio::io::copy(&mut child_stdout, &mut channel_stdin) => r,
+    };
+    let _ = channel_stdin.shutdown().await;
+    drop(channel_stdin);
+    let stderr_bytes = stderr_drain.await.unwrap_or_default();
+    let exit = child
+        .wait()
+        .await
+        .map_err(|e| format!("send wait: {e}"))?;
+    if let Err(e) = copy_res {
+        return Err(format!(
+            "stream copy: {e}; send stderr: {}",
+            String::from_utf8_lossy(&stderr_bytes).trim()
+        ));
+    }
+    if !exit.success() {
+        return Err(format!(
+            "zfs send failed (exit {:?}): {}",
+            exit.code(),
+            String::from_utf8_lossy(&stderr_bytes).trim()
+        ));
+    }
+    let resp = channel
+        .finish()
+        .await
+        .map_err(|e| format!("read recv response: {e}"))?;
+    match resp {
+        Response::Ok => Ok(()),
+        Response::Error { message, .. } => Err(format!("receiver: {message}")),
+        other => Err(format!("unexpected recv response: {other:?}")),
+    }
+}
+
+/// Step hold + cursor bookmark choreography around a successful execute.
+/// Holds are placed BEFORE the send so a concurrent prune cannot kill
+/// the snapshot mid-stream; released only on success. Cursor bookmark
+/// is created from the new `to` snapshot after the receiver has
+/// acknowledged; the previous cursor (same name, GUID-anchored) is
+/// destroyed afterwards so the transition is crash-safe.
+#[allow(clippy::too_many_arguments)]
+async fn run_one_filesystem(
+    runner: &dyn CommandRunner,
+    peer: &PeerLink,
+    job_name: &str,
+    sender_dataset: &str,
+    target_dataset: &str,
+    plan: &SnapshotPlan,
+    flags: &SendFlagsConfig,
+    cancel: &CancellationToken,
+) -> Result<(), String> {
+    let to_snap_name: Option<String> = match plan {
+        SnapshotPlan::Full { to, .. } | SnapshotPlan::Incremental { to, .. } => {
+            Some(format!("{sender_dataset}@{}", to.name))
+        }
+        SnapshotPlan::Resume { decoded, .. } => Some(decoded.to_name.clone()),
+        SnapshotPlan::Nothing => None,
+    };
+    let tag = step_hold_tag(job_name);
+    if let Some(snap) = &to_snap_name {
+        // hold is idempotent at the palimpsest layer (no-op when the
+        // tag already exists for that snapshot).
+        if let Err(e) = palimpsest::hold::hold(runner, snap, &tag).await {
+            warn!(snapshot = %snap, error = %e, "step hold failed; sending anyway");
+        }
+    }
+
+    // Leave the step hold in place on failure — it protects the snapshot
+    // for the next cycle's retry. Hence `?` propagates without a release.
+    execute_one_plan(
+        runner, peer, job_name, plan, target_dataset, sender_dataset, flags, cancel,
+    )
+    .await?;
+
+    if let Some(snap) = &to_snap_name {
+        let cursor = cursor_bookmark_name(sender_dataset, job_name);
+        if let Err(e) = palimpsest::bookmark::create(runner, snap, &cursor).await {
+            warn!(snapshot = %snap, bookmark = %cursor, error = %e, "create cursor bookmark");
+        }
+        if let Err(e) = palimpsest::hold::release(runner, snap, &tag).await {
+            warn!(snapshot = %snap, tag = %tag, error = %e, "release step hold");
+        }
+    }
+    Ok(())
+}
+
 pub const KIND: &str = arctern_api::JOB_KIND_PUSH;
 
 pub struct PushJob {
     config: PushJobConfig,
-    #[allow(dead_code)]
     filter: CompiledFilter,
     status: Mutex<JobStatusInner>,
     wakeup: Arc<tokio::sync::Notify>,
+    /// Optional pre-connected PeerLink. Set by `main.rs` after resolving
+    /// the `peer` field against `[[peers]]`. None disables the cycle
+    /// (no transport configured).
+    peer: Option<Arc<PeerLink>>,
 }
 
 impl PushJob {
-    pub fn new(config: PushJobConfig) -> Result<Self, regex::Error> {
+    pub fn new(config: PushJobConfig, peer: Option<Arc<PeerLink>>) -> Result<Self, regex::Error> {
         let filter = CompiledFilter::from_config(&config.snapshot_filter)?;
         Ok(Self {
             config,
             filter,
             status: Mutex::new(JobStatusInner::default()),
             wakeup: Arc::new(tokio::sync::Notify::new()),
+            peer,
         })
     }
 
@@ -331,6 +559,128 @@ impl PushJob {
         s.last_run = Some(now);
         s.next_run = Some(now + time::Duration::try_from(interval).unwrap_or(time::Duration::ZERO));
         s.last_error = last_error;
+    }
+
+    async fn expand_filesystems(&self, runner: &dyn CommandRunner) -> Result<Vec<String>, String> {
+        let mut pools: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for f in &self.config.filesystems {
+            let pool = f.path.split('/').next().unwrap_or(&f.path).to_string();
+            pools.insert(pool);
+        }
+        let opts = ListOptions {
+            recursive: true,
+            types: vec![DatasetType::Filesystem, DatasetType::Volume],
+            roots: pools.into_iter().collect(),
+            ..ListOptions::default()
+        };
+        let entries = palimpsest::dataset::list(runner, &opts)
+            .await
+            .map_err(|e| format!("list datasets: {e}"))?;
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        Ok(arctern_config::filter::resolve_all(&self.config.filesystems, &names)
+            .into_iter()
+            .map(str::to_string)
+            .collect())
+    }
+
+    async fn run_cycle(&self, ctx: &JobContext, cancel: &CancellationToken) -> Result<(), String> {
+        let Some(peer) = &self.peer else {
+            return Err("push job has no PeerLink configured".into());
+        };
+        let runner = ctx.runner.as_ref();
+        let mut errors: Vec<String> = Vec::new();
+        let sender_paths = self.expand_filesystems(runner).await?;
+        for sender_path in &sender_paths {
+            if cancel.is_cancelled() {
+                break;
+            }
+            // FR-005: literal concat — target = root_fs/sender_path.
+            let target = format!("{}/{}", self.config.target.root_fs, sender_path);
+            tracing::info!(sender = %sender_path, target = %target, "push: planning");
+            let plan = match plan_one_filesystem(
+                runner,
+                peer.as_ref(),
+                sender_path,
+                &target,
+                &self.filter,
+            )
+            .await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    let msg = format!("plan {sender_path}: {e}");
+                    warn!(error = %msg);
+                    errors.push(msg);
+                    continue;
+                }
+            };
+            // If the planner picked discard, send the explicit Request
+            // before opening the recv channel — it's idempotent and
+            // makes the recv channel's first action a fresh, clean recv.
+            let needs_discard = matches!(
+                plan,
+                SnapshotPlan::Full {
+                    discard_partial_recv: true,
+                    ..
+                } | SnapshotPlan::Incremental {
+                    discard_partial_recv: true,
+                    ..
+                }
+            );
+            if needs_discard
+                && let Err(e) = peer
+                    .rpc(Request::DiscardPartialRecv {
+                        dataset: target.clone(),
+                    })
+                    .await
+            {
+                warn!(target = %target, error = %e, "DiscardPartialRecv RPC failed");
+            }
+            match &plan {
+                SnapshotPlan::Nothing => {
+                    tracing::info!(sender = %sender_path, "push: nothing to do");
+                    continue;
+                }
+                SnapshotPlan::Full { to, .. } => {
+                    tracing::info!(sender = %sender_path, to = %to.name, "push: full send");
+                }
+                SnapshotPlan::Incremental { from, to, .. } => {
+                    tracing::info!(
+                        sender = %sender_path, from = %from.name, to = %to.name,
+                        "push: incremental send"
+                    );
+                }
+                SnapshotPlan::Resume { decoded, .. } => {
+                    tracing::info!(
+                        sender = %sender_path,
+                        to = %decoded.to_name,
+                        bytes = decoded.bytes_received,
+                        "push: resuming from token"
+                    );
+                }
+            }
+            if let Err(e) = run_one_filesystem(
+                runner,
+                peer.as_ref(),
+                &self.config.name,
+                sender_path,
+                &target,
+                &plan,
+                &self.config.send,
+                cancel,
+            )
+            .await
+            {
+                let msg = format!("execute {sender_path}: {e}");
+                warn!(error = %msg);
+                errors.push(msg);
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
     }
 }
 
@@ -349,7 +699,7 @@ impl Job for PushJob {
     }
     fn run(
         self: Arc<Self>,
-        _ctx: JobContext,
+        ctx: JobContext,
         cancel: CancellationToken,
     ) -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
         let span = info_span!("push_job", name = %self.config.name);
@@ -362,13 +712,8 @@ impl Job for PushJob {
                         _ = sleep(interval) => {}
                         _ = self.wakeup.notified() => {}
                     }
-                    // Executor is being rebuilt on top of PeerLink in
-                    // ARCHITECTURE.md step 9. Until then the cycle is
-                    // a no-op so the daemon keeps booting cleanly.
-                    self.record_cycle(
-                        Some("push executor not yet wired to SSH transport".into()),
-                        interval,
-                    );
+                    let outcome = self.run_cycle(&ctx, &cancel).await;
+                    self.record_cycle(outcome.err(), interval);
                 }
             }
             .instrument(span),
@@ -434,33 +779,6 @@ mod tests {
     }
 
     #[test]
-    fn sender_ahead_by_many_picks_highest_common_guid() {
-        let sender = vec![s("a", 1), s("b", 2), s("c", 3), s("d", 4), s("e", 5)];
-        let receiver = vec![e("d", 4, 4), e("b", 2, 2)];
-        assert_eq!(
-            pick_plan(&sender, &receiver),
-            SnapshotPlan::Incremental {
-                from: s("d", 4),
-                to: s("e", 5),
-                discard_partial_recv: false,
-            }
-        );
-    }
-
-    #[test]
-    fn disjoint_guids_means_full_send() {
-        let sender = vec![s("a", 1), s("b", 2)];
-        let receiver = vec![e("x", 100, 1), e("y", 200, 2)];
-        assert_eq!(
-            pick_plan(&sender, &receiver),
-            SnapshotPlan::Full {
-                to: s("b", 2),
-                discard_partial_recv: false,
-            }
-        );
-    }
-
-    #[test]
     fn intersects_correctly_at_u64_above_i64_max() {
         let sender = vec![
             s("zrepl_001", 11587258101628135412),
@@ -491,47 +809,6 @@ mod tests {
     }
 
     #[test]
-    fn build_send_header_full_uses_all_default_flags() {
-        let plan = SnapshotPlan::Full {
-            to: s("snap1", 42),
-            discard_partial_recv: false,
-        };
-        let h = build_send_header(&plan, &SendFlagsConfig::default()).unwrap();
-        assert_eq!(h.send_kind, SendKind::Full);
-        assert!(h.from_snap.is_none());
-        assert_eq!(h.to_snap.guid, 42);
-        assert!(!h.discard_partial_recv);
-        assert_eq!(
-            h.flags,
-            SendFlagsWire {
-                raw: true,
-                embedded: true,
-                compressed: true,
-                large_blocks: true
-            }
-        );
-    }
-
-    #[test]
-    fn build_send_header_incremental_carries_from_and_to() {
-        let plan = SnapshotPlan::Incremental {
-            from: s("snap1", 1),
-            to: s("snap2", 2),
-            discard_partial_recv: false,
-        };
-        let h = build_send_header(&plan, &SendFlagsConfig::default()).unwrap();
-        assert_eq!(h.send_kind, SendKind::Incremental);
-        assert_eq!(h.from_snap.unwrap().guid, 1);
-        assert_eq!(h.to_snap.guid, 2);
-        assert!(!h.discard_partial_recv);
-    }
-
-    #[test]
-    fn build_send_header_nothing_yields_none() {
-        assert!(build_send_header(&SnapshotPlan::Nothing, &SendFlagsConfig::default()).is_none());
-    }
-
-    #[test]
     fn build_send_args_full_with_all_flags() {
         let plan = SnapshotPlan::Full {
             to: s("snap1", 1),
@@ -540,163 +817,6 @@ mod tests {
         let args = build_send_args(&plan, "tank/data", &SendFlagsConfig::default()).unwrap();
         let v = args.build_args(false).unwrap();
         assert_eq!(v, vec!["send", "-w", "-c", "-L", "-e", "tank/data@snap1"]);
-    }
-
-    #[test]
-    fn build_send_args_incremental_uses_dash_i() {
-        let plan = SnapshotPlan::Incremental {
-            from: s("snap1", 1),
-            to: s("snap2", 2),
-            discard_partial_recv: false,
-        };
-        let args = build_send_args(&plan, "tank/data", &SendFlagsConfig::default()).unwrap();
-        let v = args.build_args(false).unwrap();
-        assert_eq!(
-            v,
-            vec![
-                "send",
-                "-w",
-                "-c",
-                "-L",
-                "-e",
-                "-i",
-                "tank/data@snap1",
-                "tank/data@snap2"
-            ]
-        );
-    }
-
-    #[test]
-    fn compiled_filter_regex_passthrough() {
-        let cfg = SnapshotFilterConfig {
-            prefix: None,
-            regex: Some("^auto_[0-9]+$".into()),
-        };
-        let f = CompiledFilter::from_config(&cfg).unwrap();
-        assert!(f.matches("auto_42"));
-        assert!(!f.matches("auto_x"));
-        assert_eq!(f.wire_regex(), Some("^auto_[0-9]+$"));
-    }
-
-    fn rt(to_guid: u64, from_guid: Option<u64>) -> palimpsest::resume_token::ResumeToken {
-        palimpsest::resume_token::ResumeToken {
-            token: "1-deadbeef".into(),
-            to_name: "tank/data@snap_x".into(),
-            to_guid,
-            from_guid,
-            bytes_received: 1024,
-        }
-    }
-
-    #[test]
-    fn pick_plan_with_token_none_falls_through_to_full() {
-        let sender = vec![s("a", 1), s("b", 2)];
-        let p = pick_plan_with_token(&sender, &[], None, None);
-        assert_eq!(
-            p,
-            SnapshotPlan::Full {
-                to: s("b", 2),
-                discard_partial_recv: false,
-            }
-        );
-    }
-
-    #[test]
-    fn pick_plan_with_token_live_full_emits_resume() {
-        let sender = vec![s("a", 1), s("b", 11587258101628135412)];
-        let decoded = rt(11587258101628135412, None);
-        let p = pick_plan_with_token(&sender, &[], Some("1-deadbeef"), Some(&decoded));
-        match p {
-            SnapshotPlan::Resume { token, decoded: d } => {
-                assert_eq!(token, "1-deadbeef");
-                assert_eq!(d.to_guid, 11587258101628135412);
-            }
-            other => panic!("expected Resume, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn pick_plan_with_token_live_incremental_emits_resume() {
-        let sender = vec![s("a", 1), s("b", 2)];
-        let decoded = rt(2, Some(1));
-        let p = pick_plan_with_token(&sender, &[], Some("1-deadbeef"), Some(&decoded));
-        assert!(matches!(p, SnapshotPlan::Resume { .. }));
-    }
-
-    #[test]
-    fn pick_plan_with_token_to_guid_dead_emits_full_with_discard() {
-        let sender = vec![s("a", 1), s("b", 2)];
-        let decoded = rt(99999, None);
-        let p = pick_plan_with_token(&sender, &[], Some("1-deadbeef"), Some(&decoded));
-        assert_eq!(
-            p,
-            SnapshotPlan::Full {
-                to: s("b", 2),
-                discard_partial_recv: true,
-            }
-        );
-    }
-
-    #[test]
-    fn pick_plan_with_token_from_guid_dead_emits_with_discard() {
-        let sender = vec![s("a", 1), s("b", 2)];
-        let decoded = rt(2, Some(99999));
-        let p = pick_plan_with_token(&sender, &[], Some("1-deadbeef"), Some(&decoded));
-        assert_eq!(
-            p,
-            SnapshotPlan::Full {
-                to: s("b", 2),
-                discard_partial_recv: true,
-            }
-        );
-    }
-
-    #[test]
-    fn pick_plan_with_token_dead_but_common_snap_exists_emits_incremental_with_discard() {
-        let sender = vec![s("a", 1), s("b", 2), s("c", 3)];
-        let receiver = vec![e("b", 2, 5)];
-        let decoded = rt(99999, None);
-        let p = pick_plan_with_token(&sender, &receiver, Some("1-deadbeef"), Some(&decoded));
-        assert_eq!(
-            p,
-            SnapshotPlan::Incremental {
-                from: s("b", 2),
-                to: s("c", 3),
-                discard_partial_recv: true,
-            }
-        );
-    }
-
-    #[test]
-    fn build_send_header_full_with_discard_sets_flag() {
-        let plan = SnapshotPlan::Full {
-            to: s("snap1", 42),
-            discard_partial_recv: true,
-        };
-        let h = build_send_header(&plan, &SendFlagsConfig::default()).unwrap();
-        assert!(h.discard_partial_recv);
-        assert_eq!(h.send_kind, SendKind::Full);
-    }
-
-    #[test]
-    fn build_send_header_resume_uses_decoded_to_snap() {
-        let decoded = palimpsest::resume_token::ResumeToken {
-            token: "1-abc".into(),
-            to_name: "tank/data@snap1".into(),
-            to_guid: 42,
-            from_guid: None,
-            bytes_received: 1024,
-        };
-        let plan = SnapshotPlan::Resume {
-            token: "1-abc".into(),
-            decoded,
-        };
-        let h = build_send_header(&plan, &SendFlagsConfig::default()).unwrap();
-        assert_eq!(h.send_kind, SendKind::Resume);
-        assert!(h.from_snap.is_none());
-        assert_eq!(h.to_snap.name, "tank/data@snap1");
-        assert_eq!(h.to_snap.guid, 42);
-        assert!(!h.discard_partial_recv);
     }
 
     #[test]
@@ -715,5 +835,36 @@ mod tests {
         let args = build_send_args(&plan, "tank/data", &SendFlagsConfig::default()).unwrap();
         let v = args.build_args(false).unwrap();
         assert_eq!(v, vec!["send", "-w", "-c", "-L", "-e", "-t", "1-abc"]);
+    }
+
+    #[test]
+    fn step_hold_tag_format_matches_architecture_doc() {
+        assert_eq!(step_hold_tag("backup"), "arctern_step_J_backup");
+    }
+
+    #[test]
+    fn cursor_bookmark_name_format_matches_architecture_doc() {
+        assert_eq!(
+            cursor_bookmark_name("tank/data", "backup"),
+            "tank/data#arctern_cursor_J_backup"
+        );
+    }
+
+    #[test]
+    fn build_send_header_resume_does_not_set_discard() {
+        let decoded = palimpsest::resume_token::ResumeToken {
+            token: "1-abc".into(),
+            to_name: "tank/data@snap1".into(),
+            to_guid: 42,
+            from_guid: None,
+            bytes_received: 1024,
+        };
+        let plan = SnapshotPlan::Resume {
+            token: "1-abc".into(),
+            decoded,
+        };
+        let h = build_send_header(&plan, &SendFlagsConfig::default()).unwrap();
+        assert_eq!(h.send_kind, SendKind::Resume);
+        assert!(!h.discard_partial_recv);
     }
 }

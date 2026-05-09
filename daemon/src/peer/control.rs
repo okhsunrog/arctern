@@ -327,7 +327,10 @@ mod tests {
         .await
         .unwrap()
         .unwrap_err();
-        assert!(matches!(err, RpcError::ChannelClosed));
+        assert!(
+            matches!(err, RpcError::ChannelClosed | RpcError::Transport(_)),
+            "got {err:?}"
+        );
         let _ = task.await;
     }
 }

@@ -63,11 +63,13 @@ zfs create -p -o encryption=off -o canmount=off okdata/backups/arctern_trial
 zfs create    -o encryption=off -o canmount=off okdata/backups/arctern_trial/laptop
 ```
 
-If `okdata/backups` itself is encrypted, the `encryption=off` on the
-trial parent is critical for raw-encrypted recv to work (see
-`recv.placeholder.encryption=off` in your zrepl config — same reason).
-The integration test for this is in
-`daemon/tests/integration_quic_push_encrypted.rs` (added separately).
+On OpenZFS >= 2.4.1, raw-encrypted recv works fine even when the
+intermediate parents inherit encryption from `okdata/backups` — verified
+in the palimpsest test VM. The pre-create with `encryption=off` above
+is defensive (matches your zrepl `recv.placeholder.encryption=off`
+setting, which is itself historical) but not strictly required on
+modern OpenZFS. If you're on OpenZFS < 2.2, leave the `encryption=off`
+in place; it costs nothing.
 
 Validate + restart:
 

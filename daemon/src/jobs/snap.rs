@@ -115,10 +115,9 @@ impl SnapJob {
     async fn run_cycle(&self, ctx: &JobContext) -> Result<(), String> {
         let runner = ctx.runner.as_ref();
         // 1. List every filesystem + volume under any pool a filter
-        //    references. We use `-r <pool>` per distinct pool because
-        //    `zfs list -r` with no target fails ("no datasets
-        //    available") and `zfs list` without `-r` only returns
-        //    each pool's top filesystem (no descendants).
+        //    references. Scoping to those pools (rather than a global
+        //    list) keeps unrelated pools out of the result and makes
+        //    integration tests robust against parallel test pools.
         let mut pools: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for f in &self.config.filesystems {
             let pool = f.path.split('/').next().unwrap_or(&f.path).to_string();

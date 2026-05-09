@@ -270,10 +270,41 @@ async fn handle_send(
         }
     }
 
-    // T008 wires RecvProperties through palimpsest's new -o/-x flags;
-    // -u (unmounted) is unconditional because the sink doesn't know
-    // the operator's mountpoint policy.
-    let mut args = RecvArgs::new(header.target_dataset.clone()).unmounted();
+    // T002 — honour the sender's discard_partial_recv directive.
+    // Slice 006 confirmed in the VM (D6) that a fresh full or
+    // incremental into a dataset with `receive_resume_token` set is
+    // rejected outright (even with -F). The planner sets this when
+    // it picked Full/Incremental despite the receiver advertising a
+    // stale token. Idempotent: abort_partial returns Ok if there is
+    // no partial to clear.
+    let discard = header
+        .send
+        .as_ref()
+        .map(|s| s.discard_partial_recv)
+        .unwrap_or(false);
+    if discard {
+        tracing::info!(
+            target = %header.target_dataset,
+            "sink: discarding partial recv per sender request"
+        );
+        if let Err(e) =
+            palimpsest::recv::abort_partial(runner, &header.target_dataset).await
+        {
+            return Err(format!(
+                "abort_partial {}: {e}",
+                header.target_dataset
+            ));
+        }
+    }
+
+    // T002 — every recv is resumable. -s costs nothing on a clean
+    // run and is the prerequisite for slice 006's whole reason for
+    // being. T008 wires RecvProperties through palimpsest's -o/-x
+    // flags; -u (unmounted) is unconditional because the sink does
+    // not know the operator's mountpoint policy.
+    let mut args = RecvArgs::new(header.target_dataset.clone())
+        .unmounted()
+        .resumable();
     for (k, v) in &job.config.recv.properties.overrides {
         args = args.property_override(k, v);
     }
@@ -352,7 +383,10 @@ async fn handle_list(
         Ok(v) => v,
         Err(ZfsError::DatasetNotFound { .. }) => {
             // D16: first replication is normal, not an error.
-            return ListResponse::Ok { snapshots: vec![] };
+            return ListResponse::Ok {
+                snapshots: vec![],
+                receive_resume_token: None,
+            };
         }
         Err(e) => {
             return ListResponse::Error {
@@ -378,7 +412,31 @@ async fn handle_list(
             })
         })
         .collect();
-    ListResponse::Ok { snapshots }
+    // T002 — surface the receiver's `receive_resume_token` user
+    // property so the sender's planner can decide between resume,
+    // discard-then-fresh, or vanilla Full/Incremental. Soft-fail per
+    // D19: a token query failure does NOT fail the LIST.
+    let receive_resume_token = match palimpsest::recv::receive_resume_token(
+        runner,
+        &header.target_dataset,
+    )
+    .await
+    {
+        Ok(opt) => opt,
+        Err(ZfsError::DatasetNotFound { .. }) => None,
+        Err(e) => {
+            warn!(
+                error = %e,
+                target = %header.target_dataset,
+                "sink: receive_resume_token query failed; LIST returning None"
+            );
+            None
+        }
+    };
+    ListResponse::Ok {
+        snapshots,
+        receive_resume_token,
+    }
 }
 
 #[cfg(test)]
@@ -431,8 +489,10 @@ mod tests {
         overrides.insert("readonly".to_string(), "on".to_string());
         overrides.insert("canmount".to_string(), "off".to_string());
         let inherit = vec!["mountpoint".to_string()];
-        // Mirrors handle_send.
-        let mut args = palimpsest::recv::RecvArgs::new("tank/sink/data").unmounted();
+        // Mirrors handle_send (T002 added .resumable()).
+        let mut args = palimpsest::recv::RecvArgs::new("tank/sink/data")
+            .unmounted()
+            .resumable();
         for (k, v) in &overrides {
             args = args.property_override(k, v);
         }
@@ -449,6 +509,7 @@ mod tests {
             Cmd::new("zfs").args([
                 "recv",
                 "-u",
+                "-s",
                 "-o",
                 "canmount=off",
                 "-o",

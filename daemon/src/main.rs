@@ -12,6 +12,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+mod error;
+mod handlers;
 mod router;
 
 #[derive(Parser, Debug)]

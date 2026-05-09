@@ -1,11 +1,10 @@
 //! Axum router + utoipa OpenAPI doc.
-//!
-//! T004 ships the scaffold with `GET /api-docs/openapi.json` exposing an
-//! empty-paths document. T005 wires in `GET /api/v1/datasets` and the
-//! handler-derived OpenAPI metadata.
 
 use axum::{Json, Router, routing::get};
 use utoipa::OpenApi;
+use utoipa_axum::{router::OpenApiRouter, routes};
+
+use crate::handlers;
 
 #[derive(OpenApi)]
 #[openapi(
@@ -18,8 +17,11 @@ use utoipa::OpenApi;
 struct ApiDoc;
 
 pub fn build_router() -> Router {
-    let api = ApiDoc::openapi();
-    Router::new().route(
+    let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
+        .routes(routes!(handlers::datasets::list_datasets))
+        .split_for_parts();
+
+    router.route(
         "/api-docs/openapi.json",
         get(move || async move { Json(api.clone()) }),
     )

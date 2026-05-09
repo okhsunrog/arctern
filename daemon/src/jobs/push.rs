@@ -556,9 +556,8 @@ impl PushJob {
 
     async fn current_link(&self) -> Option<Arc<PeerLink>> {
         let peers = self.peers.as_ref()?;
-        let name = self.config.peer.as_deref()?;
         let g = peers.read().await;
-        g.get(name).and_then(|e| e.link.clone())
+        g.get(&self.config.peer).and_then(|e| e.link.clone())
     }
 
     fn record_cycle(&self, last_error: Option<String>, interval: StdDuration) {
@@ -595,8 +594,7 @@ impl PushJob {
         let Some(peer) = self.current_link().await else {
             return Err(format!(
                 "push job {:?}: peer {:?} not currently connected",
-                self.config.name,
-                self.config.peer.as_deref().unwrap_or("<unset>")
+                self.config.name, self.config.peer
             ));
         };
         let runner = ctx.runner.as_ref();

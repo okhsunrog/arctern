@@ -18,8 +18,8 @@ pub use grid::{GridParseError, GridSpec, KeepCount, RetentionInterval, SnapshotE
 pub use prune::{PruneError, evaluate as evaluate_keep_rules};
 pub use schema::{
     AllowedClient, Config, FilesystemFilter, JobConfig, KeepRule, PeerConfig, PruningConfig,
-    PushJobConfig, PushTarget, RecvConfig, RecvProperties, SendFlagsConfig, SinkJobConfig,
-    SnapJobConfig, SnapshotFilterConfig, SnapshottingConfig,
+    PushJobConfig, PushTarget, SendFlagsConfig, SnapJobConfig, SnapshotFilterConfig,
+    SnapshottingConfig,
 };
 
 #[derive(Debug, Error)]
@@ -69,11 +69,9 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
         }
         match job {
             JobConfig::Snap(s) => validate_snap(i, s)?,
-            JobConfig::Sink(s) => validate_sink(i, s)?,
             JobConfig::Push(s) => validate_push(i, s)?,
         }
     }
-    validate_sink_listen_overlaps(cfg)?;
     Ok(())
 }
 
@@ -169,66 +167,6 @@ fn validate_snap(idx: usize, s: &SnapJobConfig) -> Result<(), String> {
             return Err(format!(
                 "jobs[{idx}].pruning.keep[{ki}].regex: {pat:?}: {e}"
             ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_sink(idx: usize, s: &SinkJobConfig) -> Result<(), String> {
-    if s.name.is_empty() {
-        return Err(format!("jobs[{idx}].name: must not be empty"));
-    }
-    if s.root_fs.is_empty() {
-        return Err(format!("jobs[{idx}].root_fs: must not be empty"));
-    }
-    if s.root_fs.starts_with('/') || s.root_fs.ends_with('/') {
-        return Err(format!(
-            "jobs[{idx}].root_fs: {:?} must not start or end with '/'",
-            s.root_fs
-        ));
-    }
-    Ok(())
-}
-
-/// Reject configs whose sink jobs would race for the same effective
-/// bind address. A wildcard (0.0.0.0 / [::]) on port N subsumes any
-/// specific IP on port N; otherwise (ip, port) equality is the gate.
-fn validate_sink_listen_overlaps(cfg: &Config) -> Result<(), String> {
-    use std::net::IpAddr;
-    let sinks: Vec<(usize, &SinkJobConfig)> = cfg
-        .jobs
-        .iter()
-        .enumerate()
-        .filter_map(|(i, j)| match j {
-            JobConfig::Sink(s) => Some((i, s)),
-            _ => None,
-        })
-        .collect();
-    for (a_idx, (i, a)) in sinks.iter().enumerate() {
-        for (j, b) in sinks.iter().skip(a_idx + 1) {
-            let same_port = a.listen.port() == b.listen.port();
-            if !same_port {
-                continue;
-            }
-            let a_wild = a.listen.ip().is_unspecified();
-            let b_wild = b.listen.ip().is_unspecified();
-            // Family must match for the wildcard to subsume the specific
-            // address; otherwise IPv4 0.0.0.0 vs IPv6 ::1 do not race.
-            let same_family = matches!(
-                (a.listen.ip(), b.listen.ip()),
-                (IpAddr::V4(_), IpAddr::V4(_)) | (IpAddr::V6(_), IpAddr::V6(_))
-            );
-            let overlap = if same_family {
-                a_wild || b_wild || a.listen.ip() == b.listen.ip()
-            } else {
-                false
-            };
-            if overlap {
-                return Err(format!(
-                    "jobs[{i}].listen and jobs[{j}].listen overlap: {} vs {}",
-                    a.listen, b.listen
-                ));
-            }
         }
     }
     Ok(())
@@ -404,127 +342,6 @@ regex = "("
         assert!(parse(s).is_err());
     }
 
-    const SINK_OK: &str = r#"
-[[jobs]]
-type = "sink"
-name = "from_remote"
-listen = "0.0.0.0:8888"
-root_fs = "tank/backups"
-"#;
-
-    #[test]
-    fn minimal_sink_parses() {
-        let c = parse(SINK_OK).unwrap();
-        assert_eq!(c.jobs.len(), 1);
-        match &c.jobs[0] {
-            JobConfig::Sink(s) => {
-                assert_eq!(s.name, "from_remote");
-                assert_eq!(s.root_fs, "tank/backups");
-                assert!(s.recv.properties.overrides.is_empty());
-                assert!(s.recv.properties.inherit.is_empty());
-            }
-            _ => panic!("expected Sink"),
-        }
-    }
-
-    #[test]
-    fn sink_with_recv_properties_parses() {
-        let s = r#"
-[[jobs]]
-type = "sink"
-name = "from_remote"
-listen = "0.0.0.0:8888"
-root_fs = "tank/backups"
-[jobs.recv.properties]
-override = { canmount = "off" }
-inherit = ["mountpoint"]
-"#;
-        let c = parse(s).unwrap();
-        let JobConfig::Sink(sink) = &c.jobs[0] else {
-            panic!("expected Sink")
-        };
-        assert_eq!(
-            sink.recv.properties.overrides.get("canmount").map(String::as_str),
-            Some("off")
-        );
-        assert_eq!(sink.recv.properties.inherit, vec!["mountpoint".to_string()]);
-    }
-
-    #[test]
-    fn sink_bad_listen_rejected() {
-        let s = r#"
-[[jobs]]
-type = "sink"
-name = "x"
-listen = "not-a-socket-addr"
-root_fs = "tank/backups"
-"#;
-        assert!(parse(s).is_err());
-    }
-
-    #[test]
-    fn sink_empty_root_fs_rejected() {
-        let s = r#"
-[[jobs]]
-type = "sink"
-name = "x"
-listen = "0.0.0.0:8888"
-root_fs = ""
-"#;
-        let err = parse(s).unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("root_fs"));
-    }
-
-    #[test]
-    fn sink_root_fs_trailing_slash_rejected() {
-        let s = r#"
-[[jobs]]
-type = "sink"
-name = "x"
-listen = "0.0.0.0:8888"
-root_fs = "tank/"
-"#;
-        let err = parse(s).unwrap_err();
-        let msg = format!("{err}");
-        assert!(msg.contains("root_fs"));
-    }
-
-    #[test]
-    fn sink_overlapping_wildcard_rejected() {
-        let s = r#"
-[[jobs]]
-type = "sink"
-name = "a"
-listen = "0.0.0.0:8888"
-root_fs = "tank/a"
-[[jobs]]
-type = "sink"
-name = "b"
-listen = "127.0.0.1:8888"
-root_fs = "tank/b"
-"#;
-        let err = parse(s).unwrap_err();
-        assert!(format!("{err}").contains("overlap"));
-    }
-
-    #[test]
-    fn sink_distinct_ports_accepted() {
-        let s = r#"
-[[jobs]]
-type = "sink"
-name = "a"
-listen = "0.0.0.0:8888"
-root_fs = "tank/a"
-[[jobs]]
-type = "sink"
-name = "b"
-listen = "0.0.0.0:8889"
-root_fs = "tank/b"
-"#;
-        parse(s).expect("two distinct ports must validate");
-    }
-
     #[test]
     fn state_dir_optional() {
         let c = parse("state_dir = \"/var/lib/arctern\"\n").unwrap();
@@ -538,7 +355,7 @@ root_fs = "tank/b"
 [[jobs]]
 type = "push"
 name = "push_to_server"
-connect = "10.77.77.100:8888"
+peer = "home"
 interval = "15m"
 [[jobs.filesystems]]
 path = "okdata/data/home"
@@ -555,10 +372,9 @@ prefix = "zrepl_"
             panic!("expected Push")
         };
         assert_eq!(p.name, "push_to_server");
-        assert_eq!(p.connect.unwrap().port(), 8888);
+        assert_eq!(p.peer, "home");
         assert_eq!(p.target.root_fs, "okdata/backups/laptop");
         assert_eq!(p.snapshot_filter.prefix.as_deref(), Some("zrepl_"));
-        assert_eq!(p.server_name, "arctern");
     }
 
     #[test]
@@ -579,7 +395,7 @@ prefix = "zrepl_"
 [[jobs]]
 type = "push"
 name = "p"
-connect = "127.0.0.1:1"
+peer = "p"
 interval = "1s"
 [[jobs.filesystems]]
 path = "tank/data"
@@ -604,7 +420,7 @@ prefix = "x_"
 [[jobs]]
 type = "push"
 name = "p"
-connect = "127.0.0.1:1"
+peer = "p"
 interval = "1s"
 [[jobs.filesystems]]
 path = "tank/data"
@@ -622,7 +438,7 @@ root_fs = "tank/sink"
 [[jobs]]
 type = "push"
 name = "p"
-connect = "127.0.0.1:1"
+peer = "p"
 interval = "1s"
 [[jobs.filesystems]]
 path = "tank/data"
@@ -642,7 +458,7 @@ regex = "^zrepl_.*"
 [[jobs]]
 type = "push"
 name = "p"
-connect = "127.0.0.1:1"
+peer = "p"
 interval = "1s"
 [[jobs.filesystems]]
 path = "tank/data"
@@ -662,7 +478,7 @@ regex = "("
 [[jobs]]
 type = "push"
 name = "p"
-connect = "127.0.0.1:1"
+peer = "p"
 interval = "1s"
 [[jobs.filesystems]]
 path = "tank/data"
@@ -678,12 +494,11 @@ prefix = "x_"
     }
 
     #[test]
-    fn push_bad_connect_rejected() {
+    fn push_missing_peer_rejected() {
         let s = r#"
 [[jobs]]
 type = "push"
 name = "p"
-connect = "not-a-socket-addr"
 interval = "1s"
 [[jobs.filesystems]]
 path = "tank/data"
@@ -701,7 +516,7 @@ prefix = "x_"
 [[jobs]]
 type = "push"
 name = "p"
-connect = "127.0.0.1:1"
+peer = "p"
 interval = "4 fortnights"
 [[jobs.filesystems]]
 path = "tank/data"

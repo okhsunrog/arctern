@@ -1,23 +1,22 @@
-# arctern.toml — annotated example translating two Go zrepl jobs into
-# arctern's TOML schema. See specs/003-config-and-snap-job/spec.md for
-# the full schema reference.
+# arctern.toml — annotated example for the SSH-transport pivot.
 #
-# Snapshot tags use `<prefix><RFC3339-utc-no-colons>` (e.g.,
+# Two host roles:
+#
+# - The LAPTOP runs `arctern daemon`. It owns snap jobs (local) plus
+#   push jobs that reference a `[[peers]]` entry.
+# - The HOME SERVER runs sshd with an authorized_keys ForcedCommand
+#   pointing at `arctern stdinserver-dispatch <identity>`. The
+#   home server's arctern config carries `[[allowed_clients]]` rows
+#   that authorise the laptop's identity for the requested operations.
+#
+# Both hosts may also run their own snap jobs and their own loopback
+# UI; the daemon binary is identical, the role is determined by which
+# of [[peers]] / [[allowed_clients]] / [[jobs]] sections are populated.
+#
+# Snapshot tags use `<prefix><RFC3339-utc-no-colons>` (e.g.
 # `zrepl_20260509T134500Z`). Wire-compatible with Go zrepl per the
-# arctern constitution principle VII — a host migrating from zrepl can
-# keep its existing snapshot history under arctern.
-#
-# IMPORTANT differences from zrepl YAML:
-#
-# 1. The filesystems map `{ "okdata/data/nas": true, ... }` becomes one
-#    `[[jobs.filesystems]]` table per filesystem. Booleans are
-#    inappropriate in TOML for this purpose; explicit per-table `path`
-#    fields are clearer and let us add `recursive` + `exclude` cleanly.
-#
-# 2. zrepl's `path<` recursive include syntax becomes
-#    `recursive = true` plus an explicit `exclude = [...]` array of
-#    paths to skip. To snapshot only the descendants of a recursive
-#    root (not the root itself), include the root path in `exclude`.
+# durable design — a host migrating from zrepl can keep its existing
+# snapshot history under arctern.
 
 # ─── databak: 4-hourly snapshots of three nas/root/home filesystems ──
 
@@ -80,34 +79,39 @@ type = "regex"
 regex = "^zrepl_.*"
 negate = true
 
-# ─── push_to_local: replicate snapshots to a sink peer ──────────────
+# ─── peers: outbound SSH connections this daemon may open ───────────
 #
-# This is the active sender side. The peer ("10.77.77.100:8888")
-# runs an arctern daemon with a `[[jobs]] type = "sink"` block
-# bound to the same port. WireGuard sits underneath; the QUIC TLS
-# layer accepts any cert (constitution V — WG is the perimeter).
+# The daemon hands `ssh_target` verbatim to openssh; any string that
+# `ssh -G <ssh_target> exit` accepts works (host alias from
+# ~/.ssh/config, `user@host:port`, an inventory of ProxyJump'd hops).
+# ControlMaster keeps one TCP connection alive across every channel
+# the push job opens.
+
+[[peers]]
+name = "home"
+ssh_target = "arctern-replicator@homeserver.lan"
+
+# ─── push_to_home: replicate snapshots to the home server peer ──────
 #
 # Path mapping is literal concatenation:
 #   sender path  okdata/data/home
 #   target.root_fs  okdata/backups/laptop
 #   becomes      okdata/backups/laptop/okdata/data/home
 # on the receiver. NO path stripping. The full sender path is
-# preserved under the receiver's root_fs so a single sink can host
-# many sender peers without name collisions.
+# preserved under the receiver's root_fs so a single receiver can
+# host many sender peers without name collisions.
 #
 # `interval` is the planner-cycle interval — the snap job above
 # decides snapshot frequency. The push job's only job is to ferry
 # whatever the sender currently has across to the receiver. Use
-# `POST /api/v1/jobs/push_to_local/wakeup` (or the dashboard
-# button) to trigger an immediate cycle.
+# `POST /api/v1/jobs/push_to_home/wakeup` (or the dashboard button)
+# to trigger an immediate cycle.
 
 [[jobs]]
 type = "push"
-name = "push_to_local"
-connect = "10.77.77.100:8888"
+name = "push_to_home"
+peer = "home"
 interval = "15m"
-# server_name defaults to "arctern" — matches the sink's self-signed
-# cert CN. Override only if the peer is using a different identity.
 
 [[jobs.filesystems]]
 path = "okdata/data/home"
@@ -134,3 +138,27 @@ large_blocks = true
 # created or system-created snapshots out of the replication loop.
 [jobs.snapshot_filter]
 prefix = "zrepl_"
+
+# ─── HOME SERVER side: ACL for the laptop's inbound channels ────────
+#
+# This block lives in the home server's arctern.toml (NOT the laptop's,
+# despite appearing in the same example file for documentation).
+#
+# `identity` matches the literal argv passed to stdinserver-dispatch
+# from the home server's authorized_keys line:
+#
+#   command="/usr/local/bin/arctern stdinserver-dispatch laptop_nova",restrict ssh-ed25519 AAAA...
+#
+# `fingerprint` is an optional defense-in-depth pin: when set, the
+# dispatcher compares it to SSH_AUTH_INFO_0 (OpenSSH ≥ 7.4) before
+# granting access.
+#
+# `jobs` and `operations` are allow-lists; `root_fs` restricts recv
+# operations to that subtree.
+
+[[allowed_clients]]
+identity = "laptop_nova"
+fingerprint = "SHA256:abc123..."
+jobs = ["push_to_home"]
+operations = ["control", "recv"]
+root_fs = "okdata/backups/laptop"

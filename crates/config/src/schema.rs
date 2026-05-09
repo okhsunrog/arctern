@@ -3,8 +3,6 @@
 //! the mapping. `#[serde(deny_unknown_fields)]` everywhere so a typo in
 //! the operator's file fails loud, not silent.
 
-use std::collections::BTreeMap;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -73,7 +71,6 @@ pub struct AllowedClient {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum JobConfig {
     Snap(SnapJobConfig),
-    Sink(SinkJobConfig),
     Push(PushJobConfig),
 }
 
@@ -81,7 +78,6 @@ impl JobConfig {
     pub fn name(&self) -> &str {
         match self {
             JobConfig::Snap(s) => &s.name,
-            JobConfig::Sink(s) => &s.name,
             JobConfig::Push(s) => &s.name,
         }
     }
@@ -138,77 +134,25 @@ pub enum KeepRule {
     },
 }
 
-/// Sink job — passive receiver. Binds a QUIC listener on `listen` and
-/// writes inbound `zfs send` streams under `root_fs` (target dataset
-/// path comes from the wire header).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SinkJobConfig {
-    pub name: String,
-    pub listen: SocketAddr,
-    pub root_fs: String,
-    #[serde(default)]
-    pub recv: RecvConfig,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RecvConfig {
-    #[serde(default)]
-    pub properties: RecvProperties,
-}
-
-/// Mirrors zrepl's `recv.properties.{override, inherit}`. Slice 005
-/// closes the wiring (see slice 005 plan D22 → T008): both fields are
-/// passed to palimpsest's RecvArgs::property_override / property_inherit
-/// builders inside SinkJob::handle_send.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RecvProperties {
-    /// `-o property=value` overrides applied at recv time.
-    #[serde(default, rename = "override")]
-    pub overrides: BTreeMap<String, String>,
-    /// `-x property` inheritance — drop the property from the stream.
-    #[serde(default)]
-    pub inherit: Vec<String>,
-}
-
 /// Push job — active sender. Each cycle, lists local matching snapshots
-/// per filesystem, opens a QUIC LIST request to the peer to learn what
-/// it already has, intersects by GUID, and emits a full or incremental
-/// `zfs send` over a second QUIC stream into the peer's sink.
+/// per filesystem, asks the peer over its SSH control channel what it
+/// has, intersects by GUID, and pipes a full / incremental / resume
+/// `zfs send` into a fresh recv channel on the peer.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PushJobConfig {
     pub name: String,
-    /// Receiver peer name. Must match a `[[peers]]` entry. Optional in
-    /// this commit so existing QUIC-shape configs still parse; the
-    /// daemon refuses to run a push job whose peer is missing once the
-    /// SSH executor lands in step 9.
-    #[serde(default)]
-    pub peer: Option<String>,
-    /// Legacy QUIC sink address. Ignored under the SSH transport;
-    /// retained as Optional so existing TOMLs deserialise. Field will
-    /// be removed in a follow-up.
-    #[serde(default)]
-    pub connect: Option<SocketAddr>,
+    /// Receiver peer name. Must match a `[[peers]]` entry.
+    pub peer: String,
     /// How often the planner cycle fires. The wakeup endpoint
     /// (POST /api/v1/jobs/{name}/wakeup) re-enters the cycle on demand.
     #[serde(with = "humantime_serde")]
     pub interval: Duration,
-    /// Legacy QUIC SNI. Ignored under the SSH transport; default
-    /// retained for backward-compat parsing.
-    #[serde(default = "default_server_name")]
-    pub server_name: String,
     pub filesystems: Vec<FilesystemFilter>,
     pub target: PushTarget,
     #[serde(default)]
     pub send: SendFlagsConfig,
     pub snapshot_filter: SnapshotFilterConfig,
-}
-
-fn default_server_name() -> String {
-    "arctern".into()
 }
 
 #[derive(Debug, Clone, Deserialize)]

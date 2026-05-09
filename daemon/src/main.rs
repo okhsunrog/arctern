@@ -232,24 +232,7 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
                 let job = Arc::new(jobs::snap::SnapJob::new(s));
                 manager.spawn(job, ctx.clone());
             }
-            arctern_config::JobConfig::Sink(s) => {
-                // Sink jobs are the legacy QUIC receiver shape. The SSH
-                // pivot moves their behaviour into stdinserver/recv on
-                // the receiving host. Configs that still mention sink
-                // are accepted (so existing files keep parsing) but a
-                // warning is logged and the job is not spawned.
-                tracing::warn!(
-                    name = %s.name,
-                    "sink jobs are obsolete under the SSH transport; ignoring"
-                );
-            }
             arctern_config::JobConfig::Push(s) => {
-                if s.peer.is_none() {
-                    tracing::warn!(
-                        name = %s.name,
-                        "push job has no `peer` field; cycles will report errors"
-                    );
-                }
                 let job = jobs::push::PushJob::new(s, Some(peers_state.clone()))
                     .map_err(|e| eyre::eyre!("push job filter regex: {e}"))?;
                 manager.spawn(Arc::new(job), ctx.clone());

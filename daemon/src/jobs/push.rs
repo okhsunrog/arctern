@@ -46,11 +46,33 @@ pub enum SnapshotPlan {
     /// is already on the receiver. No QUIC SEND stream this cycle.
     Nothing,
     /// First-replication path. Send the sender's latest matching
-    /// snapshot in full.
-    Full { to: SnapshotRef },
+    /// snapshot in full. `discard_partial_recv` is set when the
+    /// receiver advertised a stale resume token that must be cleared
+    /// (`zfs recv -A`) before this fresh stream can land — D6
+    /// confirmed in the VM that ZFS rejects a fresh full into a
+    /// dataset with `receive_resume_token` set, even with -F.
+    Full {
+        to: SnapshotRef,
+        discard_partial_recv: bool,
+    },
     /// Send the delta from `from` (highest-createtxg common GUID with
     /// the receiver) to `to` (sender's latest matching snapshot).
-    Incremental { from: SnapshotRef, to: SnapshotRef },
+    /// Same `discard_partial_recv` semantics as `Full`.
+    Incremental {
+        from: SnapshotRef,
+        to: SnapshotRef,
+        discard_partial_recv: bool,
+    },
+    /// Continue an in-flight partial recv on the receiver via
+    /// `zfs send -t <token>`. The token encodes the destination's
+    /// expected `(from_guid, to_guid)`; the planner verifies both
+    /// remain on the sender before emitting this variant. Falls
+    /// through to Full/Incremental with `discard_partial_recv = true`
+    /// when validation fails.
+    Resume {
+        token: String,
+        decoded: palimpsest::resume_token::ResumeToken,
+    },
 }
 
 /// Compiled snapshot filter. Owns the optional regex (so the planner
@@ -95,6 +117,14 @@ pub enum PlanError {
     Receiver { message: String },
     #[error("quinn: {0}")]
     Quinn(String),
+    /// Slice 006: receiver advertised a `receive_resume_token` but the
+    /// sender failed to decode it via `zfs send -nvt`. Per spec edge
+    /// case "Token decode itself fails", we do NOT fall through to a
+    /// fresh send — that would fail at recv with the partial-state
+    /// error and not get cleaned up. Operator-driven recovery (manual
+    /// `zfs recv -A`).
+    #[error("decode resume token: {0}")]
+    ResumeTokenDecode(#[from] palimpsest::resume_token::ResumeTokenError),
 }
 
 /// Sender-side snapshot pulled out of palimpsest into the planner's
@@ -159,11 +189,26 @@ pub async fn list_sender_snaps(
 /// `SnapshotPlan`. Split out so the GUID-intersection algorithm is
 /// trivially testable without ZFS or QUIC.
 pub fn pick_plan(sender: &[SnapshotRef], receiver: &[SnapshotEntry]) -> SnapshotPlan {
+    pick_plan_with_discard(sender, receiver, false)
+}
+
+/// Same algorithm as `pick_plan` but stamps the `discard_partial_recv`
+/// flag on the returned `Full` / `Incremental` (slice 006). Split out
+/// so `pick_plan` keeps its slice-005 signature and call sites that
+/// don't care about the flag stay terse.
+fn pick_plan_with_discard(
+    sender: &[SnapshotRef],
+    receiver: &[SnapshotEntry],
+    discard_partial_recv: bool,
+) -> SnapshotPlan {
     let Some(latest) = sender.last() else {
         return SnapshotPlan::Nothing;
     };
     if receiver.is_empty() {
-        return SnapshotPlan::Full { to: latest.clone() };
+        return SnapshotPlan::Full {
+            to: latest.clone(),
+            discard_partial_recv,
+        };
     }
     use std::collections::BTreeSet;
     let recv_guids: BTreeSet<u64> = receiver.iter().map(|s| s.guid).collect();
@@ -176,24 +221,67 @@ pub fn pick_plan(sender: &[SnapshotRef], receiver: &[SnapshotEntry]) -> Snapshot
         }
     }
     match from {
-        None => SnapshotPlan::Full { to: latest.clone() },
+        None => SnapshotPlan::Full {
+            to: latest.clone(),
+            discard_partial_recv,
+        },
         Some(f) if f.guid == latest.guid => SnapshotPlan::Nothing,
         Some(f) => SnapshotPlan::Incremental {
             from: f.clone(),
             to: latest.clone(),
+            discard_partial_recv,
         },
     }
 }
 
+/// Slice 006 planner core: choose between Resume, Full+discard,
+/// Incremental+discard, and the slice-005 plain Full / Incremental /
+/// Nothing. Pure (no I/O) so the GUID-validation logic is testable
+/// without QUIC or ZFS.
+///
+/// The token validation is "are BOTH endpoints encoded in the token
+/// still on the sender?" — to_guid must always match; from_guid must
+/// match when the token is for an incremental resume (full-send
+/// tokens have `from_guid == None`, in which case only to_guid matters).
+pub fn pick_plan_with_token(
+    sender: &[SnapshotRef],
+    receiver: &[SnapshotEntry],
+    token: Option<&str>,
+    decoded: Option<&palimpsest::resume_token::ResumeToken>,
+) -> SnapshotPlan {
+    let (Some(token), Some(decoded)) = (token, decoded) else {
+        return pick_plan(sender, receiver);
+    };
+    use std::collections::BTreeSet;
+    let sender_guids: BTreeSet<u64> = sender.iter().map(|s| s.guid).collect();
+    let to_live = sender_guids.contains(&decoded.to_guid);
+    let from_live = decoded
+        .from_guid
+        .map(|g| sender_guids.contains(&g))
+        .unwrap_or(true);
+    if to_live && from_live {
+        SnapshotPlan::Resume {
+            token: token.to_string(),
+            decoded: decoded.clone(),
+        }
+    } else {
+        // Token is stale. Fall back to slice-005 algorithm but mark the
+        // plan so the sink runs `zfs recv -A` first.
+        pick_plan_with_discard(sender, receiver, true)
+    }
+}
+
 /// Open a fresh QUIC bi stream, send a LIST request, read the
-/// receiver's snapshot list. Returns the parsed receiver snapshots
-/// (an empty Vec means the dataset doesn't exist yet — sink maps
-/// DatasetNotFound to an empty Ok per slice 005 D16).
+/// receiver's snapshot list AND the receiver's `receive_resume_token`
+/// (slice 006). Returns `(snapshots, token)`. An empty snapshot Vec
+/// means the dataset doesn't exist yet (sink maps DatasetNotFound to
+/// an empty Ok per slice 005 D16). `token = None` means there is no
+/// partial recv in flight on the receiver — the most common case.
 pub async fn fetch_receiver_snaps(
     connection: &quinn::Connection,
     target_dataset: &str,
     filter: &CompiledFilter,
-) -> Result<Vec<SnapshotEntry>, PlanError> {
+) -> Result<(Vec<SnapshotEntry>, Option<String>), PlanError> {
     use arctern_transport::{ListResponse, read_list_response};
 
     let (mut send, mut recv) = connection
@@ -212,7 +300,10 @@ pub async fn fetch_receiver_snaps(
         .map_err(|e| PlanError::Quinn(format!("finish (list): {e}")))?;
     let resp = read_list_response(&mut recv).await?;
     match resp {
-        ListResponse::Ok { snapshots } => Ok(snapshots),
+        ListResponse::Ok {
+            snapshots,
+            receive_resume_token,
+        } => Ok((snapshots, receive_resume_token)),
         ListResponse::Error { message } => Err(PlanError::Receiver { message }),
     }
 }
@@ -232,8 +323,17 @@ pub async fn plan_one_filesystem(
     if sender.is_empty() {
         return Ok(SnapshotPlan::Nothing);
     }
-    let receiver = fetch_receiver_snaps(connection, target_dataset, filter).await?;
-    Ok(pick_plan(&sender, &receiver))
+    let (receiver, token) = fetch_receiver_snaps(connection, target_dataset, filter).await?;
+    let decoded = match token.as_deref() {
+        Some(t) => Some(palimpsest::resume_token::decode(runner, t).await?),
+        None => None,
+    };
+    Ok(pick_plan_with_token(
+        &sender,
+        &receiver,
+        token.as_deref(),
+        decoded.as_ref(),
+    ))
 }
 
 #[derive(Debug, Error)]
@@ -261,23 +361,50 @@ pub enum ExecError {
 /// Build the wire-side SendHeader from a plan + the operator's flag
 /// config. Pure helper, easy to test.
 pub fn build_send_header(plan: &SnapshotPlan, flags: &SendFlagsConfig) -> Option<SendHeader> {
-    let (send_kind, from_snap, to_snap) = match plan {
-        SnapshotPlan::Nothing => return None,
-        SnapshotPlan::Full { to } => (SendKind::Full, None, to.clone()),
-        SnapshotPlan::Incremental { from, to } => {
-            (SendKind::Incremental, Some(from.clone()), to.clone())
-        }
+    let wire_flags = SendFlagsWire {
+        raw: flags.encrypted,
+        embedded: flags.embedded_data,
+        compressed: flags.compressed,
+        large_blocks: flags.large_blocks,
     };
+    let (send_kind, from_snap, to_snap, discard_partial_recv) = match plan {
+        SnapshotPlan::Nothing => return None,
+        SnapshotPlan::Full {
+            to,
+            discard_partial_recv,
+        } => (SendKind::Full, None, to.clone(), *discard_partial_recv),
+        SnapshotPlan::Incremental {
+            from,
+            to,
+            discard_partial_recv,
+        } => (
+            SendKind::Incremental,
+            Some(from.clone()),
+            to.clone(),
+            *discard_partial_recv,
+        ),
+        SnapshotPlan::Resume { decoded, .. } => (
+            SendKind::Resume,
+            None,
+            SnapshotRef {
+                name: decoded.to_name.clone(),
+                guid: decoded.to_guid,
+            },
+            // D18: Resume MUST NOT discard the partial — that IS the
+            // partial we are continuing.
+            false,
+        ),
+    };
+    debug_assert!(
+        !(matches!(plan, SnapshotPlan::Resume { .. }) && discard_partial_recv),
+        "Resume plan must not set discard_partial_recv"
+    );
     Some(SendHeader {
         send_kind,
         from_snap,
         to_snap,
-        flags: SendFlagsWire {
-            raw: flags.encrypted,
-            embedded: flags.embedded_data,
-            compressed: flags.compressed,
-            large_blocks: flags.large_blocks,
-        },
+        flags: wire_flags,
+        discard_partial_recv,
     })
 }
 
@@ -288,10 +415,30 @@ pub fn build_send_args(
     sender_dataset: &str,
     flags: &SendFlagsConfig,
 ) -> Option<SendArgs> {
+    // Resume builds differently: the snapshot positional is unused
+    // (palimpsest's SendArgs ignores it when from = ResumeToken) and
+    // the `-i` form does not apply.
+    if let SnapshotPlan::Resume { token, .. } = plan {
+        let mut args = SendArgs::new("ignored").resume_token(token);
+        if flags.encrypted {
+            args = args.raw();
+        }
+        if flags.embedded_data {
+            args = args.embedded();
+        }
+        if flags.compressed {
+            args = args.compressed();
+        }
+        if flags.large_blocks {
+            args = args.large_blocks();
+        }
+        return Some(args);
+    }
     let to_full = match plan {
         SnapshotPlan::Nothing => return None,
-        SnapshotPlan::Full { to } => format!("{sender_dataset}@{}", to.name),
+        SnapshotPlan::Full { to, .. } => format!("{sender_dataset}@{}", to.name),
         SnapshotPlan::Incremental { to, .. } => format!("{sender_dataset}@{}", to.name),
+        SnapshotPlan::Resume { .. } => unreachable!("handled above"),
     };
     let mut args = SendArgs::new(to_full);
     if flags.encrypted {
@@ -503,13 +650,43 @@ impl PushJob {
                     tracing::info!(sender = %sender_path, "push: nothing to do");
                     continue;
                 }
-                SnapshotPlan::Full { to } => {
-                    tracing::info!(sender = %sender_path, to = %to.name, "push: full send");
+                SnapshotPlan::Full {
+                    to,
+                    discard_partial_recv,
+                } => {
+                    if *discard_partial_recv {
+                        tracing::info!(
+                            sender = %sender_path,
+                            to = %to.name,
+                            "push: full send (discarding stale partial)"
+                        );
+                    } else {
+                        tracing::info!(sender = %sender_path, to = %to.name, "push: full send");
+                    }
                 }
-                SnapshotPlan::Incremental { from, to } => {
+                SnapshotPlan::Incremental {
+                    from,
+                    to,
+                    discard_partial_recv,
+                } => {
+                    if *discard_partial_recv {
+                        tracing::info!(
+                            sender = %sender_path, from = %from.name, to = %to.name,
+                            "push: incremental send (discarding stale partial)"
+                        );
+                    } else {
+                        tracing::info!(
+                            sender = %sender_path, from = %from.name, to = %to.name,
+                            "push: incremental send"
+                        );
+                    }
+                }
+                SnapshotPlan::Resume { decoded, .. } => {
                     tracing::info!(
-                        sender = %sender_path, from = %from.name, to = %to.name,
-                        "push: incremental send"
+                        sender = %sender_path,
+                        to = %decoded.to_name,
+                        bytes = decoded.bytes_received,
+                        "push: resuming from token"
                     );
                 }
             }
@@ -603,7 +780,10 @@ mod tests {
         let sender = vec![s("a", 1), s("b", 2)];
         assert_eq!(
             pick_plan(&sender, &[]),
-            SnapshotPlan::Full { to: s("b", 2) }
+            SnapshotPlan::Full {
+                to: s("b", 2),
+                discard_partial_recv: false,
+            }
         );
     }
 
@@ -623,6 +803,7 @@ mod tests {
             SnapshotPlan::Incremental {
                 from: s("b", 2),
                 to: s("c", 3),
+                discard_partial_recv: false,
             }
         );
     }
@@ -638,6 +819,7 @@ mod tests {
             SnapshotPlan::Incremental {
                 from: s("d", 4),
                 to: s("e", 5),
+                discard_partial_recv: false,
             }
         );
     }
@@ -649,7 +831,10 @@ mod tests {
         let receiver = vec![e("x", 100, 1), e("y", 200, 2)];
         assert_eq!(
             pick_plan(&sender, &receiver),
-            SnapshotPlan::Full { to: s("b", 2) }
+            SnapshotPlan::Full {
+                to: s("b", 2),
+                discard_partial_recv: false,
+            }
         );
     }
 
@@ -672,6 +857,7 @@ mod tests {
             SnapshotPlan::Incremental {
                 from: s("zrepl_001", 11587258101628135412),
                 to: s("manual_001", 14719774020884296672),
+                discard_partial_recv: false,
             }
         );
     }
@@ -693,11 +879,13 @@ mod tests {
     fn build_send_header_full_uses_all_default_flags() {
         let plan = SnapshotPlan::Full {
             to: s("snap1", 42),
+            discard_partial_recv: false,
         };
         let h = build_send_header(&plan, &SendFlagsConfig::default()).unwrap();
         assert_eq!(h.send_kind, SendKind::Full);
         assert!(h.from_snap.is_none());
         assert_eq!(h.to_snap.guid, 42);
+        assert!(!h.discard_partial_recv);
         assert_eq!(
             h.flags,
             SendFlagsWire {
@@ -714,11 +902,13 @@ mod tests {
         let plan = SnapshotPlan::Incremental {
             from: s("snap1", 1),
             to: s("snap2", 2),
+            discard_partial_recv: false,
         };
         let h = build_send_header(&plan, &SendFlagsConfig::default()).unwrap();
         assert_eq!(h.send_kind, SendKind::Incremental);
         assert_eq!(h.from_snap.unwrap().guid, 1);
         assert_eq!(h.to_snap.guid, 2);
+        assert!(!h.discard_partial_recv);
     }
 
     #[test]
@@ -730,6 +920,7 @@ mod tests {
     fn build_send_args_full_with_all_flags() {
         let plan = SnapshotPlan::Full {
             to: s("snap1", 1),
+            discard_partial_recv: false,
         };
         let args = build_send_args(&plan, "tank/data", &SendFlagsConfig::default()).unwrap();
         let v = args.build_args(false).unwrap();
@@ -742,6 +933,7 @@ mod tests {
         let plan = SnapshotPlan::Incremental {
             from: s("snap1", 1),
             to: s("snap2", 2),
+            discard_partial_recv: false,
         };
         let args = build_send_args(&plan, "tank/data", &SendFlagsConfig::default()).unwrap();
         let v = args.build_args(false).unwrap();
@@ -770,5 +962,158 @@ mod tests {
         assert!(f.matches("auto_42"));
         assert!(!f.matches("auto_x"));
         assert_eq!(f.wire_regex(), Some("^auto_[0-9]+$"));
+    }
+
+    // ─── Slice 006 ─────────────────────────────────────────────────
+
+    fn rt(to_guid: u64, from_guid: Option<u64>) -> palimpsest::resume_token::ResumeToken {
+        palimpsest::resume_token::ResumeToken {
+            token: "1-deadbeef".into(),
+            to_name: "tank/data@snap_x".into(),
+            to_guid,
+            from_guid,
+            bytes_received: 1024,
+        }
+    }
+
+    #[test]
+    fn pick_plan_with_token_none_falls_through_to_full() {
+        // Slice 005 behaviour preserved when no token is present.
+        let sender = vec![s("a", 1), s("b", 2)];
+        let p = pick_plan_with_token(&sender, &[], None, None);
+        assert_eq!(
+            p,
+            SnapshotPlan::Full {
+                to: s("b", 2),
+                discard_partial_recv: false,
+            }
+        );
+    }
+
+    #[test]
+    fn pick_plan_with_token_live_full_emits_resume() {
+        // Token's to_guid is on the sender; from_guid is None (full-send
+        // resume). Plan = Resume.
+        let sender = vec![s("a", 1), s("b", 11587258101628135412)];
+        let decoded = rt(11587258101628135412, None);
+        let p = pick_plan_with_token(&sender, &[], Some("1-deadbeef"), Some(&decoded));
+        match p {
+            SnapshotPlan::Resume { token, decoded: d } => {
+                assert_eq!(token, "1-deadbeef");
+                assert_eq!(d.to_guid, 11587258101628135412);
+            }
+            other => panic!("expected Resume, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pick_plan_with_token_live_incremental_emits_resume() {
+        // Both endpoints of the incremental-resume token are on the sender.
+        let sender = vec![s("a", 1), s("b", 2)];
+        let decoded = rt(2, Some(1));
+        let p = pick_plan_with_token(&sender, &[], Some("1-deadbeef"), Some(&decoded));
+        assert!(matches!(p, SnapshotPlan::Resume { .. }));
+    }
+
+    #[test]
+    fn pick_plan_with_token_to_guid_dead_emits_full_with_discard() {
+        // Token's to_guid is no longer on the sender. Receiver is empty
+        // so the only option is Full + discard.
+        let sender = vec![s("a", 1), s("b", 2)];
+        let decoded = rt(99999, None);
+        let p = pick_plan_with_token(&sender, &[], Some("1-deadbeef"), Some(&decoded));
+        assert_eq!(
+            p,
+            SnapshotPlan::Full {
+                to: s("b", 2),
+                discard_partial_recv: true,
+            }
+        );
+    }
+
+    #[test]
+    fn pick_plan_with_token_from_guid_dead_emits_with_discard() {
+        // Incremental token, sender has to_guid but not from_guid.
+        let sender = vec![s("a", 1), s("b", 2)];
+        let decoded = rt(2, Some(99999));
+        let p = pick_plan_with_token(&sender, &[], Some("1-deadbeef"), Some(&decoded));
+        assert_eq!(
+            p,
+            SnapshotPlan::Full {
+                to: s("b", 2),
+                discard_partial_recv: true,
+            }
+        );
+    }
+
+    #[test]
+    fn pick_plan_with_token_dead_but_common_snap_exists_emits_incremental_with_discard() {
+        // Sender + receiver share a different GUID; token is stale →
+        // Incremental + discard, NOT Full + discard.
+        let sender = vec![s("a", 1), s("b", 2), s("c", 3)];
+        let receiver = vec![e("b", 2, 5)];
+        let decoded = rt(99999, None);
+        let p = pick_plan_with_token(&sender, &receiver, Some("1-deadbeef"), Some(&decoded));
+        assert_eq!(
+            p,
+            SnapshotPlan::Incremental {
+                from: s("b", 2),
+                to: s("c", 3),
+                discard_partial_recv: true,
+            }
+        );
+    }
+
+    #[test]
+    fn build_send_header_full_with_discard_sets_flag() {
+        let plan = SnapshotPlan::Full {
+            to: s("snap1", 42),
+            discard_partial_recv: true,
+        };
+        let h = build_send_header(&plan, &SendFlagsConfig::default()).unwrap();
+        assert!(h.discard_partial_recv);
+        assert_eq!(h.send_kind, SendKind::Full);
+    }
+
+    #[test]
+    fn build_send_header_resume_uses_decoded_to_snap() {
+        let decoded = palimpsest::resume_token::ResumeToken {
+            token: "1-abc".into(),
+            to_name: "tank/data@snap1".into(),
+            to_guid: 42,
+            from_guid: None,
+            bytes_received: 1024,
+        };
+        let plan = SnapshotPlan::Resume {
+            token: "1-abc".into(),
+            decoded,
+        };
+        let h = build_send_header(&plan, &SendFlagsConfig::default()).unwrap();
+        assert_eq!(h.send_kind, SendKind::Resume);
+        assert!(h.from_snap.is_none());
+        assert_eq!(h.to_snap.name, "tank/data@snap1");
+        assert_eq!(h.to_snap.guid, 42);
+        // D18 — Resume MUST NOT set discard_partial_recv.
+        assert!(!h.discard_partial_recv);
+    }
+
+    #[test]
+    fn build_send_args_resume_uses_dash_t() {
+        let decoded = palimpsest::resume_token::ResumeToken {
+            token: "1-abc".into(),
+            to_name: "tank/data@snap1".into(),
+            to_guid: 42,
+            from_guid: None,
+            bytes_received: 1024,
+        };
+        let plan = SnapshotPlan::Resume {
+            token: "1-abc".into(),
+            decoded,
+        };
+        let args = build_send_args(&plan, "tank/data", &SendFlagsConfig::default()).unwrap();
+        let v = args.build_args(false).unwrap();
+        // The flags from SendFlagsConfig::default() apply to the resumed
+        // stream just like a fresh send. No snapshot positional and no -i.
+        assert_eq!(v, vec!["send", "-w", "-c", "-L", "-e", "-t", "1-abc"]);
     }
 }

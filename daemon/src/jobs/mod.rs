@@ -150,6 +150,7 @@ mod tests {
 
     struct NoopJob {
         flag: AtomicBool,
+        woken: AtomicBool,
     }
 
     impl Job for NoopJob {
@@ -161,6 +162,9 @@ mod tests {
         }
         fn status(&self) -> JobStatusInner {
             JobStatusInner::default()
+        }
+        fn wakeup(&self) {
+            self.woken.store(true, Ordering::SeqCst);
         }
         fn run(
             self: Arc<Self>,
@@ -191,6 +195,7 @@ mod tests {
         let mgr = JobManager::new();
         let job = Arc::new(NoopJob {
             flag: AtomicBool::new(false),
+            woken: AtomicBool::new(false),
         });
         mgr.spawn(
             job.clone(),
@@ -200,5 +205,34 @@ mod tests {
         );
         mgr.shutdown(Duration::from_secs(2)).await;
         assert!(job.flag.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn wakeup_by_name_dispatches_to_named_job() {
+        struct FakeRunner;
+        #[async_trait::async_trait]
+        impl CommandRunner for FakeRunner {
+            async fn run(
+                &self,
+                _cmd: palimpsest::runner::Cmd,
+            ) -> Result<std::process::Output, std::io::Error> {
+                unreachable!()
+            }
+        }
+        let mgr = JobManager::new();
+        let job = Arc::new(NoopJob {
+            flag: AtomicBool::new(false),
+            woken: AtomicBool::new(false),
+        });
+        mgr.spawn(
+            job.clone(),
+            JobContext {
+                runner: Arc::new(FakeRunner) as Arc<dyn CommandRunner>,
+            },
+        );
+        assert!(mgr.wakeup_by_name("noop"));
+        assert!(!mgr.wakeup_by_name("does-not-exist"));
+        assert!(job.woken.load(Ordering::SeqCst));
+        mgr.shutdown(Duration::from_secs(2)).await;
     }
 }

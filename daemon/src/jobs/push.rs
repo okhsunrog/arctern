@@ -18,7 +18,7 @@ use std::sync::Mutex;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
-use arctern_config::{FilesystemFilter, PushJobConfig};
+use arctern_config::PushJobConfig;
 use arctern_transport::client_config_accept_any;
 use time::OffsetDateTime;
 use tokio::time::sleep;

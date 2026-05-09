@@ -1,13 +1,14 @@
 # Full-mirror deployment (laptop + server, replicating zrepl)
 
-Goal: replace zrepl's snap+push+sink topology with arctern, end to end:
+Goal: replace zrepl's snap+push+sink topology with arctern's snap +
+push + SSH-stdinserver topology, end to end:
 
 ```
-                                  WireGuard
-laptop (novafs)  ──── push ────►  server (okdata)
-   snap_arch0                       databak + rootbak (snap)
-   push_to_local  → 10.44.44.1      sink_from_laptop (sink)
-   push_to_remote → 10.66.66.2
+                                      SSH (multi-channel)
+laptop (novafs)  ──────── push ──────►  home server (okdata)
+   snap_arch0                              databak + rootbak (snap)
+   push_to_home (peer = home)              authorized_keys: arctern
+                                            stdinserver-dispatch
 ```
 
 This deployment assumes you have already completed the snap-only-on-server
@@ -22,79 +23,153 @@ will), you know which change caused it.
 ## Phase 0 — Prerequisites
 
 - Snap-only trial passed on server, ≥1 week, zero `last_error`.
-- Laptop has ZFS pool `novafs/arch0<` with the dataset list matching
-  your zrepl `push_to_local` / `push_to_remote`.
-- WireGuard tunnel is up, both directions, between laptop and server.
-- You can `ssh root@10.77.77.100` from the laptop and reach
-  `10.44.44.1` / `10.66.66.2` from the server.
+- Laptop has ZFS pool `novafs/arch0` with the dataset list matching
+  your zrepl `push_to_local` job.
+- A working SSH path from laptop to server (WireGuard underneath is
+  fine — sshd binds inside the WG namespace, OR you reach the server's
+  public sshd through a ProxyJump from `~/.ssh/config`. Either is OK;
+  arctern doesn't care, openssh handles whatever ssh(1) handles).
+- You can `ssh root@<server>` from the laptop without a password
+  prompt (key-based auth set up).
 - You've decided which ONE filesystem to trial replication with first.
   Pick the lowest-churn one (e.g. `novafs/arch0/data/home` if home
   changes slowly, or pick a dedicated test dataset). Do NOT trial all
-  four filesystems at once.
+  filesystems at once.
 
-## Phase 1 — Server-side sink
+## Phase 1 — Server-side ACL + authorized_keys
 
-Add a sink job to the server's existing arctern config. zrepl's
-`from_remote` job stays running on the same `:8888` port, so the sink
-must use a DIFFERENT port (e.g. `:8889`) to avoid collision.
+The server doesn't need a long-lived listener for replication — sshd
+spawns one `arctern stdinserver-dispatch` per channel on demand. What
+the server DOES need is:
 
-Append to `/etc/arctern/arctern.toml` on the server:
+1. The arctern binary in PATH.
+2. An entry in the dedicated user's `authorized_keys` with a
+   ForcedCommand pointing at `arctern stdinserver-dispatch <identity>`.
+3. An `[[allowed_clients]]` row in the server's arctern.toml that
+   authorises that identity for the requested operations.
+
+### 1a. Generate a dedicated SSH key on the laptop
+
+A separate key with no passphrase, so the daemon can use it
+non-interactively:
+
+```bash
+sudo install -d -m 0700 -o root -g root /var/lib/arctern/ssh
+sudo ssh-keygen -t ed25519 -N "" -C "arctern@laptop" \
+  -f /var/lib/arctern/ssh/id_ed25519
+```
+
+### 1b. Create the dedicated user on the server
+
+```bash
+sudo useradd --system --create-home --shell /bin/bash arctern-replicator
+sudo install -d -m 0700 -o arctern-replicator -g arctern-replicator \
+  /home/arctern-replicator/.ssh
+```
+
+### 1c. Install the laptop's pubkey with a ForcedCommand
+
+Append to `/home/arctern-replicator/.ssh/authorized_keys` on the server:
+
+```
+command="/usr/local/bin/arctern stdinserver-dispatch laptop_nova",restrict ssh-ed25519 AAAA...laptop-key arctern@laptop
+```
+
+The identity name (`laptop_nova`) is hardcoded per key. `restrict`
+disables every channel feature except command exec. The full requested
+command (`arctern stdinserver <job> <op>`) arrives via
+`SSH_ORIGINAL_COMMAND`; the dispatcher parses it and validates against
+the ACL.
+
+```bash
+sudo chown arctern-replicator:arctern-replicator \
+  /home/arctern-replicator/.ssh/authorized_keys
+sudo chmod 0600 /home/arctern-replicator/.ssh/authorized_keys
+```
+
+### 1d. Update the server's arctern.toml
+
+Append:
 
 ```toml
-[[jobs]]
-type = "sink"
-name = "sink_from_laptop_trial"
-listen = "0.0.0.0:8889"
+[[allowed_clients]]
+identity = "laptop_nova"     # matches the argv to stdinserver-dispatch
+jobs = ["push_to_home_trial"]
+operations = ["control", "recv"]
 root_fs = "okdata/backups/arctern_trial/laptop"
-
-# Match zrepl's recv config. canmount=off prevents auto-mount of the
-# received hierarchy; org.openzfs.systemd:ignore stops systemd from
-# trying to do anything with these mountpoints.
-[jobs.recv.properties]
-override = { canmount = "off", "org.openzfs.systemd:ignore" = "on" }
-inherit = ["mountpoint"]
 ```
 
-Pre-create the receiving root **before starting the daemon** so its
-encryption disposition is intentional, not inherited:
+If you want defense-in-depth: pin the SSH key fingerprint:
+
+```toml
+fingerprint = "SHA256:abc123..."   # ssh-keygen -lf .../id_ed25519.pub
+```
+
+When `fingerprint` is set, the dispatcher compares it to
+`SSH_AUTH_INFO_0` (OpenSSH ≥ 7.4) on every connection.
+
+### 1e. Pre-create the receiving root
+
+Server-side, before the first push lands:
 
 ```bash
-zfs create -p -o encryption=off -o canmount=off okdata/backups/arctern_trial
-zfs create    -o encryption=off -o canmount=off okdata/backups/arctern_trial/laptop
+sudo zfs create -p -o canmount=off okdata/backups/arctern_trial
+sudo zfs create    -o canmount=off okdata/backups/arctern_trial/laptop
 ```
 
-On OpenZFS >= 2.4.1, raw-encrypted recv works fine even when the
-intermediate parents inherit encryption from `okdata/backups` — verified
-in the palimpsest test VM. The pre-create with `encryption=off` above
-is defensive (matches your zrepl `recv.placeholder.encryption=off`
-setting, which is itself historical) but not strictly required on
-modern OpenZFS. If you're on OpenZFS < 2.2, leave the `encryption=off`
-in place; it costs nothing.
+Encryption note: on OpenZFS ≥ 2.4.1, raw-encrypted recv beneath an
+encrypted parent succeeds and the received dataset retains its own
+encryptionroot and key. No `encryption=off` placeholder is required.
+(Verified in the palimpsest test VM.) On OpenZFS < 2.2 you may want
+the `encryption=off` parents zrepl historically used; on modern
+OpenZFS it's defensive but optional.
 
-Validate + restart:
+### 1f. Reload arctern config on the server
 
 ```bash
-arctern configcheck /etc/arctern/arctern.toml
-systemctl restart arctern
-journalctl -fu arctern
+sudo arctern configcheck /etc/arctern/arctern.toml
+sudo systemctl restart arctern
+sudo journalctl -fu arctern
 ```
 
-You should see two log lines for the sink: `LISTEN unix:...` (existing)
-and a new `LISTEN_QUIC 0.0.0.0:8889`. If the QUIC bind fails (port
-collision, EACCES on low ports), fix and retry.
+### 1g. Smoke-test the dispatch path
 
-Smoke test from the laptop:
+From the laptop:
 
 ```bash
-nc -uvz 10.77.77.100 8889    # UDP probe; "succeeded" means kernel
-                              # passed the packet (QUIC won't reply,
-                              # but absence of "no route" is enough)
+sudo SSH_ORIGINAL_COMMAND="arctern stdinserver push_to_home_trial control" \
+  ssh -i /var/lib/arctern/ssh/id_ed25519 \
+  arctern-replicator@home-server-host echo ignored
 ```
+
+(The remote `command=` ignores any argv you pass; sshd records the
+real one in `SSH_ORIGINAL_COMMAND`. The dispatcher refuses to do
+anything if the parsed `<job>` / `<op>` aren't in the ACL.)
+
+Expected: the connection opens, the dispatcher reads stdin/stdout in
+length-delimited frame mode, then closes when you Ctrl-C. No errors
+in the server's `journalctl -fu arctern` apart from EOF on the
+control channel.
 
 ## Phase 2 — Laptop side, snap + push for ONE filesystem
 
 Build + install on the laptop the same way as the server (see
 `deploy-snap-only.md` §1–§2). Same systemd unit; same paths.
+
+Configure SSH so the daemon picks up the dedicated key. Easiest is
+a host alias in `/root/.ssh/config` (or whatever user the daemon
+runs as):
+
+```
+Host arctern-home
+    HostName home-server-host
+    User arctern-replicator
+    IdentityFile /var/lib/arctern/ssh/id_ed25519
+    IdentitiesOnly yes
+    ControlMaster auto
+    ControlPath /var/lib/arctern/ssh/cm-%r@%h:%p
+    ControlPersist 10m
+```
 
 Write `/etc/arctern/arctern.toml` on the laptop:
 
@@ -128,37 +203,15 @@ type = "regex"
 regex = "^arctern_.*"
 negate = true
 
-# Push to local server. Note: TWO push jobs (one per peer) — QUIC
-# connection migration was theoretical, not implemented. If your laptop
-# roams between LAN and remote, both jobs run; whichever route is
-# reachable succeeds, the other fails fast and retries next cycle.
+# SSH peer the push job pushes to.
+[[peers]]
+name = "home"
+ssh_target = "arctern-home"   # matches the Host alias above
+
 [[jobs]]
 type = "push"
-name = "push_local_trial"
-connect = "10.44.44.1:8889"
-interval = "15m"
-
-[[jobs.filesystems]]
-path = "novafs/arch0/data/home"
-
-[jobs.target]
-root_fs = "okdata/backups/arctern_trial/laptop"
-
-[jobs.send]
-encrypted = true
-embedded_data = true
-compressed = true
-large_blocks = true
-
-[jobs.snapshot_filter]
-prefix = "arctern_"
-
-# Second push to the remote IP. Only one of the two will be reachable
-# at a time depending on where the laptop is.
-[[jobs]]
-type = "push"
-name = "push_remote_trial"
-connect = "10.66.66.2:8889"
+name = "push_to_home_trial"
+peer = "home"
 interval = "15m"
 
 [[jobs.filesystems]]
@@ -180,14 +233,14 @@ prefix = "arctern_"
 Validate + start:
 
 ```bash
-arctern configcheck /etc/arctern/arctern.toml
-systemctl daemon-reload
-systemctl start arctern
-journalctl -fu arctern
+sudo arctern configcheck /etc/arctern/arctern.toml
+sudo systemctl daemon-reload
+sudo systemctl start arctern
+sudo journalctl -fu arctern
 ```
 
 zrepl is untouched and still running — it owns `zrepl_*` snapshots and
-its own push jobs to `:8888`.
+its own push jobs.
 
 ## Phase 3 — Verify the round-trip
 
@@ -200,9 +253,11 @@ zfs list -t snapshot novafs/arch0/data/home | grep arctern_
 
 curl -s --unix-socket /run/arctern/arctern.sock \
   http://localhost/api/v1/jobs | jq '.[] | {name, last_error, last_run}'
-# Expect snap_trial + one of push_local/push_remote with last_error:null.
-# The other push will likely have last_error set to a connect failure
-# if its peer IP is unreachable — that's expected.
+# Expect snap_trial + push_to_home_trial with last_error:null.
+
+curl -s --unix-socket /run/arctern/arctern.sock \
+  http://localhost/api/v1/peers | jq .
+# Expect: [{name:"home", reachability:{kind:"connected"}, ...}]
 ```
 
 On the server:
@@ -220,7 +275,7 @@ Trigger an immediate push to test wakeup:
 ```bash
 # On the laptop:
 curl -s -X POST --unix-socket /run/arctern/arctern.sock \
-  http://localhost/api/v1/jobs/push_local_trial/wakeup
+  http://localhost/api/v1/jobs/push_to_home_trial/wakeup
 # Expect HTTP 204. Cycle should run within seconds.
 ```
 
@@ -235,29 +290,36 @@ zfs get -Hp -o value guid okdata/backups/arctern_trial/laptop/novafs/arch0/data/
 # even if both ends "have a snapshot" — STOP and debug.
 ```
 
+Verify the cursor bookmark + step hold mechanics:
+
+```bash
+# On the laptop, after a successful push cycle:
+zfs list -t bookmark novafs/arch0/data/home
+# Expect: novafs/arch0/data/home#arctern_cursor_J_push_to_home_trial
+
+zfs holds novafs/arch0/data/home@arctern_<TAG>
+# Expect: empty (the step hold was released after the cycle succeeded).
+```
+
 ## Phase 4 — Trial period
 
 Run for **≥1 week**. zrepl is still running the canonical replication
-for everything else (`okdata/backups/laptop/...`); arctern is running
-in parallel for the trial dataset (`okdata/backups/arctern_trial/laptop/...`).
+for everything else; arctern is running in parallel for the trial
+dataset (`okdata/backups/arctern_trial/laptop/...`).
 
 Watch for:
-- `last_error` accumulating on push jobs (transient WG drops should
-  self-heal next cycle; persistent errors are a real bug)
+- `last_error` accumulating on the push job. SSH transient drops
+  should self-heal next cycle thanks to ControlMaster + the eager
+  reconnect background task; persistent errors are real bugs.
 - Snapshot count drift between sender and receiver — they should be
-  identical (modulo the most recent one if a cycle is in flight)
-- Resume token activity in the journal: `resumed from token` after a
-  network blip should be visible. If you NEVER see it across a week of
-  WG roaming, the resume path may not be exercising — concerning but
-  not blocking.
-- Receiver disk usage growing as expected from prune retention math.
-  Server has its own arctern snap retention pruning the receiver-side
-  snapshots IF you've set a snap job pointing at `okdata/backups/...`
-  (you haven't yet — receiver-side retention currently just keeps
-  whatever the sender pushes). You may want to add a server-side snap
-  job for the trial path with a permissive grid (e.g.,
-  `48x1h | 30x1d`) before confidence in long-term receiver-side
-  retention is established.
+  identical (modulo the most recent one if a cycle is in flight).
+- Resume token activity in the journal: `resuming from token` after a
+  network blip should be visible.
+- Cursor bookmark advancing on the sender (one entry per push job per
+  source dataset; old entries destroyed after each successful cycle).
+- Step holds (`arctern_step_J_push_to_home_trial`) NOT lingering on
+  any sender snapshot when no cycle is in flight.
+- Receiver disk usage growing as expected.
 
 Compare against zrepl's parallel data:
 
@@ -276,31 +338,28 @@ Only after the trial dataset has been clean for a week:
 
 1. Stop arctern on the laptop: `systemctl stop arctern`.
 2. Edit `/etc/arctern/arctern.toml` on the laptop:
-   - Add the other three filesystems under each push job's
-     `[[jobs.filesystems]]`
+   - Add the other filesystems under the push job's `[[jobs.filesystems]]`
    - Add them under the snap job too
 3. Restart arctern: `systemctl start arctern`.
-4. Run for another week. Verify all four filesystems land on the
-   server.
-5. **Now** disable zrepl's push jobs on the laptop:
+4. Run for another week. Verify all filesystems land on the server.
+5. **Now** disable zrepl's push job on the laptop:
    ```bash
-   # Edit /etc/zrepl/zrepl.yml — comment out push_to_local and push_to_remote
+   # Edit /etc/zrepl/zrepl.yml — comment out the push job
    systemctl restart zrepl   # zrepl now only snapshots, no longer pushes
    ```
-6. Verify arctern still pushes after zrepl stops pushing (sanity: no
-   shared state, but worth checking).
+6. Verify arctern still pushes after zrepl stops pushing.
 7. After another week of arctern-only push: switch the prefix.
    - Stop arctern on laptop: `systemctl stop arctern`.
    - Edit `/etc/arctern/arctern.toml`: change `prefix = "arctern_"` to
-     `prefix = "zrepl_"` everywhere (snap job + both snapshot_filters).
+     `prefix = "zrepl_"` everywhere (snap job + snapshot_filter).
    - Disable zrepl entirely on the laptop:
      `systemctl disable --now zrepl`. Optionally `pacman -R zrepl`.
    - Start arctern: `systemctl start arctern`. arctern now adopts the
      existing `zrepl_*` snapshot history and continues from there.
 8. On the server: same prefix switch, then disable zrepl's `databak` /
-   `rootbak` (the receiver-side snap jobs zrepl was running). Keep
-   zrepl's `from_remote` sink running for ONE more cycle so any in-flight
-   push from the laptop doesn't get dropped, then stop zrepl.
+   `rootbak`. Keep zrepl's `from_remote` sink running for ONE more
+   cycle so any in-flight push from the laptop doesn't get dropped,
+   then stop zrepl.
 
 ## Rollback
 
@@ -324,30 +383,23 @@ zfs list -t snapshot -r okdata/backups/arctern_trial | awk '/arctern_/ {print $1
 zfs destroy -r okdata/backups/arctern_trial   # only if the trial root is empty / abandoned
 ```
 
-The TLS cert at `/var/lib/arctern/cert.pem` is regenerated on next
-start; safe to leave or delete.
+`/var/lib/arctern/state.db` is just an observability log; safe to
+leave or delete.
 
 ## Known limitations carried into this deployment
 
-- **No cursor/state persistence on sender.** Receiver state is the
-  source of truth (Approach B). If receiver loses data, sender's next
-  cycle re-LISTs and falls back to full send. No manual cursor reset
-  needed (this is an improvement over zrepl's bookmark-based design).
-- **One peer per push job.** Connection migration is not implemented.
-  Two push jobs (one per peer IP) is the workaround.
-- **No metrics endpoint.** Only `GET /api/v1/jobs` for status. Wrap in
-  a node_exporter textfile cron if you want Prometheus.
+- **One peer per push job.** Multi-peer fan-out is out of scope for v1.
+- **Pull jobs are not implemented.** Direction is laptop → home server
+  only. If you want the home server to also push somewhere else, run a
+  separate push job on the home server's daemon.
+- **No metrics endpoint.** Only `GET /api/v1/jobs` and the SSE event
+  stream at `GET /api/v1/events`. Wrap in a node_exporter textfile
+  cron if you want Prometheus.
 - **No graceful drain on shutdown.** A cycle in flight when systemd
   sends SIGTERM will be killed mid-stream; receiver gets a partial,
-  next cycle resumes from the token. Should work — exercised by slice
-  006 integration tests at small scale, untested at TB scale.
+  next cycle resumes from the token.
 - **`last_error` is cycle-level summary text.** Per-fs detail is not
-  tracked. If a cycle pushes 4 filesystems and 1 fails, you see "fs X:
-  <error message>" but the other 3 successes aren't itemized.
-- **Sink IP allowlist not implemented.** WireGuard `AllowedIPs` is the
-  only network-level access control. If WG is misconfigured, anyone
-  on the underlay can connect to `:8889`. Verify your WG `AllowedIPs`
-  before exposing this on a public IP.
+  tracked.
 - **No SIGHUP / config hot-reload.** Edit + `systemctl restart arctern`.
 
 ## What NOT to do
@@ -356,11 +408,9 @@ start; safe to leave or delete.
   Both daemons will see the snapshots as theirs to prune; you will
   lose data.
 - Do not collapse Phase 1 + Phase 2 into a single "install everything
-  at once" step. Without the server sink running first, the laptop
-  push will fail at QUIC handshake and you won't know if it's a config
-  problem or a network problem.
-- Do not skip the trial period. arctern has zero production hours
-  before this deployment.
+  at once" step. Without the server-side ACL + authorized_keys in
+  place first, the laptop's push will fail at SSH connect and you
+  won't know if it's a config problem or a network problem.
+- Do not skip the trial period.
 - Do not delete the zrepl config until at least 2 weeks of arctern
-  running side-by-side without errors. Easier to roll back from
-  `systemctl disable arctern` than to reconstruct a zrepl config.
+  running side-by-side without errors.

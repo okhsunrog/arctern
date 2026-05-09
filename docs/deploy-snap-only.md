@@ -6,8 +6,10 @@ arctern produces look identical to zrepl's grid (modulo timing jitter) and
 no errors accumulate in the journal, decommission zrepl's `databak` /
 `rootbak` jobs and let arctern own snapshotting.
 
-This deployment is snap-only. Sink + push come in a later wave (see
-`docs/example-config.toml` for the full schema).
+This deployment is snap-only. Push (sender side) and the SSH stdinserver
+(receiver side) come in a later wave; see `docs/deploy-full-mirror.md`
+for the SSH-transport mirror deployment, and `docs/example-config.toml`
+for the full schema.
 
 ## Pre-flight
 
@@ -19,25 +21,10 @@ This deployment is snap-only. Sink + push come in a later wave (see
   low-traffic dataset (e.g., `okdata/data/nas`) for arctern; leave
   `okdata/data/{root,home}` and `okdata/ROOT/default` with zrepl. Move
   more over as confidence grows.
-- Encrypted `root_fs` parents: when sink eventually lands (this slice is
-  snap-only — no sink yet), arctern's sink creates intermediate parent
-  datasets between `root_fs` and the sender's path with `zfs create -p`.
-  zrepl's config has `recv.placeholder.encryption=off` to force those
-  intermediates to `encryption=off` so that raw-encrypted streams
-  (`zfs send -w`) can land beneath an encrypted `root_fs`. **On
-  OpenZFS >= 2.4.1 this workaround is unnecessary**: a raw-encrypted
-  recv beneath an encrypted parent succeeds, and the received dataset
-  retains its own encryptionroot and key (verified in the palimpsest
-  test VM, zfs-2.4.1). Both full and incremental raw streams replicate
-  cleanly. The user's existing zrepl `placeholder.encryption=off`
-  setting is therefore defensive on modern OpenZFS; arctern does not
-  need an equivalent knob unless a regression is observed on an older
-  OpenZFS release. (zrepl's setting predates several OpenZFS encryption
-  fixes; if you're on OpenZFS < 2.2 this may still matter.)
 
 ## 1. Build
 
-On a build host with the right libc/glibc as the server:
+On a build host with the same libc as the server:
 
 ```bash
 cd /path/to/arctern
@@ -163,14 +150,11 @@ algorithm has time to actually destroy things — first prune can take
 24h+ depending on grid math). Watch for:
 
 - `last_error` ever becoming non-null in `GET /api/v1/jobs`
-- Snapshots NOT being created on the expected interval (cycle drift bug,
-  flagged in slice 003 D17 / 003 follow-up notes)
-- Snapshots being destroyed that shouldn't be (prune algorithm bug —
-  worst case: filed and revert immediately)
-- Unexpected disk usage on `/var/lib/arctern` (currently only TLS cert +
-  key, ~5 KiB; if it grows, something's wrong)
-- Daemon RSS climbing (currently no large allocations; if it climbs,
-  also something's wrong)
+- Snapshots NOT being created on the expected interval
+- Snapshots being destroyed that shouldn't be (prune algorithm bug)
+- Unexpected disk usage on `/var/lib/arctern` (currently only the SQLite
+  state.db, ~tens of KiB; if it grows fast, the trim sweep is broken)
+- Daemon RSS climbing (currently no large allocations)
 
 Compare arctern's snapshot timing + retention against zrepl's on the
 control datasets:
@@ -198,8 +182,8 @@ daily slots = 20 retained snapshots in steady state, after >14d).
      ONLY after disabling zrepl's snap jobs (next step), otherwise both
      daemons will fight over the prune.
 3. Disable zrepl's `databak` job in `/etc/zrepl/zrepl.yml` (comment it
-   out or delete it). Keep the sink job — that's what slice 005's push
-   will eventually replace.
+   out or delete it). Keep the sink job — the SSH-transport push job
+   replaces zrepl's QUIC-style replication, see `docs/deploy-full-mirror.md`.
 4. `systemctl restart zrepl` (so zrepl drops the snap loop), then
    `systemctl start arctern`.
 5. Re-run the verification steps from §5 + §6 for another week with the
@@ -218,15 +202,14 @@ zfs list -t snapshot okdata/data/nas | awk '/arctern_/ {print $1}' | \
   xargs -n1 zfs destroy
 ```
 
-The TLS cert at `/var/lib/arctern/cert.pem` is harmless; remove the dir
+`/var/lib/arctern/state.db` is just an observability log; remove the dir
 if you want a clean state: `rm -rf /var/lib/arctern`.
 
 ## What this deployment does NOT yet cover
 
-- **Push/sink** (slices 004–006): the receiver-side snapshot retention is
-  arctern's, but actual replication FROM the laptop is still zrepl's
-  push job. Don't disable zrepl on the laptop yet.
-- **HTTP/HTTPS network exposure**: the API is UDS-only. You can SSH-tunnel
+- **Replication** (push job + receiver-side stdinserver): see
+  `docs/deploy-full-mirror.md` for the SSH-transport mirror.
+- **HTTP/HTTPS network exposure**: the API is UDS-only. SSH-tunnel
   to read it remotely; there's no plan to expose it on TCP.
 - **Hot reload of config**: no SIGHUP support. To change the config, edit
   the file then `systemctl restart arctern`.

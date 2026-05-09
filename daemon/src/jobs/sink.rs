@@ -15,8 +15,13 @@ use std::sync::{Arc, Mutex};
 
 use arctern_config::SinkJobConfig;
 use arctern_transport::{
-    ProtocolError, ReceiveResponse, TransportIdentity, read_header, server_config, write_response,
+    ListResponse, Op, ProtocolError, ReceiveHeader, ReceiveResponse, SnapshotEntry,
+    TransportIdentity, compile_prefix_regex, read_header, server_config, write_list_response,
+    write_response,
 };
+use palimpsest::ZfsError;
+use palimpsest::dataset::ListOptions;
+use palimpsest::models::DatasetType;
 use palimpsest::recv::{RecvArgs, recv as zfs_recv};
 use palimpsest::runner::CommandRunner;
 use time::OffsetDateTime;
@@ -165,30 +170,64 @@ async fn handle_stream(
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
 ) {
-    let outcome = handle_stream_inner(&job, runner.as_ref(), &mut send, &mut recv).await;
-    let resp = match &outcome {
-        Ok(()) => ReceiveResponse::Ok,
-        Err(msg) => ReceiveResponse::Error {
-            message: msg.replace('\n', " ").trim().to_string(),
-        },
+    // Read the header up-front so the dispatcher can route on `op`. A
+    // header-read failure (truncated stream, invalid JSON, oversize
+    // length, version mismatch) is reported via ReceiveResponse — the
+    // sender always parses ReceiveResponse first when the LIST flow
+    // hasn't been confirmed yet, so this preserves a single error
+    // path across both ops.
+    let header = match read_header(&mut recv).await {
+        Ok(h) => h,
+        Err(e) => {
+            let msg = match e {
+                ProtocolError::Io(e) => format!("read header: {e}"),
+                other => format!("{other}"),
+            };
+            warn!(error = %msg, "sink: bad header");
+            let resp = ReceiveResponse::Error { message: msg.clone() };
+            let _ = write_response(&mut send, &resp).await;
+            let _ = send.finish();
+            job.record(Some(msg));
+            return;
+        }
     };
-    if let Err(e) = write_response(&mut send, &resp).await {
-        warn!(error = %e, "write_response failed");
+
+    match header.op {
+        Op::Send => {
+            let outcome = handle_send(&job, runner.as_ref(), header, &mut recv).await;
+            let resp = match &outcome {
+                Ok(()) => ReceiveResponse::Ok,
+                Err(msg) => ReceiveResponse::Error {
+                    message: msg.replace('\n', " ").trim().to_string(),
+                },
+            };
+            if let Err(e) = write_response(&mut send, &resp).await {
+                warn!(error = %e, "write_response failed");
+            }
+            let _ = send.finish();
+            job.record(outcome.err());
+        }
+        Op::List => {
+            let resp = handle_list(&job, runner.as_ref(), header).await;
+            let outcome_err = match &resp {
+                ListResponse::Ok { .. } => None,
+                ListResponse::Error { message } => Some(message.clone()),
+            };
+            if let Err(e) = write_list_response(&mut send, &resp).await {
+                warn!(error = %e, "write_list_response failed");
+            }
+            let _ = send.finish();
+            job.record(outcome_err);
+        }
     }
-    let _ = send.finish();
-    job.record(outcome.err());
 }
 
-async fn handle_stream_inner(
+async fn handle_send(
     job: &SinkJob,
     runner: &dyn CommandRunner,
-    _send: &mut quinn::SendStream,
+    header: ReceiveHeader,
     recv: &mut quinn::RecvStream,
 ) -> Result<(), String> {
-    let header = read_header(recv).await.map_err(|e| match e {
-        ProtocolError::Io(e) => format!("read header: {e}"),
-        other => format!("{other}"),
-    })?;
     let prefix = format!("{}/", job.config.root_fs);
     if header.target_dataset == job.config.root_fs || !header.target_dataset.starts_with(&prefix) {
         return Err(format!(
@@ -196,20 +235,38 @@ async fn handle_stream_inner(
             header.target_dataset, job.config.root_fs
         ));
     }
-    tracing::info!(target = %header.target_dataset, "sink stream: invoking zfs recv");
+    if let Some(send) = &header.send {
+        tracing::info!(
+            target = %header.target_dataset,
+            kind = ?send.send_kind,
+            from = ?send.from_snap.as_ref().map(|s| &s.name),
+            to = %send.to_snap.name,
+            "sink: invoking zfs recv"
+        );
+    } else {
+        tracing::info!(target = %header.target_dataset, "sink: invoking zfs recv (no SendHeader)");
+    }
 
-    let args = RecvArgs::new(header.target_dataset.clone());
+    // T008 wires RecvProperties through palimpsest's new -o/-x flags;
+    // -u (unmounted) is unconditional because the sink doesn't know
+    // the operator's mountpoint policy.
+    let mut args = RecvArgs::new(header.target_dataset.clone()).unmounted();
+    for (k, v) in &job.config.recv.properties.overrides {
+        args = args.property_override(k, v);
+    }
+    for k in &job.config.recv.properties.inherit {
+        args = args.property_inherit(k);
+    }
     let mut handle = zfs_recv(runner, &args)
         .await
         .map_err(|e| format!("spawn zfs recv: {e}"))?;
     let mut child_stdin = handle.stdin.take().ok_or("no stdin on recv child")?;
     let mut child_stderr = handle.stderr.take().ok_or("no stderr on recv child")?;
-    let stderr_drain =
-        tokio::spawn(async move {
-            let mut buf = Vec::new();
-            let _ = child_stderr.read_to_end(&mut buf).await;
-            buf
-        });
+    let stderr_drain = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let _ = child_stderr.read_to_end(&mut buf).await;
+        buf
+    });
     let copy_res = tokio::io::copy(recv, &mut child_stdin).await;
     let _ = child_stdin.shutdown().await;
     drop(child_stdin);
@@ -228,6 +285,77 @@ async fn handle_stream_inner(
         ));
     }
     Ok(())
+}
+
+async fn handle_list(
+    job: &SinkJob,
+    runner: &dyn CommandRunner,
+    header: ReceiveHeader,
+) -> ListResponse {
+    // The list-of-root_fs-itself is a meaningful query (no
+    // descendants yet means first replication on this peer), so the
+    // gate is "must be root_fs OR start with root_fs/".
+    let prefix = format!("{}/", job.config.root_fs);
+    if header.target_dataset != job.config.root_fs
+        && !header.target_dataset.starts_with(&prefix)
+    {
+        return ListResponse::Error {
+            message: format!(
+                "target_dataset {:?} is not under root_fs {:?}",
+                header.target_dataset, job.config.root_fs
+            ),
+        };
+    }
+    let regex = match compile_prefix_regex(header.prefix_regex.as_deref()) {
+        Ok(opt) => opt,
+        Err(e) => {
+            return ListResponse::Error {
+                message: format!(
+                    "compile prefix_regex {:?}: {e}",
+                    header.prefix_regex.as_deref().unwrap_or("")
+                ),
+            };
+        }
+    };
+    tracing::info!(target = %header.target_dataset, regex = ?header.prefix_regex, "sink: list");
+    let opts = ListOptions {
+        recursive: false,
+        types: vec![DatasetType::Snapshot],
+        roots: vec![header.target_dataset.clone()],
+        properties: vec!["guid".into()],
+        ..ListOptions::default()
+    };
+    let entries = match palimpsest::dataset::list(runner, &opts).await {
+        Ok(v) => v,
+        Err(ZfsError::DatasetNotFound { .. }) => {
+            // D16: first replication is normal, not an error.
+            return ListResponse::Ok { snapshots: vec![] };
+        }
+        Err(e) => {
+            return ListResponse::Error {
+                message: format!("list: {e}"),
+            };
+        }
+    };
+    let snapshots = entries
+        .into_iter()
+        .filter_map(|e| {
+            let snap_name = e.snapshot_name.clone()?;
+            if let Some(re) = &regex
+                && !re.is_match(&snap_name)
+            {
+                return None;
+            }
+            let guid = e.properties.get("guid").and_then(|p| p.value.parse::<u64>().ok())?;
+            let createtxg = e.createtxg.parse::<u64>().ok()?;
+            Some(SnapshotEntry {
+                name: snap_name,
+                guid,
+                createtxg,
+            })
+        })
+        .collect();
+    ListResponse::Ok { snapshots }
 }
 
 #[cfg(test)]

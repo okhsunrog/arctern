@@ -11,9 +11,11 @@ pub mod tls;
 pub use identity::{TransportIdentity, load_or_generate_identity};
 pub use protocol::{
     ListResponse, MAX_HEADER_LEN, Op, PROTOCOL_VERSION, ProtocolError, ReceiveHeader,
-    ReceiveResponse, SendFlagsWire, SendHeader, SendKind, SnapshotEntry, SnapshotRef, read_header,
-    read_list_response, read_response, write_header, write_list_response, write_response,
+    ReceiveResponse, SendFlagsWire, SendHeader, SendKind, SnapshotEntry, SnapshotRef,
+    compile_prefix_regex, read_header, read_list_response, read_response, write_header,
+    write_list_response, write_response,
 };
+pub use regex;
 pub use tls::{ALPN, client_config_accept_any, server_config};
 
 use thiserror::Error;

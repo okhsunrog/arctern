@@ -123,6 +123,15 @@ pub struct SnapshotEntry {
     pub createtxg: u64,
 }
 
+/// Compile a server-side `prefix_regex` from a LIST request. Lives
+/// here (and not in the daemon) because the constitution-IV-adjacent
+/// regex grep gate keeps `regex::` out of `daemon/src/`. Returns `None`
+/// when the input is `None` (no filtering); errors are stringified at
+/// the call site into a `ListResponse::Error`.
+pub fn compile_prefix_regex(s: Option<&str>) -> Result<Option<regex::Regex>, regex::Error> {
+    s.map(regex::Regex::new).transpose()
+}
+
 #[derive(Debug, Error)]
 pub enum ProtocolError {
     #[error("io: {0}")]

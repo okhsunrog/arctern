@@ -5,9 +5,14 @@
 //! deferral), and the on-the-wire receive header / response framing.
 
 pub mod identity;
+pub mod protocol;
 pub mod tls;
 
 pub use identity::{TransportIdentity, load_or_generate_identity};
+pub use protocol::{
+    MAX_HEADER_LEN, PROTOCOL_VERSION, ProtocolError, ReceiveHeader, ReceiveResponse, SendFlags,
+    read_header, read_response, write_header, write_response,
+};
 pub use tls::{ALPN, client_config_accept_any, server_config};
 
 use thiserror::Error;

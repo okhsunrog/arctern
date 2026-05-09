@@ -3,3 +3,9 @@ name = "arctern-client"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+
+[dependencies]
+arctern-api = { version = "0.1.0", path = "../api" }
+reqwest = { version = "0.13.3", default-features = false, features = ["json", "rustls"] }
+serde_json = "1.0.149"
+thiserror = "2.0.18"

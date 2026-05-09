@@ -78,3 +78,7 @@ packaging/systemd/           arctern.service unit
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo add <crate>` for deps
 - `just vm-up` / `just vm-down` / `just test-integration` — VM-driven integration tests (shared with palimpsest, port 2226)
+
+## Runner override
+
+The daemon's local `CommandRunner` defaults to `palimpsest::runner::RealRunner` — the SSH-transport pivot puts the daemon on the actual ZFS host. Setting `PALIMPSEST_SSH_TARGET=user@host:port` (and optionally `PALIMPSEST_SSH_PASSWORD`) swaps in `SshCommandRunner` instead. This is the override the integration tests use to drive the daemon against the test VM from the developer's host; production deployments leave both env vars unset.

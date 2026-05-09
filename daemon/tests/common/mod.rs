@@ -218,7 +218,16 @@ pub fn spawn_daemon_uds_with_config(
             std::env::var("PALIMPSEST_SSH_PASSWORD").unwrap_or_default(),
         )
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr({
+            // Capture stderr to a per-test file so panics inside tests
+            // surface daemon-side tracing output. Slice 003 needs this
+            // to debug snap-job loops; previously stderr inherited and
+            // got hidden by `cargo test`'s stdout capture.
+            let p = format!("/tmp/arctern_test_{}.stderr", unique_suffix());
+            std::fs::File::create(&p)
+                .map(Into::into)
+                .unwrap_or_else(|_| Stdio::inherit())
+        })
         .spawn()
         .expect("spawn arctern daemon");
 

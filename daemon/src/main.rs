@@ -80,7 +80,13 @@ fn resolve_socket_path(arg: Option<PathBuf>) -> PathBuf {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::Result<()> {
-    tracing_subscriber::fmt::init();
+    // Tracing on stderr — stdout is reserved for the LISTEN handshake
+    // line (a single line then unused; integration tests close their
+    // read end of the pipe immediately after parsing it). Writing
+    // tracing to stdout produces "broken pipe" warnings under tests.
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
 
     // Load and validate the config BEFORE binding any socket — fail
     // loudly if the operator's file is missing or malformed.

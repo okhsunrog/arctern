@@ -114,11 +114,21 @@ impl SnapJob {
     /// string; the cycle still completes the work it can.
     async fn run_cycle(&self, ctx: &JobContext) -> Result<(), String> {
         let runner = ctx.runner.as_ref();
-        // 1. List datasets (filesystems + volumes; we do not snapshot
-        //    snapshots-of-snapshots).
+        // 1. List every filesystem + volume under any pool a filter
+        //    references. We use `-r <pool>` per distinct pool because
+        //    `zfs list -r` with no target fails ("no datasets
+        //    available") and `zfs list` without `-r` only returns
+        //    each pool's top filesystem (no descendants).
+        let mut pools: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for f in &self.config.filesystems {
+            let pool = f.path.split('/').next().unwrap_or(&f.path).to_string();
+            pools.insert(pool);
+        }
+        let roots: Vec<String> = pools.into_iter().collect();
         let list_opts = ListOptions {
             recursive: true,
             types: vec![DatasetType::Filesystem, DatasetType::Volume],
+            roots,
             ..ListOptions::default()
         };
         let entries = palimpsest::dataset::list(runner, &list_opts)
@@ -182,6 +192,11 @@ impl SnapJob {
             .await
             .map_err(|e| format!("list snapshots: {e}"))?;
         let mut entries: Vec<SnapshotEntry> = Vec::with_capacity(snaps.len());
+        // Parallel vector of full ZFS names (`pool/ds@tag`); the prune
+        // algorithm matches on the bare tag (so a user's `^zrepl_.*`
+        // regex does not have to embed the dataset name), but destroy
+        // needs the fully-qualified target.
+        let mut full_names: Vec<String> = Vec::with_capacity(snaps.len());
         for s in &snaps {
             let creation = s
                 .properties
@@ -192,15 +207,17 @@ impl SnapJob {
                 warn!(snapshot = %s.name, "snapshot has no parseable creation property; skipping");
                 continue;
             };
+            let tag = s.name.split_once('@').map(|(_, t)| t).unwrap_or(&s.name);
             entries.push(SnapshotEntry {
-                name: s.name.clone(),
+                name: tag.to_string(),
                 creation,
             });
+            full_names.push(s.name.clone());
         }
         let destroy_idx = evaluate_keep_rules(&self.config.pruning.keep, &entries)
             .map_err(|e| format!("keep-rule evaluation: {e}"))?;
         for i in destroy_idx {
-            let target = &entries[i].name;
+            let target = &full_names[i];
             tracing::info!(snapshot = %target, "destroying snapshot");
             match palimpsest::dataset::destroy(runner, target, &DestroyOptions::new()).await {
                 Ok(()) => {}

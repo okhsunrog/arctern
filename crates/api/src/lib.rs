@@ -45,6 +45,10 @@ impl From<palimpsest::dataset::ZfsListEntry> for DatasetSummary {
 /// definition.
 pub const JOB_KIND_SNAP: &str = "snap";
 
+/// String constant for the `sink` job kind. See `JOB_KIND_SNAP` for the
+/// rationale (string field on the wire so adding kinds is non-breaking).
+pub const JOB_KIND_SINK: &str = "sink";
+
 /// One entry in the response of `GET /api/v1/jobs`. RFC3339 timestamps
 /// are nullable: `last_run` is null until the job has completed at
 /// least one cycle; `next_run` is set as soon as the loop knows when

@@ -11,7 +11,7 @@ use std::io::{ErrorKind, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use tokio::net::UnixListener;
@@ -117,40 +117,20 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
             eyre::eyre!("PALIMPSEST_SSH_TARGET configuration: {e}")
         })?);
 
-    // Resolve the state directory and ensure it exists before any
-    // sink-job cert bootstrap touches it.
+    // Resolve the state directory and ensure it exists; future steps
+    // park SQLite + tracing layer state under this path.
     let state_dir = config
         .state_dir
         .clone()
         .unwrap_or_else(|| PathBuf::from("/var/lib/arctern"));
     std::fs::create_dir_all(&state_dir).map_err(|e| {
-        eyre::eyre!(
-            "create state_dir {}: {e}",
-            state_dir.display()
-        )
+        eyre::eyre!("create state_dir {}: {e}", state_dir.display())
     })?;
-
-    // Lazily load (or generate) the QUIC TLS identity if any sink job
-    // exists. Future slices' push-side will reuse the same identity
-    // via the same Arc.
-    let needs_identity = config
-        .jobs
-        .iter()
-        .any(|j| matches!(j, arctern_config::JobConfig::Sink(_)));
-    let identity = if needs_identity {
-        Some(Arc::new(
-            arctern_transport::load_or_generate_identity(&state_dir)
-                .map_err(|e| eyre::eyre!("load/generate transport identity: {e}"))?,
-        ))
-    } else {
-        None
-    };
 
     let manager = Arc::new(jobs::JobManager::new());
     let ctx = jobs::JobContext {
         runner: runner.clone(),
     };
-    let mut sinks: Vec<Arc<jobs::sink::SinkJob>> = Vec::new();
     for job in config.jobs {
         match job {
             arctern_config::JobConfig::Snap(s) => {
@@ -158,12 +138,15 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
                 manager.spawn(job, ctx.clone());
             }
             arctern_config::JobConfig::Sink(s) => {
-                let id = identity
-                    .clone()
-                    .expect("identity loaded when sink jobs exist");
-                let job = Arc::new(jobs::sink::SinkJob::new(s, id));
-                manager.spawn(job.clone(), ctx.clone());
-                sinks.push(job);
+                // Sink jobs are the legacy QUIC receiver shape. The SSH
+                // pivot moves their behaviour into stdinserver/recv on
+                // the receiving host. Configs that still mention sink
+                // are accepted (so existing files keep parsing) but a
+                // warning is logged and the job is not spawned.
+                tracing::warn!(
+                    name = %s.name,
+                    "sink jobs are obsolete under the SSH transport; ignoring"
+                );
             }
             arctern_config::JobConfig::Push(s) => {
                 let job = jobs::push::PushJob::new(s)
@@ -177,26 +160,6 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
 
     println!("LISTEN unix:{}", socket_path.display());
     std::io::stdout().flush().ok();
-
-    // Wait briefly for each sink to bind so the LISTEN_QUIC handshake
-    // line names the OS-assigned port (jobs may use :0). 5s budget per
-    // sink is generous; the bind itself is microseconds in practice.
-    for sink in &sinks {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Some(addr) = sink.bound_addr() {
-                println!("LISTEN_QUIC {addr}");
-                std::io::stdout().flush().ok();
-                break;
-            }
-            if Instant::now() > deadline {
-                use crate::jobs::Job;
-                tracing::warn!(name = sink.name(), "sink did not report bound_addr in 5s");
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    }
 
     tracing::info!(path = %socket_path.display(), "arctern daemon listening");
 

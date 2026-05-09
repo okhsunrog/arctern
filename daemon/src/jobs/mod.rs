@@ -6,24 +6,16 @@
 //! slices add push/pull/source/sink as siblings.
 
 pub mod push;
-pub mod sink;
 pub mod snap;
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use palimpsest::runner::CommandRunner;
-use parking_lot_or_std::Mutex;
 use time::OffsetDateTime;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-
-// `parking_lot` would be nicer but adding a dep just for this single
-// short-lived mutex is overkill. std::sync::Mutex is fine — held for
-// microseconds (status read/write).
-mod parking_lot_or_std {
-    pub use std::sync::Mutex;
-}
 
 #[derive(Debug, Clone, Default)]
 pub struct JobStatusInner {
@@ -54,6 +46,7 @@ pub trait Job: Send + Sync + 'static {
     fn wakeup(&self) {}
 }
 
+#[allow(dead_code)]
 struct JobHandle {
     name: String,
     kind: &'static str,

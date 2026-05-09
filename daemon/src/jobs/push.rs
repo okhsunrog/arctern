@@ -1,83 +1,55 @@
-//! Push job — active sender. Each cycle, for every configured
-//! filesystem: list the sender's matching snapshots, ask the receiver
-//! over QUIC LIST what it already has, intersect by GUID to choose
-//! Full vs Incremental, then open a SEND stream and pipe
-//! `palimpsest::send::send`'s stdout into it.
-//!
-//! This file holds the planner (T004), executor (T005), and PushJob
-//! cycle loop (T006). Splitting into submodules would cost more in
-//! re-exports than it saves; the surface stays inside one file
-//! together with its tests.
-//!
-//! T004 landed the planner; T005 the executor; T006 wires both into
-//! a PushJob with cycle loop + wakeup.
+//! Push job — active sender. The executor is being rewritten on top of
+//! the SSH-based PeerLink (ARCHITECTURE.md, step 9). For now this file
+//! holds only the pure planner + header/args builders so the daemon
+//! still compiles and the planner unit tests stay green.
 
-use std::net::Ipv4Addr;
+// The planner + builders below are wired back into the executor in
+// step 9; until then they exist purely for the unit tests in this
+// module.
+#![allow(dead_code)]
+
 use std::pin::Pin;
-use std::sync::Mutex;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration as StdDuration;
 
 use arctern_config::PushJobConfig;
-use arctern_transport::client_config_accept_any;
 use time::OffsetDateTime;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, info_span, warn};
+use tracing::{Instrument, info_span};
 
 use super::{Job, JobContext, JobStatusInner};
 
 use arctern_config::{SendFlagsConfig, SnapshotFilterConfig};
 use arctern_transport::{
-    Op, ProtocolError, ReceiveHeader, ReceiveResponse, SendFlagsWire, SendHeader, SendKind,
-    SnapshotEntry, SnapshotRef, compile_prefix_regex, read_response, regex, write_header,
+    ProtocolError, SendFlagsWire, SendHeader, SendKind, SnapshotEntry, SnapshotRef,
+    compile_prefix_regex, regex,
 };
 use palimpsest::dataset::ListOptions;
 use palimpsest::models::DatasetType;
 use palimpsest::runner::CommandRunner;
-use palimpsest::send::{SendArgs, send as zfs_send};
+use palimpsest::send::SendArgs;
 use thiserror::Error;
-use tokio::io::AsyncReadExt;
 
-/// What the planner decided to do for one filesystem this cycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SnapshotPlan {
-    /// Sender has no matching snapshots, OR the latest sender snapshot
-    /// is already on the receiver. No QUIC SEND stream this cycle.
     Nothing,
-    /// First-replication path. Send the sender's latest matching
-    /// snapshot in full. `discard_partial_recv` is set when the
-    /// receiver advertised a stale resume token that must be cleared
-    /// (`zfs recv -A`) before this fresh stream can land — D6
-    /// confirmed in the VM that ZFS rejects a fresh full into a
-    /// dataset with `receive_resume_token` set, even with -F.
     Full {
         to: SnapshotRef,
         discard_partial_recv: bool,
     },
-    /// Send the delta from `from` (highest-createtxg common GUID with
-    /// the receiver) to `to` (sender's latest matching snapshot).
-    /// Same `discard_partial_recv` semantics as `Full`.
     Incremental {
         from: SnapshotRef,
         to: SnapshotRef,
         discard_partial_recv: bool,
     },
-    /// Continue an in-flight partial recv on the receiver via
-    /// `zfs send -t <token>`. The token encodes the destination's
-    /// expected `(from_guid, to_guid)`; the planner verifies both
-    /// remain on the sender before emitting this variant. Falls
-    /// through to Full/Incremental with `discard_partial_recv = true`
-    /// when validation fails.
     Resume {
         token: String,
         decoded: palimpsest::resume_token::ResumeToken,
     },
 }
 
-/// Compiled snapshot filter. Owns the optional regex (so the planner
-/// doesn't recompile each cycle) and the original wire string (so the
-/// LIST request can carry the same regex the planner is using).
 #[derive(Debug, Clone)]
 pub struct CompiledFilter {
     re: Option<regex::Regex>,
@@ -111,25 +83,14 @@ pub enum PlanError {
         #[source]
         source: palimpsest::ZfsError,
     },
-    #[error("LIST request: {0}")]
+    #[error("wire: {0}")]
     Wire(#[from] ProtocolError),
     #[error("LIST receiver error: {message}")]
     Receiver { message: String },
-    #[error("quinn: {0}")]
-    Quinn(String),
-    /// Slice 006: receiver advertised a `receive_resume_token` but the
-    /// sender failed to decode it via `zfs send -nvt`. Per spec edge
-    /// case "Token decode itself fails", we do NOT fall through to a
-    /// fresh send — that would fail at recv with the partial-state
-    /// error and not get cleaned up. Operator-driven recovery (manual
-    /// `zfs recv -A`).
     #[error("decode resume token: {0}")]
     ResumeTokenDecode(#[from] palimpsest::resume_token::ResumeTokenError),
 }
 
-/// Sender-side snapshot pulled out of palimpsest into the planner's
-/// internal representation. Kept private; the planner emits
-/// `SnapshotRef`s on `SnapshotPlan` for the wire.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LocalSnap {
     name: String,
@@ -137,8 +98,6 @@ struct LocalSnap {
     createtxg: u64,
 }
 
-/// List the sender's snapshots under `sender_dataset`, filter by
-/// `filter`, sort by `createtxg` ascending. Public for testability.
 pub async fn list_sender_snaps(
     runner: &dyn CommandRunner,
     sender_dataset: &str,
@@ -184,18 +143,10 @@ pub async fn list_sender_snaps(
         .collect())
 }
 
-/// Pure planner core: given sender + receiver snapshot lists (sender
-/// sorted by createtxg ascending, receiver in any order), return the
-/// `SnapshotPlan`. Split out so the GUID-intersection algorithm is
-/// trivially testable without ZFS or QUIC.
 pub fn pick_plan(sender: &[SnapshotRef], receiver: &[SnapshotEntry]) -> SnapshotPlan {
     pick_plan_with_discard(sender, receiver, false)
 }
 
-/// Same algorithm as `pick_plan` but stamps the `discard_partial_recv`
-/// flag on the returned `Full` / `Incremental` (slice 006). Split out
-/// so `pick_plan` keeps its slice-005 signature and call sites that
-/// don't care about the flag stay terse.
 fn pick_plan_with_discard(
     sender: &[SnapshotRef],
     receiver: &[SnapshotEntry],
@@ -212,7 +163,6 @@ fn pick_plan_with_discard(
     }
     use std::collections::BTreeSet;
     let recv_guids: BTreeSet<u64> = receiver.iter().map(|s| s.guid).collect();
-    // Walk sender from highest createtxg down; first GUID-hit is the from.
     let mut from: Option<&SnapshotRef> = None;
     for s in sender.iter().rev() {
         if recv_guids.contains(&s.guid) {
@@ -234,15 +184,6 @@ fn pick_plan_with_discard(
     }
 }
 
-/// Slice 006 planner core: choose between Resume, Full+discard,
-/// Incremental+discard, and the slice-005 plain Full / Incremental /
-/// Nothing. Pure (no I/O) so the GUID-validation logic is testable
-/// without QUIC or ZFS.
-///
-/// The token validation is "are BOTH endpoints encoded in the token
-/// still on the sender?" — to_guid must always match; from_guid must
-/// match when the token is for an incremental resume (full-send
-/// tokens have `from_guid == None`, in which case only to_guid matters).
 pub fn pick_plan_with_token(
     sender: &[SnapshotRef],
     receiver: &[SnapshotEntry],
@@ -265,125 +206,10 @@ pub fn pick_plan_with_token(
             decoded: decoded.clone(),
         }
     } else {
-        // Token is stale. Fall back to slice-005 algorithm but mark the
-        // plan so the sink runs `zfs recv -A` first.
         pick_plan_with_discard(sender, receiver, true)
     }
 }
 
-/// Open a fresh QUIC bi stream, send a LIST request, read the
-/// receiver's snapshot list AND the receiver's `receive_resume_token`
-/// (slice 006). Returns `(snapshots, token)`. An empty snapshot Vec
-/// means the dataset doesn't exist yet (sink maps DatasetNotFound to
-/// an empty Ok per slice 005 D16). `token = None` means there is no
-/// partial recv in flight on the receiver — the most common case.
-pub async fn fetch_receiver_snaps(
-    connection: &quinn::Connection,
-    target_dataset: &str,
-    filter: &CompiledFilter,
-) -> Result<(Vec<SnapshotEntry>, Option<String>), PlanError> {
-    use arctern_transport::{ListResponse, read_list_response};
-
-    let (mut send, mut recv) = connection
-        .open_bi()
-        .await
-        .map_err(|e| PlanError::Quinn(format!("open_bi (list): {e}")))?;
-    let header = ReceiveHeader {
-        version: arctern_transport::PROTOCOL_VERSION,
-        op: Op::List,
-        target_dataset: target_dataset.to_string(),
-        prefix_regex: filter.wire_regex().map(String::from),
-        send: None,
-    };
-    write_header(&mut send, &header).await?;
-    send.finish()
-        .map_err(|e| PlanError::Quinn(format!("finish (list): {e}")))?;
-    let resp = read_list_response(&mut recv).await?;
-    match resp {
-        ListResponse::Ok {
-            snapshots,
-            receive_resume_token,
-        } => Ok((snapshots, receive_resume_token)),
-        ListResponse::Error { message } => Err(PlanError::Receiver { message }),
-    }
-}
-
-/// Plan one filesystem cycle: list sender, ask receiver via LIST,
-/// decide via `pick_plan`. The QUIC connection is borrowed; the
-/// caller manages its lifecycle (opens it once per cycle and closes
-/// it after every filesystem is processed).
-pub async fn plan_one_filesystem(
-    runner: &dyn CommandRunner,
-    sender_dataset: &str,
-    target_dataset: &str,
-    filter: &CompiledFilter,
-    connection: &quinn::Connection,
-) -> Result<SnapshotPlan, PlanError> {
-    let sender = list_sender_snaps(runner, sender_dataset, filter).await?;
-    if sender.is_empty() {
-        return Ok(SnapshotPlan::Nothing);
-    }
-    let (receiver, token) = fetch_receiver_snaps(connection, target_dataset, filter).await?;
-    // `zfs send -nvt <token>` itself enforces "the snapshots encoded
-    // in this token still exist on the sender" — if the source snap
-    // was pruned between the partial recv and now, decode fails with
-    // `cannot resume send: '<snap>' no longer exists`. Treat any
-    // decode failure as "token is stale" rather than as a hard
-    // planner error: fall through to a fresh Full/Incremental with
-    // discard_partial_recv = true. The sink runs `zfs recv -A` and
-    // accepts the fresh stream. (Matches the spec's stale-token
-    // recovery story; supersedes the slice-006 plan's earlier
-    // "operator-driven recovery on decode failure" stance — zfs
-    // send -nvt's failure mode IS the stale-token signal we need to
-    // act on automatically.)
-    let decoded = match token.as_deref() {
-        Some(t) => match palimpsest::resume_token::decode(runner, t).await {
-            Ok(d) => Some(d),
-            Err(e) => {
-                tracing::info!(
-                    target = %target_dataset,
-                    error = %e,
-                    "push: receiver token failed to decode, treating as stale"
-                );
-                // Fall through to pick_plan_with_discard(true) by
-                // emulating "decoded=None but we still need discard".
-                return Ok(pick_plan_with_discard(&sender, &receiver, true));
-            }
-        },
-        None => None,
-    };
-    Ok(pick_plan_with_token(
-        &sender,
-        &receiver,
-        token.as_deref(),
-        decoded.as_ref(),
-    ))
-}
-
-#[derive(Debug, Error)]
-pub enum ExecError {
-    #[error("nothing to do")]
-    Nothing,
-    #[error("spawn zfs send: {0}")]
-    SpawnSend(palimpsest::ZfsError),
-    #[error("zfs send failed (exit {exit:?}): {stderr}")]
-    SendFailed { exit: Option<i32>, stderr: String },
-    #[error("io copy stream -> quic: {source}; send stderr: {stderr}")]
-    StreamCopy {
-        #[source]
-        source: std::io::Error,
-        stderr: String,
-    },
-    #[error("wire: {0}")]
-    Wire(#[from] ProtocolError),
-    #[error("quinn: {0}")]
-    Quinn(String),
-    #[error("receiver: {message}")]
-    Receiver { message: String },
-}
-
-/// Build the wire-side SendHeader from a plan + the operator's flag
-/// config. Pure helper, easy to test.
 pub fn build_send_header(plan: &SnapshotPlan, flags: &SendFlagsConfig) -> Option<SendHeader> {
     let wire_flags = SendFlagsWire {
         raw: flags.encrypted,
@@ -414,7 +240,7 @@ pub fn build_send_header(plan: &SnapshotPlan, flags: &SendFlagsConfig) -> Option
                 name: decoded.to_name.clone(),
                 guid: decoded.to_guid,
             },
-            // D18: Resume MUST NOT discard the partial — that IS the
+            // Resume MUST NOT discard the partial — that IS the
             // partial we are continuing.
             false,
         ),
@@ -432,16 +258,11 @@ pub fn build_send_header(plan: &SnapshotPlan, flags: &SendFlagsConfig) -> Option
     })
 }
 
-/// Build a `palimpsest::send::SendArgs` for the chosen plan against
-/// the sender's dataset path.
 pub fn build_send_args(
     plan: &SnapshotPlan,
     sender_dataset: &str,
     flags: &SendFlagsConfig,
 ) -> Option<SendArgs> {
-    // Resume builds differently: the snapshot positional is unused
-    // (palimpsest's SendArgs ignores it when from = ResumeToken) and
-    // the `-i` form does not apply.
     if let SnapshotPlan::Resume { token, .. } = plan {
         let mut args = SendArgs::new("ignored").resume_token(token);
         if flags.encrypted {
@@ -483,87 +304,11 @@ pub fn build_send_args(
     Some(args)
 }
 
-/// Open a SEND stream for one plan, spawn `zfs send` via palimpsest,
-/// pipe its stdout to QUIC, await the receiver's response. Returns
-/// `Ok(())` only if both the send process exits cleanly AND the
-/// receiver replies Ok.
-pub async fn execute_one_plan(
-    runner: &dyn CommandRunner,
-    plan: &SnapshotPlan,
-    target_dataset: &str,
-    sender_dataset: &str,
-    flags: &SendFlagsConfig,
-    connection: &quinn::Connection,
-) -> Result<(), ExecError> {
-    let Some(send_header) = build_send_header(plan, flags) else {
-        return Err(ExecError::Nothing);
-    };
-    let Some(args) = build_send_args(plan, sender_dataset, flags) else {
-        return Err(ExecError::Nothing);
-    };
-
-    let (mut quic_send, mut quic_recv) = connection
-        .open_bi()
-        .await
-        .map_err(|e| ExecError::Quinn(format!("open_bi (send): {e}")))?;
-    let header = ReceiveHeader {
-        version: arctern_transport::PROTOCOL_VERSION,
-        op: Op::Send,
-        target_dataset: target_dataset.to_string(),
-        prefix_regex: None,
-        send: Some(send_header),
-    };
-    write_header(&mut quic_send, &header).await?;
-
-    let mut child = zfs_send(runner, &args).await.map_err(ExecError::SpawnSend)?;
-    let mut child_stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| ExecError::Quinn("no stdout on send child".into()))?;
-    let mut child_stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| ExecError::Quinn("no stderr on send child".into()))?;
-    let stderr_drain = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        let _ = child_stderr.read_to_end(&mut buf).await;
-        buf
-    });
-    let copy_res = tokio::io::copy(&mut child_stdout, &mut quic_send).await;
-    quic_send
-        .finish()
-        .map_err(|e| ExecError::Quinn(format!("finish (send): {e}")))?;
-    let stderr_bytes = stderr_drain.await.unwrap_or_default();
-    let exit = child
-        .wait()
-        .await
-        .map_err(|e| ExecError::Quinn(format!("send wait: {e}")))?;
-    if let Err(source) = copy_res {
-        return Err(ExecError::StreamCopy {
-            source,
-            stderr: String::from_utf8_lossy(&stderr_bytes).trim().to_string(),
-        });
-    }
-    if !exit.success() {
-        return Err(ExecError::SendFailed {
-            exit: exit.code(),
-            stderr: String::from_utf8_lossy(&stderr_bytes).trim().to_string(),
-        });
-    }
-
-    // The receiver finishes its send half after writing the response;
-    // read_response consumes until EOF.
-    let resp = read_response(&mut quic_recv).await?;
-    match resp {
-        ReceiveResponse::Ok => Ok(()),
-        ReceiveResponse::Error { message } => Err(ExecError::Receiver { message }),
-    }
-}
-
 pub const KIND: &str = arctern_api::JOB_KIND_PUSH;
 
 pub struct PushJob {
     config: PushJobConfig,
+    #[allow(dead_code)]
     filter: CompiledFilter,
     status: Mutex<JobStatusInner>,
     wakeup: Arc<tokio::sync::Notify>,
@@ -604,7 +349,7 @@ impl Job for PushJob {
     }
     fn run(
         self: Arc<Self>,
-        ctx: JobContext,
+        _ctx: JobContext,
         cancel: CancellationToken,
     ) -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
         let span = info_span!("push_job", name = %self.config.name);
@@ -617,157 +362,16 @@ impl Job for PushJob {
                         _ = sleep(interval) => {}
                         _ = self.wakeup.notified() => {}
                     }
-                    let outcome = self.run_cycle(&ctx).await;
-                    self.record_cycle(outcome.err(), interval);
-                }
-            }
-            .instrument(span),
-        )
-    }
-}
-
-impl PushJob {
-    async fn run_cycle(&self, ctx: &JobContext) -> Result<(), String> {
-        // Open one QUIC connection per cycle, used across every
-        // configured filesystem in declared order. Closing at the end
-        // of the cycle keeps connection state from leaking across
-        // cycle boundaries (next cycle starts with a fresh handshake).
-        let mut endpoint = quinn::Endpoint::client((Ipv4Addr::UNSPECIFIED, 0).into())
-            .map_err(|e| format!("client endpoint: {e}"))?;
-        let client_cfg = client_config_accept_any()
-            .map_err(|e| format!("client TLS config: {e}"))?;
-        endpoint.set_default_client_config(client_cfg);
-        let connection = endpoint
-            .connect(self.config.connect, &self.config.server_name)
-            .map_err(|e| format!("connect {} ({}): {e}", self.config.connect, self.config.server_name))?
-            .await
-            .map_err(|e| format!("handshake {}: {e}", self.config.connect))?;
-
-        let runner = ctx.runner.as_ref();
-        let mut errors: Vec<String> = Vec::new();
-        let sender_paths = self.expand_filesystems(runner).await.map_err(|e| {
-            format!("expand filesystems: {e}")
-        })?;
-        for sender_path in &sender_paths {
-            // D5/FR-005: literal concat — target = root_fs/sender_path.
-            let target = format!("{}/{}", self.config.target.root_fs, sender_path);
-            tracing::info!(sender = %sender_path, target = %target, "push: planning");
-            let plan = match plan_one_filesystem(
-                runner,
-                sender_path,
-                &target,
-                &self.filter,
-                &connection,
-            )
-            .await
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    let msg = format!("plan {sender_path}: {e}");
-                    warn!(error = %msg);
-                    errors.push(msg);
-                    continue;
-                }
-            };
-            match &plan {
-                SnapshotPlan::Nothing => {
-                    tracing::info!(sender = %sender_path, "push: nothing to do");
-                    continue;
-                }
-                SnapshotPlan::Full {
-                    to,
-                    discard_partial_recv,
-                } => {
-                    if *discard_partial_recv {
-                        tracing::info!(
-                            sender = %sender_path,
-                            to = %to.name,
-                            "push: full send (discarding stale partial)"
-                        );
-                    } else {
-                        tracing::info!(sender = %sender_path, to = %to.name, "push: full send");
-                    }
-                }
-                SnapshotPlan::Incremental {
-                    from,
-                    to,
-                    discard_partial_recv,
-                } => {
-                    if *discard_partial_recv {
-                        tracing::info!(
-                            sender = %sender_path, from = %from.name, to = %to.name,
-                            "push: incremental send (discarding stale partial)"
-                        );
-                    } else {
-                        tracing::info!(
-                            sender = %sender_path, from = %from.name, to = %to.name,
-                            "push: incremental send"
-                        );
-                    }
-                }
-                SnapshotPlan::Resume { decoded, .. } => {
-                    tracing::info!(
-                        sender = %sender_path,
-                        to = %decoded.to_name,
-                        bytes = decoded.bytes_received,
-                        "push: resuming from token"
+                    // Executor is being rebuilt on top of PeerLink in
+                    // ARCHITECTURE.md step 9. Until then the cycle is
+                    // a no-op so the daemon keeps booting cleanly.
+                    self.record_cycle(
+                        Some("push executor not yet wired to SSH transport".into()),
+                        interval,
                     );
                 }
             }
-            if let Err(e) = execute_one_plan(
-                runner,
-                &plan,
-                &target,
-                sender_path,
-                &self.config.send,
-                &connection,
-            )
-            .await
-            {
-                let msg = format!("execute {sender_path}: {e}");
-                warn!(error = %msg);
-                errors.push(msg);
-            }
-        }
-
-        connection.close(0u32.into(), b"cycle done");
-        endpoint.wait_idle().await;
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors.join("; "))
-        }
-    }
-
-    /// Resolve the configured `[[jobs.filesystems]]` entries into
-    /// concrete sender dataset paths. Reuses the same
-    /// recursive+exclude semantics as snap by querying palimpsest's
-    /// dataset list per declared filter.
-    async fn expand_filesystems(
-        &self,
-        runner: &dyn CommandRunner,
-    ) -> Result<Vec<String>, String> {
-        let mut pools: std::collections::BTreeSet<String> =
-            std::collections::BTreeSet::new();
-        for f in &self.config.filesystems {
-            let pool = f.path.split('/').next().unwrap_or(&f.path).to_string();
-            pools.insert(pool);
-        }
-        let opts = ListOptions {
-            recursive: true,
-            types: vec![DatasetType::Filesystem, DatasetType::Volume],
-            roots: pools.into_iter().collect(),
-            ..ListOptions::default()
-        };
-        let entries = palimpsest::dataset::list(runner, &opts)
-            .await
-            .map_err(|e| format!("list datasets: {e}"))?;
-        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
-        Ok(
-            arctern_config::filter::resolve_all(&self.config.filesystems, &names)
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
+            .instrument(span),
         )
     }
 }
@@ -793,10 +397,7 @@ mod tests {
     #[test]
     fn empty_sender_means_nothing() {
         assert_eq!(pick_plan(&[], &[]), SnapshotPlan::Nothing);
-        assert_eq!(
-            pick_plan(&[], &[e("a", 1, 1)]),
-            SnapshotPlan::Nothing
-        );
+        assert_eq!(pick_plan(&[], &[e("a", 1, 1)]), SnapshotPlan::Nothing);
     }
 
     #[test]
@@ -834,8 +435,6 @@ mod tests {
 
     #[test]
     fn sender_ahead_by_many_picks_highest_common_guid() {
-        // Sender: a, b, c, d, e  GUIDs 1..5
-        // Receiver has b + d (out of order), neither is the latest
         let sender = vec![s("a", 1), s("b", 2), s("c", 3), s("d", 4), s("e", 5)];
         let receiver = vec![e("d", 4, 4), e("b", 2, 2)];
         assert_eq!(
@@ -850,7 +449,6 @@ mod tests {
 
     #[test]
     fn disjoint_guids_means_full_send() {
-        // Operator rolled back receiver by hand; new GUIDs everywhere.
         let sender = vec![s("a", 1), s("b", 2)];
         let receiver = vec![e("x", 100, 1), e("y", 200, 2)];
         assert_eq!(
@@ -862,8 +460,6 @@ mod tests {
         );
     }
 
-    /// Real ZFS GUIDs from the palimpsest test VM (all > i64::MAX).
-    /// The intersection map keys on u64 so these are correct.
     #[test]
     fn intersects_correctly_at_u64_above_i64_max() {
         let sender = vec![
@@ -872,10 +468,6 @@ mod tests {
             s("manual_001", 14719774020884296672),
         ];
         let receiver = vec![e("zrepl_001", 11587258101628135412, 8)];
-        // The latest sender snap is manual_001; receiver has only zrepl_001
-        // which is the OLDEST sender snap. Incremental from zrepl_001 to
-        // manual_001 (the createtxg-ascending sort places manual_001 last
-        // because it has the highest createtxg in the test fixture).
         assert_eq!(
             pick_plan(&sender, &receiver),
             SnapshotPlan::Incremental {
@@ -895,7 +487,6 @@ mod tests {
         let f = CompiledFilter::from_config(&cfg).unwrap();
         assert!(f.matches("zrepl_001"));
         assert!(!f.matches("manual_001"));
-        // The wire form escapes regex metacharacters in the prefix.
         assert_eq!(f.wire_regex(), Some("^zrepl_"));
     }
 
@@ -948,7 +539,6 @@ mod tests {
         };
         let args = build_send_args(&plan, "tank/data", &SendFlagsConfig::default()).unwrap();
         let v = args.build_args(false).unwrap();
-        // Order matches palimpsest::send::SendArgs::build_args.
         assert_eq!(v, vec!["send", "-w", "-c", "-L", "-e", "tank/data@snap1"]);
     }
 
@@ -988,8 +578,6 @@ mod tests {
         assert_eq!(f.wire_regex(), Some("^auto_[0-9]+$"));
     }
 
-    // ─── Slice 006 ─────────────────────────────────────────────────
-
     fn rt(to_guid: u64, from_guid: Option<u64>) -> palimpsest::resume_token::ResumeToken {
         palimpsest::resume_token::ResumeToken {
             token: "1-deadbeef".into(),
@@ -1002,7 +590,6 @@ mod tests {
 
     #[test]
     fn pick_plan_with_token_none_falls_through_to_full() {
-        // Slice 005 behaviour preserved when no token is present.
         let sender = vec![s("a", 1), s("b", 2)];
         let p = pick_plan_with_token(&sender, &[], None, None);
         assert_eq!(
@@ -1016,8 +603,6 @@ mod tests {
 
     #[test]
     fn pick_plan_with_token_live_full_emits_resume() {
-        // Token's to_guid is on the sender; from_guid is None (full-send
-        // resume). Plan = Resume.
         let sender = vec![s("a", 1), s("b", 11587258101628135412)];
         let decoded = rt(11587258101628135412, None);
         let p = pick_plan_with_token(&sender, &[], Some("1-deadbeef"), Some(&decoded));
@@ -1032,7 +617,6 @@ mod tests {
 
     #[test]
     fn pick_plan_with_token_live_incremental_emits_resume() {
-        // Both endpoints of the incremental-resume token are on the sender.
         let sender = vec![s("a", 1), s("b", 2)];
         let decoded = rt(2, Some(1));
         let p = pick_plan_with_token(&sender, &[], Some("1-deadbeef"), Some(&decoded));
@@ -1041,8 +625,6 @@ mod tests {
 
     #[test]
     fn pick_plan_with_token_to_guid_dead_emits_full_with_discard() {
-        // Token's to_guid is no longer on the sender. Receiver is empty
-        // so the only option is Full + discard.
         let sender = vec![s("a", 1), s("b", 2)];
         let decoded = rt(99999, None);
         let p = pick_plan_with_token(&sender, &[], Some("1-deadbeef"), Some(&decoded));
@@ -1057,7 +639,6 @@ mod tests {
 
     #[test]
     fn pick_plan_with_token_from_guid_dead_emits_with_discard() {
-        // Incremental token, sender has to_guid but not from_guid.
         let sender = vec![s("a", 1), s("b", 2)];
         let decoded = rt(2, Some(99999));
         let p = pick_plan_with_token(&sender, &[], Some("1-deadbeef"), Some(&decoded));
@@ -1072,8 +653,6 @@ mod tests {
 
     #[test]
     fn pick_plan_with_token_dead_but_common_snap_exists_emits_incremental_with_discard() {
-        // Sender + receiver share a different GUID; token is stale →
-        // Incremental + discard, NOT Full + discard.
         let sender = vec![s("a", 1), s("b", 2), s("c", 3)];
         let receiver = vec![e("b", 2, 5)];
         let decoded = rt(99999, None);
@@ -1117,7 +696,6 @@ mod tests {
         assert!(h.from_snap.is_none());
         assert_eq!(h.to_snap.name, "tank/data@snap1");
         assert_eq!(h.to_snap.guid, 42);
-        // D18 — Resume MUST NOT set discard_partial_recv.
         assert!(!h.discard_partial_recv);
     }
 
@@ -1136,8 +714,6 @@ mod tests {
         };
         let args = build_send_args(&plan, "tank/data", &SendFlagsConfig::default()).unwrap();
         let v = args.build_args(false).unwrap();
-        // The flags from SendFlagsConfig::default() apply to the resumed
-        // stream just like a fresh send. No snapshot positional and no -i.
         assert_eq!(v, vec!["send", "-w", "-c", "-L", "-e", "-t", "1-abc"]);
     }
 }

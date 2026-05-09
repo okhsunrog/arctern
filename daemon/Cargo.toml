@@ -21,3 +21,14 @@ tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 utoipa = { version = "5.5.0", features = ["axum_extras"] }
 utoipa-axum = "0.2.0"
+
+[dev-dependencies]
+palimpsest = { path = "../../palimpsest" }
+reqwest = { version = "0.13.3", default-features = false, features = ["json", "rustls"] }
+
+[features]
+# Enables `daemon/tests/integration_*.rs` against a real ZFS-capable host
+# reachable via SSH. Requires PALIMPSEST_SSH_TARGET=user@host:port (and
+# optionally PALIMPSEST_SSH_PASSWORD); the test boots a loopback pool
+# inside the VM and drives the daemon against it.
+integration = []

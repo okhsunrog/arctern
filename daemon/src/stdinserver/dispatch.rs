@@ -64,7 +64,12 @@ pub async fn run(identity: &str, config_path: &Path) -> eyre::Result<()> {
             Ok(())
         }
         DispatchAction::Recv { job } => {
-            tracing::info!(identity, job, "stdinserver recv: not yet implemented");
+            tracing::info!(identity, job, "stdinserver recv: opening channel");
+            let stdin = tokio::io::stdin();
+            let stdout = tokio::io::stdout();
+            super::recv::run(runner, acl, stdin, stdout)
+                .await
+                .map_err(|e| eyre::eyre!("recv channel: {e}"))?;
             Ok(())
         }
         DispatchAction::Unsupported { reason } => {

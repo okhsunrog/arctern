@@ -1,0 +1,819 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "arctern",
+    "description": "ZFS replication daemon HTTP API",
+    "license": {
+      "name": ""
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/v1/datasets": {
+      "get": {
+        "tags": [
+          "datasets"
+        ],
+        "summary": "List datasets reachable through `palimpsest`'s SSH runner. The runner\nis constructed per-request from `PALIMPSEST_SSH_TARGET` /\n`PALIMPSEST_SSH_PASSWORD` — cheap, and avoids shared mutable state in\nthe daemon for this slice. A future slice may pool / reuse runners.",
+        "operationId": "list_datasets",
+        "responses": {
+          "200": {
+            "description": "All datasets visible to the daemon's ZFS runner",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DatasetSummary"
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "ZFS returned an error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Could not spawn the underlying zfs subprocess",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/datasets/{name}/snapshots": {
+      "post": {
+        "tags": [
+          "snapshots"
+        ],
+        "summary": "Create a snapshot of `{name}` named `req.snapshot_name`. After ZFS\nconfirms creation, a follow-up `zfs list -j` materializes the\n`DatasetSummary` so callers do not need a second round-trip.",
+        "description": "`palimpsest::ZfsError::SnapshotExists` maps to 409 (not 200/201) — the\ncaller decides whether already-exists is fatal.",
+        "operationId": "create_snapshot",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Parent dataset (URL-encode `/` as %2F)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSnapshotRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Snapshot created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DatasetSummary"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Parent dataset not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Snapshot already exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "ZFS returned an error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Could not spawn the underlying zfs subprocess",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/events": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Subscribe to the daemon's log-event broadcast and yield each as an\nSSE frame. Backlog replay is intentionally out of scope for v1 — the\nreceiver-side SubscribeEvents handler is built around polling\nlog_events directly. UI clients that want history hit a\nfuture `/api/v1/events?since=…` endpoint or the SQLite directly.",
+        "operationId": "stream_events",
+        "responses": {
+          "200": {
+            "description": "SSE stream of LogEvent JSON frames"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "operationId": "list_jobs",
+        "responses": {
+          "200": {
+            "description": "Per-job status snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/JobStatus"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{name}/wakeup": {
+      "post": {
+        "tags": [
+          "jobs"
+        ],
+        "operationId": "wakeup",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Job name as declared in arctern.toml",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Job's cycle loop was woken up"
+          },
+          "404": {
+            "description": "No job with that name is registered"
+          }
+        }
+      }
+    },
+    "/api/v1/peers": {
+      "get": {
+        "tags": [
+          "peers"
+        ],
+        "operationId": "list_peers",
+        "responses": {
+          "200": {
+            "description": "Configured peers with reachability",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PeerSummary"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/peers/{peer}/events": {
+      "get": {
+        "tags": [
+          "peers"
+        ],
+        "summary": "`GET /api/v1/peers/{peer}/events` — proxied SSE. Sends\nSubscribeEvents to the peer's control channel and yields each\npushed Event frame as an SSE frame.",
+        "operationId": "stream_peer_events",
+        "parameters": [
+          {
+            "name": "peer",
+            "in": "path",
+            "description": "Peer name from [[peers]]",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE stream of LogEvent JSON frames from the peer"
+          },
+          "404": {
+            "description": "No such peer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Peer not currently connected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/peers/{peer}/jobs": {
+      "get": {
+        "tags": [
+          "peers"
+        ],
+        "operationId": "list_peer_jobs",
+        "parameters": [
+          {
+            "name": "peer",
+            "in": "path",
+            "description": "Peer name from [[peers]]",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Per-job status snapshot from the peer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/JobStatus"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such peer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Peer not currently connected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/peers/{peer}/jobs/{name}": {
+      "get": {
+        "tags": [
+          "peers"
+        ],
+        "operationId": "get_peer_job",
+        "parameters": [
+          {
+            "name": "peer",
+            "in": "path",
+            "description": "Peer name from [[peers]]",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Job name on the peer",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Status for one job on the peer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such peer / job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Peer not currently connected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/peers/{peer}/jobs/{name}/wakeup": {
+      "post": {
+        "tags": [
+          "peers"
+        ],
+        "operationId": "wakeup_peer_job",
+        "parameters": [
+          {
+            "name": "peer",
+            "in": "path",
+            "description": "Peer name from [[peers]]",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Job name on the peer",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Wakeup delivered"
+          },
+          "404": {
+            "description": "No such peer / job",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Peer not currently connected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/peers/{peer}/snapshots": {
+      "get": {
+        "tags": [
+          "peers"
+        ],
+        "operationId": "list_peer_snapshots",
+        "parameters": [
+          {
+            "name": "peer",
+            "in": "path",
+            "description": "Peer name from [[peers]]",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "dataset",
+            "in": "query",
+            "description": "Dataset on the peer",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "prefix_regex",
+            "in": "query",
+            "description": "Optional name filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Snapshots on the peer for the dataset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PeerSnapshotEntry"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such peer / dataset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Peer not currently connected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/peers/{peer}/snapshots/{name}/destroy": {
+      "post": {
+        "tags": [
+          "peers"
+        ],
+        "operationId": "destroy_peer_snapshot",
+        "parameters": [
+          {
+            "name": "peer",
+            "in": "path",
+            "description": "Peer name from [[peers]]",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Snapshot name (URL-encode @ and /)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Snapshot destroyed on the peer"
+          },
+          "403": {
+            "description": "Not allowed under the peer's ACL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such peer / snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Peer not currently connected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ApiErrorBody": {
+        "type": "object",
+        "description": "Body shape for `4xx`/`5xx` responses from the daemon. `error` is a\nshort machine-readable category (`spawn`, `dataset_not_found`, …);\n`message` is a human-readable description.",
+        "required": [
+          "error",
+          "message"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "CreateSnapshotRequest": {
+        "type": "object",
+        "description": "Request body for `POST /api/v1/datasets/{name}/snapshots`. The path\nsegment carries the parent dataset; this struct carries everything\nelse. `recursive` and `properties` default so a minimal client can\npost `{\"snapshot_name\":\"…\"}` and get the common case.",
+        "required": [
+          "snapshot_name"
+        ],
+        "properties": {
+          "snapshot_name": {
+            "type": "string"
+          },
+          "recursive": {
+            "type": "boolean"
+          },
+          "properties": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "DatasetSummary": {
+        "type": "object",
+        "description": "Slim projection of [`palimpsest::ZfsListEntry`] suitable for HTTP +\nOpenAPI. Native ZFS properties carry typed data (bytes, bool, …) but\n`BTreeMap<String, String>` serializes more cleanly through utoipa;\nconsumers parse property values as needed.",
+        "required": [
+          "name",
+          "dataset_type"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "dataset_type": {
+            "type": "string",
+            "description": "`\"filesystem\" | \"volume\" | \"snapshot\" | \"bookmark\"` — lowercase\nto match `zfs(8)`'s output and avoid leaking palimpsest's enum repr."
+          },
+          "properties": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "JobStatus": {
+        "type": "object",
+        "description": "One entry in the response of `GET /api/v1/jobs`. RFC3339 timestamps\nare nullable: `last_run` is null until the job has completed at\nleast one cycle; `next_run` is set as soon as the loop knows when\nit will fire next; `last_error` is null when the most recent cycle\nfinished cleanly.",
+        "required": [
+          "name",
+          "kind"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "last_run": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "next_run": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "LogEvent": {
+        "type": "object",
+        "description": "One row in `GET /api/v1/events` (and the proxied\n`GET /api/v1/peers/{peer}/events`). Mirrors\n`arctern_transport::EventWire` but lives in the public API surface\nso clients don't pull in the transport crate.",
+        "required": [
+          "id",
+          "timestamp",
+          "level",
+          "message"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "timestamp": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix seconds."
+          },
+          "level": {
+            "type": "string"
+          },
+          "job_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "PeerReachability": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "SSH session is up and the control channel is responding.",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "connected"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Background task is between reconnect attempts.",
+            "required": [
+              "since",
+              "kind"
+            ],
+            "properties": {
+              "since": {
+                "type": "string",
+                "description": "RFC3339 timestamp the link first went down."
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "reconnecting"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Last connect attempt failed; the loop is sleeping before retrying.",
+            "required": [
+              "since",
+              "last_error",
+              "kind"
+            ],
+            "properties": {
+              "since": {
+                "type": "string",
+                "description": "RFC3339 timestamp the link first went down (or last failed)."
+              },
+              "last_error": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "failed"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Reachability classification for one configured peer. The daemon\nupdates this from its background reconnect loop; the UI surfaces\nit in the Peers tab."
+      },
+      "PeerSnapshotEntry": {
+        "type": "object",
+        "description": "One snapshot returned by `GET /api/v1/peers/{peer}/snapshots`.",
+        "required": [
+          "name",
+          "guid",
+          "createtxg"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "guid": {
+            "type": "string",
+            "description": "ZFS GUID, serialized as a u64 string to stay safe across\nJSON parsers that downgrade large integers to f64."
+          },
+          "createtxg": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "PeerSummary": {
+        "type": "object",
+        "description": "One row in `GET /api/v1/peers`.",
+        "required": [
+          "name",
+          "ssh_target",
+          "reachability"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "ssh_target": {
+            "type": "string"
+          },
+          "reachability": {
+            "$ref": "#/components/schemas/PeerReachability"
+          }
+        }
+      }
+    }
+  }
+}

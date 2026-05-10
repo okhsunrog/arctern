@@ -265,30 +265,46 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
         peers: peers_state.clone(),
         events: events_tx,
     };
-    let app = router::build_router(app_state);
+    let app = router::build_router(app_state.clone());
+    let loopback_app = router::build_loopback_router(app_state);
+
+    // Loopback TCP serves the embedded admin UI + the same API; the
+    // perimeter is the 127.0.0.1 bind. Hardcoded port matches the
+    // dev-proxy in admin-ui/vite.config.ts.
+    let loopback_addr: std::net::SocketAddr = "127.0.0.1:7878".parse().unwrap();
+    let loopback_listener = tokio::net::TcpListener::bind(loopback_addr).await?;
 
     println!("LISTEN unix:{}", socket_path.display());
+    println!("LISTEN http://{loopback_addr}");
     std::io::stdout().flush().ok();
 
     tracing::info!(path = %socket_path.display(), "arctern daemon listening");
+    tracing::info!(addr = %loopback_addr, "arctern admin UI listening");
 
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
     let cleanup_path = socket_path.clone();
-    let shutdown = async move {
+    let shutdown_token = tokio_util::sync::CancellationToken::new();
+    let shutdown_token_uds = shutdown_token.clone();
+    let shutdown_token_tcp = shutdown_token.clone();
+    tokio::spawn(async move {
         tokio::select! {
             _ = sigterm.recv() => tracing::info!("SIGTERM"),
             _ = sigint.recv() => tracing::info!("SIGINT"),
         }
-    };
+        shutdown_token.cancel();
+    });
 
-    let serve = axum::serve(
+    let uds_serve = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<auth::PeerCredentials>(),
     )
-    .with_graceful_shutdown(shutdown);
+    .with_graceful_shutdown(async move { shutdown_token_uds.cancelled().await });
 
-    let result = serve.await;
+    let tcp_serve = axum::serve(loopback_listener, loopback_app.into_make_service())
+        .with_graceful_shutdown(async move { shutdown_token_tcp.cancelled().await });
+
+    let result = tokio::try_join!(uds_serve.into_future(), tcp_serve.into_future()).map(|_| ());
     manager.shutdown(Duration::from_secs(5)).await;
     peers_cancel.cancel();
     for h in reconnect_handles {

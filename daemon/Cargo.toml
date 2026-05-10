@@ -19,6 +19,7 @@ clap = { version = "4.6.1", features = ["derive"] }
 eyre = "0.6.12"
 futures-util = "0.3.32"
 libc = "0.2.186"
+memory-serve = "2.1.0"
 openssh = { version = "0.11.6", features = ["native-mux"] }
 palimpsest = { version = "0.1.0", path = "../../palimpsest" }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -44,3 +45,7 @@ palimpsest = { path = "../../palimpsest" }
 # optionally PALIMPSEST_SSH_PASSWORD); the test boots a loopback pool
 # inside the VM and drives the daemon against it.
 integration = []
+
+[build-dependencies]
+chrono = "0.4.44"
+memory-serve = "2.1.0"

@@ -47,16 +47,28 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     api
 }
 
-pub fn build_router(state: AppState) -> Router {
+fn build_api_router(state: AppState) -> Router {
     let (router, api) = openapi_router().with_state(state).split_for_parts();
+    router.route(
+        "/api-docs/openapi.json",
+        get(move || async move { Json(api.clone()) }),
+    )
+}
 
-    router
-        .route(
-            "/api-docs/openapi.json",
-            get(move || async move { Json(api.clone()) }),
-        )
-        // Layer the entire router (including the OpenAPI doc) so every
-        // route inherits the same-uid check by construction. New routes
-        // do not need to remember to opt in.
-        .layer(middleware::from_fn(auth::enforce_same_uid))
+/// Router for the UNIX-socket bind. Same-UID middleware is applied to
+/// every route (including the OpenAPI doc) so new routes inherit the
+/// check by construction.
+pub fn build_router(state: AppState) -> Router {
+    build_api_router(state).layer(middleware::from_fn(auth::enforce_same_uid))
+}
+
+/// Router for the loopback TCP bind: API routes plus the embedded
+/// admin UI from `memory-serve`. No auth layer — the perimeter is the
+/// 127.0.0.1 bind itself, per ARCHITECTURE.md.
+pub fn build_loopback_router(state: AppState) -> Router {
+    let static_routes: Router = memory_serve::load!()
+        .index_file(Some("/index.html"))
+        .fallback(Some("/index.html"))
+        .into_router();
+    build_api_router(state).merge(static_routes)
 }

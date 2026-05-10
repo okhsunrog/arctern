@@ -63,6 +63,10 @@ enum Command {
     },
     /// One-shot validation for CI / pre-deploy.
     Configcheck { path: PathBuf },
+    /// Print the OpenAPI spec as JSON to stdout and exit. Used by the
+    /// admin-ui build to regenerate `admin-ui/openapi.json` and the TS
+    /// client. No daemon startup, no config load.
+    Openapi,
 }
 
 fn main() -> eyre::Result<()> {
@@ -73,6 +77,13 @@ fn main() -> eyre::Result<()> {
             run_stdinserver_dispatch(identity, config)
         }
         Command::Configcheck { path } => configcheck::run(&path),
+        Command::Openapi => {
+            let spec = router::openapi_spec();
+            let json = serde_json::to_string_pretty(&spec)
+                .map_err(|e| eyre::eyre!("serialize openapi: {e}"))?;
+            println!("{json}");
+            Ok(())
+        }
     }
 }
 

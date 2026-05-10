@@ -26,8 +26,8 @@ use crate::{auth, handlers};
 )]
 struct ApiDoc;
 
-pub fn build_router(state: AppState) -> Router {
-    let (router, api) = OpenApiRouter::with_openapi(ApiDoc::openapi())
+fn openapi_router() -> OpenApiRouter<AppState> {
+    OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(handlers::datasets::list_datasets))
         .routes(routes!(handlers::snapshots::create_snapshot))
         .routes(routes!(handlers::jobs::list_jobs))
@@ -40,8 +40,15 @@ pub fn build_router(state: AppState) -> Router {
         .routes(routes!(handlers::peers::destroy_peer_snapshot))
         .routes(routes!(handlers::peers::stream_peer_events))
         .routes(routes!(handlers::events::stream_events))
-        .with_state(state)
-        .split_for_parts();
+}
+
+pub fn openapi_spec() -> utoipa::openapi::OpenApi {
+    let (_router, api) = openapi_router().split_for_parts();
+    api
+}
+
+pub fn build_router(state: AppState) -> Router {
+    let (router, api) = openapi_router().with_state(state).split_for_parts();
 
     router
         .route(

@@ -18,8 +18,7 @@ const router = createRouter({
     {
       path: '/events',
       name: 'events',
-      component: () => import('../views/PlaceholderView.vue'),
-      meta: { title: 'Events' },
+      component: () => import('../views/EventsView.vue'),
     },
   ],
 })

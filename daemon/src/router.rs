@@ -1,6 +1,12 @@
 //! Axum router + utoipa OpenAPI doc.
 
-use axum::{Json, Router, middleware, routing::get};
+use axum::{
+    Json, Router,
+    http::{StatusCode, header},
+    middleware,
+    response::IntoResponse,
+    routing::get,
+};
 use utoipa::OpenApi;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
@@ -65,10 +71,26 @@ pub fn build_router(state: AppState) -> Router {
 /// Router for the loopback TCP bind: API routes plus the embedded
 /// admin UI from `memory-serve`. No auth layer — the perimeter is the
 /// 127.0.0.1 bind itself, per ARCHITECTURE.md.
+/// index.html is bundled at compile time so the SPA fallback handler
+/// has bytes to serve regardless of debug-vs-release memory-serve mode.
+const SPA_INDEX_HTML: &[u8] = include_bytes!("../../admin-ui/dist/index.html");
+
+async fn spa_fallback() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        SPA_INDEX_HTML,
+    )
+}
+
 pub fn build_loopback_router(state: AppState) -> Router {
     let static_routes: Router = memory_serve::load!()
         .index_file(Some("/index.html"))
-        .fallback(Some("/index.html"))
         .into_router();
-    build_api_router(state).merge(static_routes)
+    // memory-serve handles /, /index.html, /assets/*; client-side
+    // router paths (/jobs/foo, /events, ...) fall through to spa_fallback
+    // which serves the embedded index.html so vue-router can render them.
+    build_api_router(state)
+        .merge(static_routes)
+        .fallback(spa_fallback)
 }

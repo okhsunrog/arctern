@@ -47,6 +47,19 @@ export type DatasetSummary = {
 };
 
 /**
+ * One row of `job_runs` returned by `GET /api/v1/jobs/{name}/runs`.
+ * `started_at` / `finished_at` are unix seconds; `bytes_sent` is set
+ * only by push jobs that finished cleanly.
+ */
+export type JobRun = {
+    started_at: number;
+    finished_at?: number | null;
+    status: string;
+    error_message?: string | null;
+    bytes_sent?: number | null;
+};
+
+/**
  * One entry in the response of `GET /api/v1/jobs`. RFC3339 timestamps
  * are nullable: `last_run` is null until the job has completed at
  * least one cycle; `next_run` is set as soon as the loop knows when
@@ -222,6 +235,36 @@ export type ListJobsResponses = {
 };
 
 export type ListJobsResponse = ListJobsResponses[keyof ListJobsResponses];
+
+export type ListRunsData = {
+    body?: never;
+    path: {
+        /**
+         * Job name as declared in arctern.toml
+         */
+        name: string;
+    };
+    query?: {
+        /**
+         * Unix-second cutoff; rows with `started_at >= since` are returned.
+         */
+        since?: number | null;
+        /**
+         * Maximum number of rows to return. Defaults to 100, capped at 1000.
+         */
+        limit?: number | null;
+    };
+    url: '/api/v1/jobs/{name}/runs';
+};
+
+export type ListRunsResponses = {
+    /**
+     * Recent job runs, newest first
+     */
+    200: Array<JobRun>;
+};
+
+export type ListRunsResponse = ListRunsResponses[keyof ListRunsResponses];
 
 export type WakeupData = {
     body?: never;

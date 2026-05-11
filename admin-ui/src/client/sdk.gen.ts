@@ -2,7 +2,7 @@
 
 import type { Client, Options as Options2, TDataShape } from './client';
 import { client } from './client.gen';
-import type { CreateSnapshotData, CreateSnapshotErrors, CreateSnapshotResponses, DestroyPeerSnapshotData, DestroyPeerSnapshotErrors, DestroyPeerSnapshotResponses, GetPeerJobData, GetPeerJobErrors, GetPeerJobResponses, ListDatasetsData, ListDatasetsErrors, ListDatasetsResponses, ListJobsData, ListJobsResponses, ListPeerJobsData, ListPeerJobsErrors, ListPeerJobsResponses, ListPeersData, ListPeerSnapshotsData, ListPeerSnapshotsErrors, ListPeerSnapshotsResponses, ListPeersResponses, StreamEventsData, StreamEventsResponses, StreamPeerEventsData, StreamPeerEventsErrors, StreamPeerEventsResponses, WakeupData, WakeupErrors, WakeupPeerJobData, WakeupPeerJobErrors, WakeupPeerJobResponses, WakeupResponses } from './types.gen';
+import type { CreateSnapshotData, CreateSnapshotErrors, CreateSnapshotResponses, DestroyPeerSnapshotData, DestroyPeerSnapshotErrors, DestroyPeerSnapshotResponses, GetPeerJobData, GetPeerJobErrors, GetPeerJobResponses, ListDatasetsData, ListDatasetsErrors, ListDatasetsResponses, ListJobsData, ListJobsResponses, ListPeerJobsData, ListPeerJobsErrors, ListPeerJobsResponses, ListPeersData, ListPeerSnapshotsData, ListPeerSnapshotsErrors, ListPeerSnapshotsResponses, ListPeersResponses, ListRunsData, ListRunsResponses, StreamEventsData, StreamEventsResponses, StreamPeerEventsData, StreamPeerEventsErrors, StreamPeerEventsResponses, WakeupData, WakeupErrors, WakeupPeerJobData, WakeupPeerJobErrors, WakeupPeerJobResponses, WakeupResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean> = Options2<TData, ThrowOnError> & {
     /**
@@ -53,6 +53,8 @@ export const createSnapshot = <ThrowOnError extends boolean = false>(options: Op
 export const streamEvents = <ThrowOnError extends boolean = false>(options?: Options<StreamEventsData, ThrowOnError>) => (options?.client ?? client).get<StreamEventsResponses, unknown, ThrowOnError>({ url: '/api/v1/events', ...options });
 
 export const listJobs = <ThrowOnError extends boolean = false>(options?: Options<ListJobsData, ThrowOnError>) => (options?.client ?? client).get<ListJobsResponses, unknown, ThrowOnError>({ url: '/api/v1/jobs', ...options });
+
+export const listRuns = <ThrowOnError extends boolean = false>(options: Options<ListRunsData, ThrowOnError>) => (options.client ?? client).get<ListRunsResponses, unknown, ThrowOnError>({ url: '/api/v1/jobs/{name}/runs', ...options });
 
 export const wakeup = <ThrowOnError extends boolean = false>(options: Options<WakeupData, ThrowOnError>) => (options.client ?? client).post<WakeupResponses, WakeupErrors, ThrowOnError>({ url: '/api/v1/jobs/{name}/wakeup', ...options });
 

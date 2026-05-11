@@ -173,6 +173,66 @@
         }
       }
     },
+    "/api/v1/jobs/{name}/runs": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "operationId": "list_runs",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Job name as declared in arctern.toml",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Unix-second cutoff; rows with `started_at >= since` are returned.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of rows to return. Defaults to 100, capped at 1000.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recent job runs, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/JobRun"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/jobs/{name}/wakeup": {
       "post": {
         "tags": [
@@ -636,6 +696,43 @@
             "propertyNames": {
               "type": "string"
             }
+          }
+        }
+      },
+      "JobRun": {
+        "type": "object",
+        "description": "One row of `job_runs` returned by `GET /api/v1/jobs/{name}/runs`.\n`started_at` / `finished_at` are unix seconds; `bytes_sent` is set\nonly by push jobs that finished cleanly.",
+        "required": [
+          "started_at",
+          "status"
+        ],
+        "properties": {
+          "started_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "finished_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "status": {
+            "type": "string"
+          },
+          "error_message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "bytes_sent": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
           }
         }
       },

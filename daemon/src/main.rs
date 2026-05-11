@@ -264,6 +264,7 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
         manager: manager.clone(),
         peers: peers_state.clone(),
         events: events_tx,
+        state: pool.clone(),
     };
     let app = router::build_router(app_state.clone());
     let loopback_app = router::build_loopback_router(app_state);

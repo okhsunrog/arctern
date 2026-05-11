@@ -67,6 +67,18 @@ pub struct JobStatus {
     pub last_error: Option<String>,
 }
 
+/// One row of `job_runs` returned by `GET /api/v1/jobs/{name}/runs`.
+/// `started_at` / `finished_at` are unix seconds; `bytes_sent` is set
+/// only by push jobs that finished cleanly.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct JobRun {
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub bytes_sent: Option<i64>,
+}
+
 /// Body shape for `4xx`/`5xx` responses from the daemon. `error` is a
 /// short machine-readable category (`spawn`, `dataset_not_found`, …);
 /// `message` is a human-readable description.

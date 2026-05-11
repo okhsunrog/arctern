@@ -24,6 +24,7 @@ use crate::{auth, handlers};
         arctern_api::ApiErrorBody,
         arctern_api::CreateSnapshotRequest,
         arctern_api::JobStatus,
+        arctern_api::JobRun,
         arctern_api::PeerSummary,
         arctern_api::PeerReachability,
         arctern_api::PeerSnapshotEntry,
@@ -38,6 +39,7 @@ fn openapi_router() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::snapshots::create_snapshot))
         .routes(routes!(handlers::jobs::list_jobs))
         .routes(routes!(handlers::jobs::wakeup))
+        .routes(routes!(handlers::jobs::list_runs))
         .routes(routes!(handlers::peers::list_peers))
         .routes(routes!(handlers::peers::list_peer_jobs))
         .routes(routes!(handlers::peers::get_peer_job))

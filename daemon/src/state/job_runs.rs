@@ -3,12 +3,7 @@
 //! (added in step 10). Trim policy: drop rows older than 30 days at
 //! every sweep call (driven by the daemon's scheduler every 6 hours).
 
-// Query helpers below are wired into the scheduler in step 9 and the
-// HTTP layer in step 10; they exist now so the schema and the layer
-// can land in their own commit.
-#![allow(dead_code)]
-
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
 
 use super::StateError;
 
@@ -18,6 +13,7 @@ use super::StateError;
 pub const STATUS_OK: &str = "ok";
 pub const STATUS_ERROR: &str = "error";
 pub const STATUS_RUNNING: &str = "running";
+#[allow(dead_code)]
 pub const STATUS_CANCELLED: &str = "cancelled";
 
 /// Insert a `running` row for a freshly started cycle. The
@@ -68,8 +64,45 @@ pub async fn record_finish(
     Ok(())
 }
 
+/// Recent runs for `job_name`, newest first. `since_unix_seconds`
+/// filters out rows older than the cutoff when `Some`; `limit` caps
+/// the result set.
+pub async fn list_recent(
+    pool: &SqlitePool,
+    job_name: &str,
+    since_unix_seconds: Option<i64>,
+    limit: i64,
+) -> Result<Vec<arctern_api::JobRun>, StateError> {
+    let rows = sqlx::query(
+        "SELECT started_at, finished_at, status, error_message, bytes_sent
+           FROM job_runs
+          WHERE job_name = ?
+            AND (? IS NULL OR started_at >= ?)
+          ORDER BY started_at DESC
+          LIMIT ?",
+    )
+    .bind(job_name)
+    .bind(since_unix_seconds)
+    .bind(since_unix_seconds)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| arctern_api::JobRun {
+            started_at: r.get::<i64, _>("started_at"),
+            finished_at: r.get::<Option<i64>, _>("finished_at"),
+            status: r.get::<String, _>("status"),
+            error_message: r.get::<Option<String>, _>("error_message"),
+            bytes_sent: r.get::<Option<i64>, _>("bytes_sent"),
+        })
+        .collect())
+}
+
 /// Trim rows older than `cutoff_unix_seconds` (typically `now - 30d`).
 /// Returns the number of rows removed.
+#[allow(dead_code)]
 pub async fn trim_older_than(pool: &SqlitePool, cutoff_unix_seconds: i64) -> Result<u64, StateError> {
     let res = sqlx::query("DELETE FROM job_runs WHERE started_at < ?")
         .bind(cutoff_unix_seconds)

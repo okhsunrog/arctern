@@ -716,13 +716,32 @@ impl Job for PushJob {
         Box::pin(
             async move {
                 let interval = self.config.interval;
+                let job_name = self.config.name.clone();
                 loop {
                     tokio::select! {
                         _ = cancel.cancelled() => break,
                         _ = sleep(interval) => {}
                         _ = self.wakeup.notified() => {}
                     }
+                    let started_at = OffsetDateTime::now_utc().unix_timestamp();
+                    if let Some(pool) = ctx.state.as_ref() {
+                        let _ = crate::state::job_runs::record_start(
+                            pool, &job_name, started_at,
+                        )
+                        .await;
+                    }
                     let outcome = self.run_cycle(&ctx, &cancel).await;
+                    let finished_at = OffsetDateTime::now_utc().unix_timestamp();
+                    let (status, err_msg) = match &outcome {
+                        Ok(()) => (crate::state::job_runs::STATUS_OK, None),
+                        Err(e) => (crate::state::job_runs::STATUS_ERROR, Some(e.as_str())),
+                    };
+                    if let Some(pool) = ctx.state.as_ref() {
+                        let _ = crate::state::job_runs::record_finish(
+                            pool, &job_name, started_at, finished_at, status, err_msg, None,
+                        )
+                        .await;
+                    }
                     self.record_cycle(outcome.err(), interval);
                 }
             }

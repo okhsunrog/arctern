@@ -87,30 +87,56 @@ impl Job for SnapJob {
         cancel: CancellationToken,
     ) -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
         let span = info_span!("snap_job", name = %self.config.name);
+        let job_name = self.config.name.clone();
         Box::pin(
             async move {
                 let interval = self.interval();
                 // Startup-immediate: if no recent matching snapshot, run a
                 // cycle now instead of waiting `interval`.
-                if let Err(e) = self.run_cycle(&ctx).await {
-                    self.record_cycle(Some(e), interval);
-                } else {
-                    self.record_cycle(None, interval);
-                }
+                run_and_record(&self, &ctx, &job_name, interval).await;
                 loop {
                     tokio::select! {
                         _ = cancel.cancelled() => break,
                         _ = sleep(interval) => {}
                         _ = self.wakeup.notified() => {}
                     }
-                    let result = self.run_cycle(&ctx).await;
-                    let last_err = result.err();
-                    self.record_cycle(last_err, interval);
+                    run_and_record(&self, &ctx, &job_name, interval).await;
                 }
             }
             .instrument(span),
         )
     }
+}
+
+async fn run_and_record(
+    job: &SnapJob,
+    ctx: &JobContext,
+    job_name: &str,
+    interval: StdDuration,
+) {
+    let started_at = OffsetDateTime::now_utc().unix_timestamp();
+    if let Some(pool) = ctx.state.as_ref() {
+        let _ = crate::state::job_runs::record_start(pool, job_name, started_at).await;
+    }
+    let outcome = job.run_cycle(ctx).await;
+    let finished_at = OffsetDateTime::now_utc().unix_timestamp();
+    let (status, error_message) = match &outcome {
+        Ok(()) => (crate::state::job_runs::STATUS_OK, None),
+        Err(e) => (crate::state::job_runs::STATUS_ERROR, Some(e.as_str())),
+    };
+    if let Some(pool) = ctx.state.as_ref() {
+        let _ = crate::state::job_runs::record_finish(
+            pool,
+            job_name,
+            started_at,
+            finished_at,
+            status,
+            error_message,
+            None,
+        )
+        .await;
+    }
+    job.record_cycle(outcome.err(), interval);
 }
 
 impl SnapJob {

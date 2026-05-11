@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use arctern_api::LogEvent;
+use sqlx::SqlitePool;
 use tokio::sync::broadcast;
 
 use crate::jobs::JobManager;
@@ -18,4 +19,7 @@ pub struct AppState {
     /// `state::log_events::spawn_poller` is the sole producer; SSE
     /// handlers subscribe per-request.
     pub events: broadcast::Sender<LogEvent>,
+    /// SQLite pool for `job_runs` / `log_events`. Handlers that read
+    /// historical state (e.g. /api/v1/jobs/{name}/runs) query through this.
+    pub state: Arc<SqlitePool>,
 }

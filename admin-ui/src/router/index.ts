@@ -9,11 +9,11 @@ const router = createRouter({
     { path: '/', name: 'dashboard', component: DashboardView },
     { path: '/jobs', name: 'jobs', component: JobsView },
     { path: '/jobs/:name', name: 'job-detail', component: JobDetailView },
+    { path: '/peers', name: 'peers', component: () => import('../views/PeersView.vue') },
     {
-      path: '/peers',
-      name: 'peers',
-      component: () => import('../views/PlaceholderView.vue'),
-      meta: { title: 'Peers' },
+      path: '/peers/:peer/:tab(jobs|snapshots)',
+      name: 'peer-detail',
+      component: () => import('../views/PeerDetailView.vue'),
     },
     {
       path: '/events',

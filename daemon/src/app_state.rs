@@ -2,6 +2,7 @@
 //! endpoints), the peers map (for proxied / peers-list endpoints) and
 //! the broadcast channel of locally-generated log events (for SSE).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use arctern_api::LogEvent;
@@ -27,4 +28,8 @@ pub struct AppState {
     /// SshCommandRunner when PALIMPSEST_SSH_TARGET is set. Local ZFS
     /// handlers borrow this rather than spawning a per-request runner.
     pub runner: Arc<dyn CommandRunner>,
+    /// Absolute path the daemon was started with (`--config <path>`),
+    /// surfaced by `GET /api/v1/config` so the UI can show "you're
+    /// editing the file at …".
+    pub config_path: PathBuf,
 }

@@ -2,7 +2,7 @@
 
 import type { Client, Options as Options2, TDataShape } from './client';
 import { client } from './client.gen';
-import type { CreateSnapshotData, CreateSnapshotErrors, CreateSnapshotResponses, DestroyPeerSnapshotData, DestroyPeerSnapshotErrors, DestroyPeerSnapshotResponses, DestroySnapshotData, DestroySnapshotErrors, DestroySnapshotResponses, GetPeerJobData, GetPeerJobErrors, GetPeerJobResponses, ListDatasetsData, ListDatasetsErrors, ListDatasetsResponses, ListJobsData, ListJobsResponses, ListPeerJobsData, ListPeerJobsErrors, ListPeerJobsResponses, ListPeersData, ListPeerSnapshotsData, ListPeerSnapshotsErrors, ListPeerSnapshotsResponses, ListPeersResponses, ListRunsData, ListRunsResponses, ListSnapshotsData, ListSnapshotsErrors, ListSnapshotsResponses, StreamEventsData, StreamEventsResponses, StreamPeerEventsData, StreamPeerEventsErrors, StreamPeerEventsResponses, WakeupData, WakeupErrors, WakeupPeerJobData, WakeupPeerJobErrors, WakeupPeerJobResponses, WakeupResponses } from './types.gen';
+import type { CreateSnapshotData, CreateSnapshotErrors, CreateSnapshotResponses, DestroyPeerSnapshotData, DestroyPeerSnapshotErrors, DestroyPeerSnapshotResponses, DestroySnapshotData, DestroySnapshotErrors, DestroySnapshotResponses, GetConfigData, GetConfigErrors, GetConfigResponses, GetPeerJobData, GetPeerJobErrors, GetPeerJobResponses, ListDatasetsData, ListDatasetsErrors, ListDatasetsResponses, ListJobsData, ListJobsResponses, ListPeerJobsData, ListPeerJobsErrors, ListPeerJobsResponses, ListPeersData, ListPeerSnapshotsData, ListPeerSnapshotsErrors, ListPeerSnapshotsResponses, ListPeersResponses, ListRunsData, ListRunsResponses, ListSnapshotsData, ListSnapshotsErrors, ListSnapshotsResponses, StreamEventsData, StreamEventsResponses, StreamPeerEventsData, StreamPeerEventsErrors, StreamPeerEventsResponses, WakeupData, WakeupErrors, WakeupPeerJobData, WakeupPeerJobErrors, WakeupPeerJobResponses, WakeupResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean> = Options2<TData, ThrowOnError> & {
     /**
@@ -17,6 +17,8 @@ export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends 
      */
     meta?: Record<string, unknown>;
 };
+
+export const getConfig = <ThrowOnError extends boolean = false>(options?: Options<GetConfigData, ThrowOnError>) => (options?.client ?? client).get<GetConfigResponses, GetConfigErrors, ThrowOnError>({ url: '/api/v1/config', ...options });
 
 /**
  * List datasets reachable through the daemon's shared `CommandRunner`

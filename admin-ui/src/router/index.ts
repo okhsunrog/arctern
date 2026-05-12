@@ -14,6 +14,11 @@ const router = createRouter({
       name: 'snapshots',
       component: () => import('../views/SnapshotsView.vue'),
     },
+    {
+      path: '/config',
+      name: 'config',
+      component: () => import('../views/ConfigView.vue'),
+    },
     { path: '/peers', name: 'peers', component: () => import('../views/PeersView.vue') },
     {
       path: '/peers/:peer/:tab(jobs|snapshots)',

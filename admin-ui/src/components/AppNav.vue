@@ -5,6 +5,7 @@ const links = [
   { label: 'Snapshots', to: '/snapshots', icon: 'i-lucide-camera' },
   { label: 'Peers', to: '/peers', icon: 'i-lucide-server' },
   { label: 'Events', to: '/events', icon: 'i-lucide-activity' },
+  { label: 'Config', to: '/config', icon: 'i-lucide-file-text' },
 ]
 </script>
 

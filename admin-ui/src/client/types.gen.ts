@@ -15,6 +15,18 @@ export type ApiErrorBody = {
 };
 
 /**
+ * Body of `GET /api/v1/config` — the on-disk TOML the daemon was
+ * started with, plus its absolute path. Read-only: there is no
+ * write-back endpoint, so this is a faithful echo of what's loaded,
+ * not what the daemon may have parsed (you can spot drift by
+ * comparing to the other endpoints).
+ */
+export type ConfigView = {
+    path: string;
+    content_toml: string;
+};
+
+/**
  * Request body for `POST /api/v1/datasets/{name}/snapshots`. The path
  * segment carries the parent dataset; this struct carries everything
  * else. `recursive` and `properties` default so a minimal client can
@@ -134,6 +146,31 @@ export type PeerSummary = {
     ssh_target: string;
     reachability: PeerReachability;
 };
+
+export type GetConfigData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/config';
+};
+
+export type GetConfigErrors = {
+    /**
+     * Config file unreadable
+     */
+    500: ApiErrorBody;
+};
+
+export type GetConfigError = GetConfigErrors[keyof GetConfigErrors];
+
+export type GetConfigResponses = {
+    /**
+     * The TOML file currently loaded
+     */
+    200: ConfigView;
+};
+
+export type GetConfigResponse = GetConfigResponses[keyof GetConfigResponses];
 
 export type ListDatasetsData = {
     body?: never;

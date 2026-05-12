@@ -9,6 +9,36 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/v1/config": {
+      "get": {
+        "tags": [
+          "config"
+        ],
+        "operationId": "get_config",
+        "responses": {
+          "200": {
+            "description": "The TOML file currently loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigView"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Config file unreadable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/datasets": {
       "get": {
         "tags": [
@@ -753,6 +783,22 @@
             "type": "string"
           },
           "message": {
+            "type": "string"
+          }
+        }
+      },
+      "ConfigView": {
+        "type": "object",
+        "description": "Body of `GET /api/v1/config` — the on-disk TOML the daemon was\nstarted with, plus its absolute path. Read-only: there is no\nwrite-back endpoint, so this is a faithful echo of what's loaded,\nnot what the daemon may have parsed (you can spot drift by\ncomparing to the other endpoints).",
+        "required": [
+          "path",
+          "content_toml"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "content_toml": {
             "type": "string"
           }
         }

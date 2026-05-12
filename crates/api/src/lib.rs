@@ -67,6 +67,17 @@ pub struct JobStatus {
     pub last_error: Option<String>,
 }
 
+/// Body of `GET /api/v1/config` — the on-disk TOML the daemon was
+/// started with, plus its absolute path. Read-only: there is no
+/// write-back endpoint, so this is a faithful echo of what's loaded,
+/// not what the daemon may have parsed (you can spot drift by
+/// comparing to the other endpoints).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ConfigView {
+    pub path: String,
+    pub content_toml: String,
+}
+
 /// One row of `job_runs` returned by `GET /api/v1/jobs/{name}/runs`.
 /// `started_at` / `finished_at` are unix seconds; `bytes_sent` is set
 /// only by push jobs that finished cleanly.

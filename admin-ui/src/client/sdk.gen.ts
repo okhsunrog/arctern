@@ -2,7 +2,7 @@
 
 import type { Client, Options as Options2, TDataShape } from './client';
 import { client } from './client.gen';
-import type { CreateSnapshotData, CreateSnapshotErrors, CreateSnapshotResponses, DestroyPeerSnapshotData, DestroyPeerSnapshotErrors, DestroyPeerSnapshotResponses, GetPeerJobData, GetPeerJobErrors, GetPeerJobResponses, ListDatasetsData, ListDatasetsErrors, ListDatasetsResponses, ListJobsData, ListJobsResponses, ListPeerJobsData, ListPeerJobsErrors, ListPeerJobsResponses, ListPeersData, ListPeerSnapshotsData, ListPeerSnapshotsErrors, ListPeerSnapshotsResponses, ListPeersResponses, ListRunsData, ListRunsResponses, StreamEventsData, StreamEventsResponses, StreamPeerEventsData, StreamPeerEventsErrors, StreamPeerEventsResponses, WakeupData, WakeupErrors, WakeupPeerJobData, WakeupPeerJobErrors, WakeupPeerJobResponses, WakeupResponses } from './types.gen';
+import type { CreateSnapshotData, CreateSnapshotErrors, CreateSnapshotResponses, DestroyPeerSnapshotData, DestroyPeerSnapshotErrors, DestroyPeerSnapshotResponses, DestroySnapshotData, DestroySnapshotErrors, DestroySnapshotResponses, GetPeerJobData, GetPeerJobErrors, GetPeerJobResponses, ListDatasetsData, ListDatasetsErrors, ListDatasetsResponses, ListJobsData, ListJobsResponses, ListPeerJobsData, ListPeerJobsErrors, ListPeerJobsResponses, ListPeersData, ListPeerSnapshotsData, ListPeerSnapshotsErrors, ListPeerSnapshotsResponses, ListPeersResponses, ListRunsData, ListRunsResponses, ListSnapshotsData, ListSnapshotsErrors, ListSnapshotsResponses, StreamEventsData, StreamEventsResponses, StreamPeerEventsData, StreamPeerEventsErrors, StreamPeerEventsResponses, WakeupData, WakeupErrors, WakeupPeerJobData, WakeupPeerJobErrors, WakeupPeerJobResponses, WakeupResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean> = Options2<TData, ThrowOnError> & {
     /**
@@ -19,20 +19,22 @@ export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends 
 };
 
 /**
- * List datasets reachable through `palimpsest`'s SSH runner. The runner
- * is constructed per-request from `PALIMPSEST_SSH_TARGET` /
- * `PALIMPSEST_SSH_PASSWORD` — cheap, and avoids shared mutable state in
- * the daemon for this slice. A future slice may pool / reuse runners.
+ * List datasets reachable through the daemon's shared `CommandRunner`
+ * (`AppState::runner`). RealRunner in production; SshCommandRunner
+ * only when `PALIMPSEST_SSH_TARGET` is set for dev/test.
  */
 export const listDatasets = <ThrowOnError extends boolean = false>(options?: Options<ListDatasetsData, ThrowOnError>) => (options?.client ?? client).get<ListDatasetsResponses, ListDatasetsErrors, ThrowOnError>({ url: '/api/v1/datasets', ...options });
 
 /**
- * Create a snapshot of `{name}` named `req.snapshot_name`. After ZFS
- * confirms creation, a follow-up `zfs list -j` materializes the
- * `DatasetSummary` so callers do not need a second round-trip.
- *
- * `palimpsest::ZfsError::SnapshotExists` maps to 409 (not 200/201) — the
- * caller decides whether already-exists is fatal.
+ * List snapshots of `{name}` (one dataset, non-recursive). Properties
+ * `creation` and `used` come along so the UI can render age + size.
+ */
+export const listSnapshots = <ThrowOnError extends boolean = false>(options: Options<ListSnapshotsData, ThrowOnError>) => (options.client ?? client).get<ListSnapshotsResponses, ListSnapshotsErrors, ThrowOnError>({ url: '/api/v1/datasets/{name}/snapshots', ...options });
+
+/**
+ * Create a snapshot of `{name}` named `req.snapshot_name`.
+ * `palimpsest::ZfsError::SnapshotExists` maps to 409 — the caller
+ * decides whether already-exists is fatal.
  */
 export const createSnapshot = <ThrowOnError extends boolean = false>(options: Options<CreateSnapshotData, ThrowOnError>) => (options.client ?? client).post<CreateSnapshotResponses, CreateSnapshotErrors, ThrowOnError>({
     url: '/api/v1/datasets/{name}/snapshots',
@@ -42,6 +44,13 @@ export const createSnapshot = <ThrowOnError extends boolean = false>(options: Op
         ...options.headers
     }
 });
+
+/**
+ * Destroy snapshot `{name}@{snapshot}`. Path-segment escaping: the
+ * dataset goes URL-encoded (`%2F` for `/`); the snapshot tag is the
+ * part after the `@`.
+ */
+export const destroySnapshot = <ThrowOnError extends boolean = false>(options: Options<DestroySnapshotData, ThrowOnError>) => (options.client ?? client).post<DestroySnapshotResponses, DestroySnapshotErrors, ThrowOnError>({ url: '/api/v1/datasets/{name}/snapshots/{snapshot}/destroy', ...options });
 
 /**
  * Subscribe to the daemon's log-event broadcast and yield each as an

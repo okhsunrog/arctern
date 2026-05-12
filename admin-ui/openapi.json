@@ -14,7 +14,7 @@
         "tags": [
           "datasets"
         ],
-        "summary": "List datasets reachable through `palimpsest`'s SSH runner. The runner\nis constructed per-request from `PALIMPSEST_SSH_TARGET` /\n`PALIMPSEST_SSH_PASSWORD` — cheap, and avoids shared mutable state in\nthe daemon for this slice. A future slice may pool / reuse runners.",
+        "summary": "List datasets reachable through the daemon's shared `CommandRunner`\n(`AppState::runner`). RealRunner in production; SshCommandRunner\nonly when `PALIMPSEST_SSH_TARGET` is set for dev/test.",
         "operationId": "list_datasets",
         "responses": {
           "200": {
@@ -39,9 +39,66 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/v1/datasets/{name}/snapshots": {
+      "get": {
+        "tags": [
+          "snapshots"
+        ],
+        "summary": "List snapshots of `{name}` (one dataset, non-recursive). Properties\n`creation` and `used` come along so the UI can render age + size.",
+        "operationId": "list_snapshots",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Parent dataset (URL-encode `/` as %2F)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
           },
-          "503": {
-            "description": "Could not spawn the underlying zfs subprocess",
+          {
+            "name": "prefix",
+            "in": "query",
+            "description": "Filter to snapshots whose tag (after the `@`) starts with this\nprefix. Useful to keep zrepl_-style snapshots out of the noise\nwhen manual snapshots also exist on the dataset.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Snapshots of the dataset, oldest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DatasetSummary"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Dataset not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "ZFS returned an error",
             "content": {
               "application/json": {
                 "schema": {
@@ -51,15 +108,12 @@
             }
           }
         }
-      }
-    },
-    "/api/v1/datasets/{name}/snapshots": {
+      },
       "post": {
         "tags": [
           "snapshots"
         ],
-        "summary": "Create a snapshot of `{name}` named `req.snapshot_name`. After ZFS\nconfirms creation, a follow-up `zfs list -j` materializes the\n`DatasetSummary` so callers do not need a second round-trip.",
-        "description": "`palimpsest::ZfsError::SnapshotExists` maps to 409 (not 200/201) — the\ncaller decides whether already-exists is fatal.",
+        "summary": "Create a snapshot of `{name}` named `req.snapshot_name`.\n`palimpsest::ZfsError::SnapshotExists` maps to 409 — the caller\ndecides whether already-exists is fatal.",
         "operationId": "create_snapshot",
         "parameters": [
           {
@@ -122,9 +176,63 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/v1/datasets/{name}/snapshots/{snapshot}/destroy": {
+      "post": {
+        "tags": [
+          "snapshots"
+        ],
+        "summary": "Destroy snapshot `{name}@{snapshot}`. Path-segment escaping: the\ndataset goes URL-encoded (`%2F` for `/`); the snapshot tag is the\npart after the `@`.",
+        "operationId": "destroy_snapshot",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Parent dataset (URL-encode `/` as %2F)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
           },
-          "503": {
-            "description": "Could not spawn the underlying zfs subprocess",
+          {
+            "name": "snapshot",
+            "in": "path",
+            "description": "Snapshot tag (the part after `@`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Snapshot destroyed"
+          },
+          "404": {
+            "description": "Snapshot not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Snapshot has a hold",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "ZFS returned an error",
             "content": {
               "application/json": {
                 "schema": {

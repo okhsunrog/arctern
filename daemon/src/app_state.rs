@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use arctern_api::LogEvent;
+use palimpsest::runner::CommandRunner;
 use sqlx::SqlitePool;
 use tokio::sync::broadcast;
 
@@ -22,4 +23,8 @@ pub struct AppState {
     /// SQLite pool for `job_runs` / `log_events`. Handlers that read
     /// historical state (e.g. /api/v1/jobs/{name}/runs) query through this.
     pub state: Arc<SqlitePool>,
+    /// The shared local CommandRunner — RealRunner in production, or
+    /// SshCommandRunner when PALIMPSEST_SSH_TARGET is set. Local ZFS
+    /// handlers borrow this rather than spawning a per-request runner.
+    pub runner: Arc<dyn CommandRunner>,
 }

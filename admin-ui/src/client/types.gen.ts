@@ -147,10 +147,6 @@ export type ListDatasetsErrors = {
      * ZFS returned an error
      */
     500: ApiErrorBody;
-    /**
-     * Could not spawn the underlying zfs subprocess
-     */
-    503: ApiErrorBody;
 };
 
 export type ListDatasetsError = ListDatasetsErrors[keyof ListDatasetsErrors];
@@ -163,6 +159,47 @@ export type ListDatasetsResponses = {
 };
 
 export type ListDatasetsResponse = ListDatasetsResponses[keyof ListDatasetsResponses];
+
+export type ListSnapshotsData = {
+    body?: never;
+    path: {
+        /**
+         * Parent dataset (URL-encode `/` as %2F)
+         */
+        name: string;
+    };
+    query?: {
+        /**
+         * Filter to snapshots whose tag (after the `@`) starts with this
+         * prefix. Useful to keep zrepl_-style snapshots out of the noise
+         * when manual snapshots also exist on the dataset.
+         */
+        prefix?: string | null;
+    };
+    url: '/api/v1/datasets/{name}/snapshots';
+};
+
+export type ListSnapshotsErrors = {
+    /**
+     * Dataset not found
+     */
+    404: ApiErrorBody;
+    /**
+     * ZFS returned an error
+     */
+    500: ApiErrorBody;
+};
+
+export type ListSnapshotsError = ListSnapshotsErrors[keyof ListSnapshotsErrors];
+
+export type ListSnapshotsResponses = {
+    /**
+     * Snapshots of the dataset, oldest first
+     */
+    200: Array<DatasetSummary>;
+};
+
+export type ListSnapshotsResponse = ListSnapshotsResponses[keyof ListSnapshotsResponses];
 
 export type CreateSnapshotData = {
     body: CreateSnapshotRequest;
@@ -189,10 +226,6 @@ export type CreateSnapshotErrors = {
      * ZFS returned an error
      */
     500: ApiErrorBody;
-    /**
-     * Could not spawn the underlying zfs subprocess
-     */
-    503: ApiErrorBody;
 };
 
 export type CreateSnapshotError = CreateSnapshotErrors[keyof CreateSnapshotErrors];
@@ -205,6 +238,48 @@ export type CreateSnapshotResponses = {
 };
 
 export type CreateSnapshotResponse = CreateSnapshotResponses[keyof CreateSnapshotResponses];
+
+export type DestroySnapshotData = {
+    body?: never;
+    path: {
+        /**
+         * Parent dataset (URL-encode `/` as %2F)
+         */
+        name: string;
+        /**
+         * Snapshot tag (the part after `@`)
+         */
+        snapshot: string;
+    };
+    query?: never;
+    url: '/api/v1/datasets/{name}/snapshots/{snapshot}/destroy';
+};
+
+export type DestroySnapshotErrors = {
+    /**
+     * Snapshot not found
+     */
+    404: ApiErrorBody;
+    /**
+     * Snapshot has a hold
+     */
+    409: ApiErrorBody;
+    /**
+     * ZFS returned an error
+     */
+    500: ApiErrorBody;
+};
+
+export type DestroySnapshotError = DestroySnapshotErrors[keyof DestroySnapshotErrors];
+
+export type DestroySnapshotResponses = {
+    /**
+     * Snapshot destroyed
+     */
+    204: void;
+};
+
+export type DestroySnapshotResponse = DestroySnapshotResponses[keyof DestroySnapshotResponses];
 
 export type StreamEventsData = {
     body?: never;

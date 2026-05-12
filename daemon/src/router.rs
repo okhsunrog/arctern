@@ -36,7 +36,9 @@ struct ApiDoc;
 fn openapi_router() -> OpenApiRouter<AppState> {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
         .routes(routes!(handlers::datasets::list_datasets))
+        .routes(routes!(handlers::snapshots::list_snapshots))
         .routes(routes!(handlers::snapshots::create_snapshot))
+        .routes(routes!(handlers::snapshots::destroy_snapshot))
         .routes(routes!(handlers::jobs::list_jobs))
         .routes(routes!(handlers::jobs::wakeup))
         .routes(routes!(handlers::jobs::list_runs))

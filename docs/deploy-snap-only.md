@@ -15,6 +15,10 @@ for the full schema.
 
 - ZFS pool exists, datasets to back up are imported.
 - Server has a Rust toolchain or you have a way to cross-build for it.
+- Build host has [`bun`](https://bun.com) and [Vite+ (`vp`)](https://vite.plus)
+  on `$PATH` — the admin UI is bundled into the daemon binary at compile
+  time, so the build host must produce `admin-ui/dist/` before
+  `cargo build`. (Just-the-server hosts do not need bun/`vp`.)
 - You have root on the server.
 - Decide: which datasets does arctern manage during the trial, and which
   stay with zrepl? They MUST NOT overlap. Suggested split: pick one
@@ -28,12 +32,22 @@ On a build host with the same libc as the server:
 
 ```bash
 cd /path/to/arctern
-cargo build --release -p arctern-daemon
-# Binary is target/release/arctern.
+just build
+# Binary is target/release/arctern with admin-ui/dist embedded.
 ```
 
+`just build` runs `vp install` + `vp build` for the admin UI first, then
+`cargo build --release -p arctern-daemon`. The cargo build's `build.rs`
+calls `memory_serve::load_directory("admin-ui/dist")` — so the UI
+bundle is part of the daemon binary; no separate static-file deploy.
+
 If the server runs musl or a different libc, build with the matching
-target (`cargo build --release --target x86_64-unknown-linux-musl -p arctern-daemon`).
+target after running `just build-ui`:
+
+```bash
+just build-ui
+cargo build --release --target x86_64-unknown-linux-musl -p arctern-daemon
+```
 
 ## 2. Install
 
@@ -109,7 +123,23 @@ systemctl status arctern
 
 Expected `status` output:
 - Active: active (running)
-- Recent journal lines: `arctern daemon listening`, `LISTEN unix:/run/arctern/arctern.sock`, `creating snapshot dataset=okdata/data/nas snapshot=arctern_<RFC3339>`
+- Recent journal lines: `arctern daemon listening`, `LISTEN unix:/run/arctern/arctern.sock`, `LISTEN http://127.0.0.1:7878`, `creating snapshot dataset=okdata/data/nas snapshot=arctern_<RFC3339>`
+
+## 4b. Reach the admin UI
+
+The daemon binds a loopback HTTP listener on `127.0.0.1:7878` for the
+embedded Vue admin UI. It is not reachable off-host; SSH-forward the
+port from your workstation:
+
+```bash
+ssh -L 7878:127.0.0.1:7878 root@server
+# then open http://127.0.0.1:7878/ in a local browser
+```
+
+The UI exposes Dashboard / Jobs / Snapshots / Peers / Events views
+backed by the same `/api/v1/*` routes you can `curl --unix-socket`
+below. No auth — the perimeter is the loopback bind plus your SSH
+tunnel.
 
 ## 5. Verify it's actually doing the right thing
 

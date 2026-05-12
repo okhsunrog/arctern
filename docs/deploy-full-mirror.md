@@ -23,6 +23,9 @@ will), you know which change caused it.
 ## Phase 0 — Prerequisites
 
 - Snap-only trial passed on server, ≥1 week, zero `last_error`.
+- The `arctern` binary on both hosts was produced by `just build` (so
+  the embedded admin UI is up to date with the daemon's API surface).
+  Build host needs `bun` + `vp` on `$PATH`; runtime hosts do not.
 - Laptop has ZFS pool `novafs/arch0` with the dataset list matching
   your zrepl `push_to_local` job.
 - A working SSH path from laptop to server (WireGuard underneath is
@@ -259,6 +262,23 @@ curl -s --unix-socket /run/arctern/arctern.sock \
   http://localhost/api/v1/peers | jq .
 # Expect: [{name:"home", reachability:{kind:"connected"}, ...}]
 ```
+
+Or open the admin UI in a browser (recommended for ongoing monitoring):
+
+```
+# Laptop: arctern listens on 127.0.0.1:7878 by default — open it locally.
+xdg-open http://127.0.0.1:7878/
+
+# Server: SSH-forward the loopback bind to your workstation.
+ssh -L 7879:127.0.0.1:7878 root@server  # 7879 to avoid clashing with the laptop's
+# then open http://127.0.0.1:7879/
+```
+
+Peers tab on the laptop should show `home: connected`; Events tab
+streams `arctern stdinserver-dispatch` events proxied from the server.
+JobDetail charts show cycle duration; bytes-sent appears in the bar
+chart once a push cycle completes (snap cycles record `bytes_sent =
+null`).
 
 On the server:
 ```bash

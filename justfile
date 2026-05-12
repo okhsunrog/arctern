@@ -28,6 +28,33 @@ fmt:
 fmt-check:
     cargo fmt --all -- --check
 
+# Full pre-push gate: rust fmt + clippy + tests + UI typecheck/lint.
+ci: fmt-check lint test
+    cd admin-ui && vp check
+
+# ─── Admin UI ──────────────────────────────────────────
+
+# Install JS deps + typecheck + build the Vue SPA into admin-ui/dist.
+# The daemon's build.rs embeds that directory via memory-serve.
+build-ui:
+    cd admin-ui && vp install && vp exec vue-tsc --build && vp build
+
+# Release artifact: UI bundle first, then cargo release build.
+build: build-ui
+    cargo build --release -p arctern-daemon
+
+# Regenerate admin-ui/openapi.json + TypeScript client from the live
+# router. Re-run whenever crates/api types or handler signatures change.
+openapi:
+    cargo run -q -p arctern-daemon -- openapi > admin-ui/openapi.json
+    cd admin-ui && vp exec openapi-ts
+
+# Vite dev server with hot reload. Proxies /api/v1 and /api-docs to
+# the daemon's loopback bind on 127.0.0.1:7878 (start the daemon
+# separately in another shell).
+ui-dev:
+    cd admin-ui && vp dev
+
 # ─── VM lifecycle (delegates to palimpsest) ────────────
 
 vm-up:

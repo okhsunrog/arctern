@@ -905,6 +905,87 @@
           }
         }
       }
+    },
+    "/api/v1/system/arc": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "operationId": "get_arc",
+        "responses": {
+          "200": {
+            "description": "Current ARC stats snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArcStats"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Could not read /proc/spl/kstat/zfs/arcstats",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/system/arc/history": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "operationId": "get_arc_history",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Unix-second cutoff; rows with `timestamp >= since` are returned.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum rows to return. Default 1440 (24h at 1m resolution).",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recent ARC samples, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ArcHistoryPoint"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -922,6 +1003,198 @@
           },
           "message": {
             "type": "string"
+          }
+        }
+      },
+      "ArcHistoryPoint": {
+        "type": "object",
+        "description": "One row of `GET /api/v1/system/arc/history`. Slim by design —\nonly the fields the dashboard chart consumes. Add more columns\n(and migrate `arcstats_history`) when a future view needs them.",
+        "required": [
+          "timestamp",
+          "size",
+          "c",
+          "hits",
+          "misses"
+        ],
+        "properties": {
+          "timestamp": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix seconds."
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "c": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "hits": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "misses": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "ArcStats": {
+        "type": "object",
+        "description": "`GET /api/v1/system/arc` — a typed echo of the kernel's\n`/proc/spl/kstat/zfs/arcstats`, plus a precomputed hit_ratio\n(NaN encoded as `null` for empty caches). Fields mirror the\npalimpsest `ArcStats` struct; raw map omitted from the wire to\nkeep responses small.",
+        "required": [
+          "size",
+          "c",
+          "c_min",
+          "c_max",
+          "hits",
+          "misses",
+          "demand_data_hits",
+          "demand_data_misses",
+          "demand_metadata_hits",
+          "demand_metadata_misses",
+          "prefetch_data_hits",
+          "prefetch_data_misses",
+          "prefetch_metadata_hits",
+          "prefetch_metadata_misses",
+          "mru_hits",
+          "mfu_hits",
+          "mru_ghost_hits",
+          "mfu_ghost_hits",
+          "l2_size",
+          "l2_hits",
+          "l2_misses",
+          "compressed_size",
+          "uncompressed_size"
+        ],
+        "properties": {
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "c": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "c_min": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "c_max": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "hits": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "misses": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "demand_data_hits": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "demand_data_misses": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "demand_metadata_hits": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "demand_metadata_misses": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "prefetch_data_hits": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "prefetch_data_misses": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "prefetch_metadata_hits": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "prefetch_metadata_misses": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "mru_hits": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "mfu_hits": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "mru_ghost_hits": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "mfu_ghost_hits": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "l2_size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "l2_hits": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "l2_misses": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "compressed_size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "uncompressed_size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "hit_ratio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "`hits / (hits + misses)`, `None` when the cache has had no\ntraffic yet (avoids leaking JSON `NaN`)."
           }
         }
       },

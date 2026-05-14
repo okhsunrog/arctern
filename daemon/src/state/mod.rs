@@ -14,6 +14,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, S
 use sqlx::SqlitePool;
 use thiserror::Error;
 
+pub mod arcstats;
 pub mod job_runs;
 pub mod log_events;
 
@@ -88,6 +89,18 @@ async fn migrate(pool: &SqlitePool) -> Result<(), StateError> {
         .execute(pool)
         .await
         .map_err(StateError::Migrate)?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS arcstats_history (
+            timestamp INTEGER PRIMARY KEY,
+            size      INTEGER NOT NULL,
+            c         INTEGER NOT NULL,
+            hits      INTEGER NOT NULL,
+            misses    INTEGER NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(StateError::Migrate)?;
     Ok(())
 }
 

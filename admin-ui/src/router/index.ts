@@ -20,6 +20,11 @@ const router = createRouter({
       component: () => import('../views/PoolsView.vue'),
     },
     {
+      path: '/arc',
+      name: 'arc',
+      component: () => import('../views/ArcView.vue'),
+    },
+    {
       path: '/pools/:name',
       name: 'pool-detail',
       component: () => import('../views/PoolDetailView.vue'),

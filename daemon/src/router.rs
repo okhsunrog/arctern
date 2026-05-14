@@ -35,6 +35,8 @@ use crate::{auth, handlers};
         arctern_api::ScanSummary,
         arctern_api::VdevNode,
         arctern_api::ScrubRequest,
+        arctern_api::ArcStats,
+        arctern_api::ArcHistoryPoint,
     )),
 )]
 struct ApiDoc;
@@ -60,6 +62,8 @@ fn openapi_router() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::pools::list_pools))
         .routes(routes!(handlers::pools::get_pool))
         .routes(routes!(handlers::pools::pool_scrub))
+        .routes(routes!(handlers::system::get_arc))
+        .routes(routes!(handlers::system::get_arc_history))
 }
 
 pub fn openapi_spec() -> utoipa::openapi::OpenApi {

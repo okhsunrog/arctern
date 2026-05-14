@@ -15,6 +15,60 @@ export type ApiErrorBody = {
 };
 
 /**
+ * One row of `GET /api/v1/system/arc/history`. Slim by design —
+ * only the fields the dashboard chart consumes. Add more columns
+ * (and migrate `arcstats_history`) when a future view needs them.
+ */
+export type ArcHistoryPoint = {
+    /**
+     * Unix seconds.
+     */
+    timestamp: number;
+    size: number;
+    c: number;
+    hits: number;
+    misses: number;
+};
+
+/**
+ * `GET /api/v1/system/arc` — a typed echo of the kernel's
+ * `/proc/spl/kstat/zfs/arcstats`, plus a precomputed hit_ratio
+ * (NaN encoded as `null` for empty caches). Fields mirror the
+ * palimpsest `ArcStats` struct; raw map omitted from the wire to
+ * keep responses small.
+ */
+export type ArcStats = {
+    size: number;
+    c: number;
+    c_min: number;
+    c_max: number;
+    hits: number;
+    misses: number;
+    demand_data_hits: number;
+    demand_data_misses: number;
+    demand_metadata_hits: number;
+    demand_metadata_misses: number;
+    prefetch_data_hits: number;
+    prefetch_data_misses: number;
+    prefetch_metadata_hits: number;
+    prefetch_metadata_misses: number;
+    mru_hits: number;
+    mfu_hits: number;
+    mru_ghost_hits: number;
+    mfu_ghost_hits: number;
+    l2_size: number;
+    l2_hits: number;
+    l2_misses: number;
+    compressed_size: number;
+    uncompressed_size: number;
+    /**
+     * `hits / (hits + misses)`, `None` when the cache has had no
+     * traffic yet (avoids leaking JSON `NaN`).
+     */
+    hit_ratio?: number | null;
+};
+
+/**
  * Body of `GET /api/v1/config` — the on-disk TOML the daemon was
  * started with, plus its absolute path. Read-only: there is no
  * write-back endpoint, so this is a faithful echo of what's loaded,
@@ -828,3 +882,53 @@ export type PoolScrubResponses = {
 };
 
 export type PoolScrubResponse = PoolScrubResponses[keyof PoolScrubResponses];
+
+export type GetArcData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/system/arc';
+};
+
+export type GetArcErrors = {
+    /**
+     * Could not read /proc/spl/kstat/zfs/arcstats
+     */
+    500: ApiErrorBody;
+};
+
+export type GetArcError = GetArcErrors[keyof GetArcErrors];
+
+export type GetArcResponses = {
+    /**
+     * Current ARC stats snapshot
+     */
+    200: ArcStats;
+};
+
+export type GetArcResponse = GetArcResponses[keyof GetArcResponses];
+
+export type GetArcHistoryData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Unix-second cutoff; rows with `timestamp >= since` are returned.
+         */
+        since?: number | null;
+        /**
+         * Maximum rows to return. Default 1440 (24h at 1m resolution).
+         */
+        limit?: number | null;
+    };
+    url: '/api/v1/system/arc/history';
+};
+
+export type GetArcHistoryResponses = {
+    /**
+     * Recent ARC samples, newest first
+     */
+    200: Array<ArcHistoryPoint>;
+};
+
+export type GetArcHistoryResponse = GetArcHistoryResponses[keyof GetArcHistoryResponses];

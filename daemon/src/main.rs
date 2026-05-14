@@ -251,6 +251,12 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
         }
     }
 
+    // ARC stats sweeper: writes /proc/spl/kstat/zfs/arcstats into
+    // arcstats_history every minute, prunes rows older than 24h. The
+    // dashboard chart reads from there.
+    let arc_cancel = tokio_util::sync::CancellationToken::new();
+    let arc_sweeper = state::arcstats::spawn_sweeper(pool.clone(), arc_cancel.clone());
+
     // Local SSE broadcast: a poller drains new log_events rows every
     // 500ms and fans them out to subscribed handlers.
     let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<arctern_api::LogEvent>(256);
@@ -317,6 +323,8 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
     }
     events_cancel.cancel();
     let _ = events_poller.await;
+    arc_cancel.cancel();
+    let _ = arc_sweeper.await;
     let _ = std::fs::remove_file(&cleanup_path);
     result?;
     Ok(())

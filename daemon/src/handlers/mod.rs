@@ -5,3 +5,4 @@ pub mod jobs;
 pub mod peers;
 pub mod pools;
 pub mod snapshots;
+pub mod system;

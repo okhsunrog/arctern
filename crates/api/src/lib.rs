@@ -143,6 +143,86 @@ pub struct ScrubRequest {
     pub action: String,
 }
 
+/// `GET /api/v1/system/arc` — a typed echo of the kernel's
+/// `/proc/spl/kstat/zfs/arcstats`, plus a precomputed hit_ratio
+/// (NaN encoded as `null` for empty caches). Fields mirror the
+/// palimpsest `ArcStats` struct; raw map omitted from the wire to
+/// keep responses small.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ArcStats {
+    pub size: u64,
+    pub c: u64,
+    pub c_min: u64,
+    pub c_max: u64,
+    pub hits: u64,
+    pub misses: u64,
+    pub demand_data_hits: u64,
+    pub demand_data_misses: u64,
+    pub demand_metadata_hits: u64,
+    pub demand_metadata_misses: u64,
+    pub prefetch_data_hits: u64,
+    pub prefetch_data_misses: u64,
+    pub prefetch_metadata_hits: u64,
+    pub prefetch_metadata_misses: u64,
+    pub mru_hits: u64,
+    pub mfu_hits: u64,
+    pub mru_ghost_hits: u64,
+    pub mfu_ghost_hits: u64,
+    pub l2_size: u64,
+    pub l2_hits: u64,
+    pub l2_misses: u64,
+    pub compressed_size: u64,
+    pub uncompressed_size: u64,
+    /// `hits / (hits + misses)`, `None` when the cache has had no
+    /// traffic yet (avoids leaking JSON `NaN`).
+    pub hit_ratio: Option<f64>,
+}
+
+impl From<palimpsest::system::ArcStats> for ArcStats {
+    fn from(s: palimpsest::system::ArcStats) -> Self {
+        let ratio = s.hit_ratio();
+        Self {
+            hit_ratio: if ratio.is_finite() { Some(ratio) } else { None },
+            size: s.size,
+            c: s.c,
+            c_min: s.c_min,
+            c_max: s.c_max,
+            hits: s.hits,
+            misses: s.misses,
+            demand_data_hits: s.demand_data_hits,
+            demand_data_misses: s.demand_data_misses,
+            demand_metadata_hits: s.demand_metadata_hits,
+            demand_metadata_misses: s.demand_metadata_misses,
+            prefetch_data_hits: s.prefetch_data_hits,
+            prefetch_data_misses: s.prefetch_data_misses,
+            prefetch_metadata_hits: s.prefetch_metadata_hits,
+            prefetch_metadata_misses: s.prefetch_metadata_misses,
+            mru_hits: s.mru_hits,
+            mfu_hits: s.mfu_hits,
+            mru_ghost_hits: s.mru_ghost_hits,
+            mfu_ghost_hits: s.mfu_ghost_hits,
+            l2_size: s.l2_size,
+            l2_hits: s.l2_hits,
+            l2_misses: s.l2_misses,
+            compressed_size: s.compressed_size,
+            uncompressed_size: s.uncompressed_size,
+        }
+    }
+}
+
+/// One row of `GET /api/v1/system/arc/history`. Slim by design —
+/// only the fields the dashboard chart consumes. Add more columns
+/// (and migrate `arcstats_history`) when a future view needs them.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ArcHistoryPoint {
+    /// Unix seconds.
+    pub timestamp: i64,
+    pub size: u64,
+    pub c: u64,
+    pub hits: u64,
+    pub misses: u64,
+}
+
 /// Body of `GET /api/v1/config` — the on-disk TOML the daemon was
 /// started with, plus its absolute path. Read-only: there is no
 /// write-back endpoint, so this is a faithful echo of what's loaded,

@@ -2,6 +2,7 @@
 const links = [
   { label: 'Dashboard', to: '/', icon: 'i-lucide-layout-dashboard' },
   { label: 'Pools', to: '/pools', icon: 'i-lucide-hard-drive' },
+  { label: 'ARC', to: '/arc', icon: 'i-lucide-zap' },
   { label: 'Jobs', to: '/jobs', icon: 'i-lucide-list-checks' },
   { label: 'Snapshots', to: '/snapshots', icon: 'i-lucide-camera' },
   { label: 'Peers', to: '/peers', icon: 'i-lucide-server' },

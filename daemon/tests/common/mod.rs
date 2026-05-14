@@ -11,13 +11,13 @@
 #![allow(dead_code)]
 
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use palimpsest::pool::{DestroyOptions, ExportOptions, PoolCreateOptions, Vdev};
-use palimpsest::runner::{Cmd, CommandRunner};
+use palimpsest::runner::{Cmd, CommandRunner, SshTarget};
 use palimpsest::{SshCommandRunner, ZfsError};
 
 pub fn ssh_runner_from_env() -> SshCommandRunner {
@@ -37,6 +37,70 @@ pub fn unique_suffix() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("{nanos:x}_{n:x}")
+}
+
+pub fn openssh_integration_enabled() -> bool {
+    std::env::var("ARCTERN_OPENSSH_INTEGRATION")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
+pub fn ssh_target_from_env() -> SshTarget {
+    let raw = std::env::var("PALIMPSEST_SSH_TARGET")
+        .expect("PALIMPSEST_SSH_TARGET must be set for integration tests");
+    SshTarget::parse(&raw).expect("PALIMPSEST_SSH_TARGET parses")
+}
+
+pub fn run_local_command(mut cmd: Command) -> Output {
+    let display = format!("{cmd:?}");
+    let output = cmd
+        .output()
+        .unwrap_or_else(|e| panic!("spawn {display}: {e}"));
+    assert!(
+        output.status.success(),
+        "{display} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
+pub fn run_remote_shell(remote_cmd: &str) {
+    let target = std::env::var("PALIMPSEST_SSH_TARGET")
+        .expect("PALIMPSEST_SSH_TARGET must be set for integration tests");
+    let password = std::env::var("PALIMPSEST_SSH_PASSWORD").ok();
+    let status =
+        sync_ssh(&target, password.as_deref(), remote_cmd).expect("ssh remote shell command");
+    assert!(
+        status.success(),
+        "remote command failed with {status}: {remote_cmd}"
+    );
+}
+
+pub fn scp_to_remote(local: &Path, remote: &str) {
+    let target = ssh_target_from_env();
+    let password = std::env::var("PALIMPSEST_SSH_PASSWORD").ok();
+    let mut cmd = match password.as_deref() {
+        Some(pw) => {
+            let mut c = Command::new("sshpass");
+            c.args(["-p", pw, "scp"]);
+            c
+        }
+        None => Command::new("scp"),
+    };
+    cmd.args([
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "LogLevel=ERROR",
+        "-P",
+        &target.port.to_string(),
+    ]);
+    cmd.arg(local);
+    cmd.arg(format!("{}@{}:{remote}", target.user, target.host));
+    run_local_command(cmd);
 }
 
 pub struct LoopbackPool {
@@ -128,7 +192,11 @@ async fn run_check(runner: &SshCommandRunner, cmd: Cmd) -> Result<(), ZfsError> 
     })
 }
 
-fn sync_ssh(target: &str, password: Option<&str>, remote_cmd: &str) -> std::io::Result<()> {
+fn sync_ssh(
+    target: &str,
+    password: Option<&str>,
+    remote_cmd: &str,
+) -> std::io::Result<std::process::ExitStatus> {
     let (user, rest) = match target.split_once('@') {
         Some((u, r)) => (u.to_string(), r),
         None => ("root".to_string(), target),
@@ -170,8 +238,7 @@ fn sync_ssh(target: &str, password: Option<&str>, remote_cmd: &str) -> std::io::
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()?;
-    Ok(())
+        .status()
 }
 
 /// Spawn the arctern daemon as a subprocess pointing at the same VM the

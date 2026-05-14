@@ -123,13 +123,12 @@ pub async fn list_sender_snaps(
         properties: vec!["guid".into()],
         ..ListOptions::default()
     };
-    let entries =
-        palimpsest::dataset::list(runner, &opts)
-            .await
-            .map_err(|source| PlanError::SenderList {
-                dataset: sender_dataset.to_string(),
-                source,
-            })?;
+    let entries = palimpsest::dataset::list(runner, &opts)
+        .await
+        .map_err(|source| PlanError::SenderList {
+            dataset: sender_dataset.to_string(),
+            source,
+        })?;
     let mut snaps: Vec<LocalSnap> = entries
         .into_iter()
         .filter_map(|e| {
@@ -137,7 +136,10 @@ pub async fn list_sender_snaps(
             if !filter.matches(&snap_name) {
                 return None;
             }
-            let guid = e.properties.get("guid").and_then(|p| p.value.parse::<u64>().ok())?;
+            let guid = e
+                .properties
+                .get("guid")
+                .and_then(|p| p.value.parse::<u64>().ok())?;
             let createtxg = e.createtxg.parse::<u64>().ok()?;
             Some(LocalSnap {
                 name: snap_name,
@@ -452,10 +454,7 @@ async fn execute_one_plan(
     let _ = channel_stdin.shutdown().await;
     drop(channel_stdin);
     let stderr_bytes = stderr_drain.await.unwrap_or_default();
-    let exit = child
-        .wait()
-        .await
-        .map_err(|e| format!("send wait: {e}"))?;
+    let exit = child.wait().await.map_err(|e| format!("send wait: {e}"))?;
     if let Err(e) = copy_res {
         return Err(format!(
             "stream copy: {e}; send stderr: {}",
@@ -510,14 +509,21 @@ async fn run_one_filesystem(
         // hold is idempotent at the palimpsest layer (no-op when the
         // tag already exists for that snapshot).
         if let Err(e) = palimpsest::hold::hold(runner, snap, &tag).await {
-            warn!(snapshot = %snap, error = %e, "step hold failed; sending anyway");
+            return Err(format!("step hold failed for {snap} with tag {tag}: {e}"));
         }
     }
 
     // Leave the step hold in place on failure — it protects the snapshot
     // for the next cycle's retry. Hence `?` propagates without a release.
     execute_one_plan(
-        runner, peer, job_name, plan, target_dataset, sender_dataset, flags, cancel,
+        runner,
+        peer,
+        job_name,
+        plan,
+        target_dataset,
+        sender_dataset,
+        flags,
+        cancel,
     )
     .await?;
 
@@ -598,10 +604,12 @@ impl PushJob {
             .await
             .map_err(|e| format!("list datasets: {e}"))?;
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
-        Ok(arctern_config::filter::resolve_all(&self.config.filesystems, &names)
-            .into_iter()
-            .map(str::to_string)
-            .collect())
+        Ok(
+            arctern_config::filter::resolve_all(&self.config.filesystems, &names)
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        )
     }
 
     async fn run_cycle(&self, ctx: &JobContext, cancel: &CancellationToken) -> Result<(), String> {
@@ -741,10 +749,8 @@ impl Job for PushJob {
                     }
                     let started_at = OffsetDateTime::now_utc().unix_timestamp();
                     if let Some(pool) = ctx.state.as_ref() {
-                        let _ = crate::state::job_runs::record_start(
-                            pool, &job_name, started_at,
-                        )
-                        .await;
+                        let _ =
+                            crate::state::job_runs::record_start(pool, &job_name, started_at).await;
                     }
                     let outcome = self.run_cycle(&ctx, &cancel).await;
                     let finished_at = OffsetDateTime::now_utc().unix_timestamp();
@@ -754,7 +760,13 @@ impl Job for PushJob {
                     };
                     if let Some(pool) = ctx.state.as_ref() {
                         let _ = crate::state::job_runs::record_finish(
-                            pool, &job_name, started_at, finished_at, status, err_msg, None,
+                            pool,
+                            &job_name,
+                            started_at,
+                            finished_at,
+                            status,
+                            err_msg,
+                            None,
                         )
                         .await;
                     }
@@ -884,7 +896,10 @@ mod tests {
 
     #[test]
     fn step_hold_tag_includes_peer_for_multi_target_isolation() {
-        assert_eq!(step_hold_tag("backup", "home"), "arctern_step_J_backup_P_home");
+        assert_eq!(
+            step_hold_tag("backup", "home"),
+            "arctern_step_J_backup_P_home"
+        );
     }
 
     #[test]

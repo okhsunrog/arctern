@@ -7,6 +7,7 @@
 //! check by construction (no opt-in, no opt-out).
 
 use arctern_api::ApiErrorBody;
+use axum::extract::connect_info::Connected;
 use axum::{
     Json,
     extract::{ConnectInfo, Request},
@@ -15,7 +16,6 @@ use axum::{
     response::{IntoResponse, Response},
     serve::IncomingStream,
 };
-use axum::extract::connect_info::Connected;
 use tokio::net::UnixListener;
 
 #[derive(Clone, Debug)]
@@ -84,9 +84,7 @@ pub async fn enforce_csrf(request: Request, next: Next) -> Response {
         method,
         Method::POST | Method::PUT | Method::PATCH | Method::DELETE
     );
-    if mutating
-        && let Some(sfs) = request.headers().get("sec-fetch-site")
-    {
+    if mutating && let Some(sfs) = request.headers().get("sec-fetch-site") {
         let v = sfs.to_str().unwrap_or("");
         if v != "same-origin" && v != "none" {
             let body = ApiErrorBody {

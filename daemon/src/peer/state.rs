@@ -15,7 +15,9 @@ pub enum PeerStatus {
     Connected,
     /// Between reconnect attempts. The reconnect loop sleeps for
     /// `next_delay(attempt)` then re-enters connect.
-    Reconnecting { since: OffsetDateTime },
+    Reconnecting {
+        since: OffsetDateTime,
+    },
     /// Last connect attempt failed. The loop will sleep, increment
     /// attempt, and try again.
     Failed {

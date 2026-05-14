@@ -86,7 +86,10 @@ async fn request(
         }
     });
 
-    let mut builder = Request::builder().method(method).uri(path).header("host", "_");
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("host", "_");
     if body.is_some() {
         builder = builder.header("content-type", "application/json");
     }

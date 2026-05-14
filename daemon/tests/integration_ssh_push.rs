@@ -48,17 +48,9 @@ async fn snapshot_guid(runner: &dyn CommandRunner, full_snap: &str) -> Option<u6
         .and_then(|p| p.value.parse::<u64>().ok())
 }
 
-async fn pipe_send_to_recv(
-    runner: &dyn CommandRunner,
-    send_args: SendArgs,
-    recv_args: RecvArgs,
-) {
-    let mut send_child = zfs_send(runner, &send_args)
-        .await
-        .expect("spawn zfs send");
-    let mut recv_child = zfs_recv(runner, &recv_args)
-        .await
-        .expect("spawn zfs recv");
+async fn pipe_send_to_recv(runner: &dyn CommandRunner, send_args: SendArgs, recv_args: RecvArgs) {
+    let mut send_child = zfs_send(runner, &send_args).await.expect("spawn zfs send");
+    let mut recv_child = zfs_recv(runner, &recv_args).await.expect("spawn zfs recv");
     let mut send_stdout = send_child.stdout.take().expect("send stdout");
     let mut recv_stdin = recv_child.stdin.take().expect("recv stdin");
     let mut recv_stderr = recv_child.stderr.take().expect("recv stderr");
@@ -147,7 +139,9 @@ async fn ssh_push_full_then_incremental_with_hold_and_cursor() {
 
     // Full send → recv.
     let send_args_full = SendArgs::new(snap1_full.clone());
-    let recv_args_full = RecvArgs::new(target_dataset.clone()).resumable().unmounted();
+    let recv_args_full = RecvArgs::new(target_dataset.clone())
+        .resumable()
+        .unmounted();
     pipe_send_to_recv(runner_dyn, send_args_full, recv_args_full).await;
 
     let recv_snap1 = format!("{target_dataset}@{snap1_name}");
@@ -188,9 +182,10 @@ async fn ssh_push_full_then_incremental_with_hold_and_cursor() {
         .await
         .expect("step hold on snap2");
 
-    let send_args_inc =
-        SendArgs::new(snap2_full.clone()).incremental(snap1_full.clone());
-    let recv_args_inc = RecvArgs::new(target_dataset.clone()).resumable().unmounted();
+    let send_args_inc = SendArgs::new(snap2_full.clone()).incremental(snap1_full.clone());
+    let recv_args_inc = RecvArgs::new(target_dataset.clone())
+        .resumable()
+        .unmounted();
     pipe_send_to_recv(runner_dyn, send_args_inc, recv_args_inc).await;
 
     let recv_snap2 = format!("{target_dataset}@{snap2_name}");

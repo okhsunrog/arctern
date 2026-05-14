@@ -233,14 +233,16 @@ impl Visit for MessageVisitor {
 mod tests {
     use super::*;
     use crate::state::open_in_memory;
+    use tracing_subscriber::Registry;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
-    use tracing_subscriber::Registry;
 
     #[tokio::test]
     async fn since_returns_strictly_newer() {
         let pool = open_in_memory().await.unwrap();
-        let id1 = insert(&pool, 100, "INFO", Some("backup"), "first").await.unwrap();
+        let id1 = insert(&pool, 100, "INFO", Some("backup"), "first")
+            .await
+            .unwrap();
         let _id2 = insert(&pool, 200, "INFO", None, "second").await.unwrap();
         let rows = since(&pool, id1, 10).await.unwrap();
         assert_eq!(rows.len(), 1);

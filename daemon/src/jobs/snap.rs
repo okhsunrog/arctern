@@ -102,12 +102,7 @@ impl Job for SnapJob {
     }
 }
 
-async fn run_and_record(
-    job: &SnapJob,
-    ctx: &JobContext,
-    job_name: &str,
-    interval: StdDuration,
-) {
+async fn run_and_record(job: &SnapJob, ctx: &JobContext, job_name: &str, interval: StdDuration) {
     let started_at = OffsetDateTime::now_utc().unix_timestamp();
     if let Some(pool) = ctx.state.as_ref() {
         let _ = crate::state::job_runs::record_start(pool, job_name, started_at).await;
@@ -263,7 +258,9 @@ impl SnapJob {
 fn snapshot_tag(prefix: &str) -> String {
     let now = OffsetDateTime::now_utc();
     // Format with second precision; colons replaced.
-    let formatted = now.format(&Rfc3339).expect("Rfc3339 format always succeeds");
+    let formatted = now
+        .format(&Rfc3339)
+        .expect("Rfc3339 format always succeeds");
     let stripped: String = formatted.chars().filter(|c| *c != ':').collect();
     format!("{prefix}{stripped}")
 }

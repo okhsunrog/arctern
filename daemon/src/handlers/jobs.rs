@@ -46,10 +46,7 @@ pub async fn list_jobs(State(state): State<AppState>) -> Json<Vec<JobStatus>> {
         (status = 404, description = "No job with that name is registered"),
     ),
 )]
-pub async fn wakeup(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-) -> StatusCode {
+pub async fn wakeup(State(state): State<AppState>, Path(name): Path<String>) -> StatusCode {
     if state.manager.wakeup_by_name(&name) {
         StatusCode::NO_CONTENT
     } else {

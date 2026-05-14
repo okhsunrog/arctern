@@ -101,8 +101,8 @@ async fn run_stdinserver_dispatch(identity: String, config: PathBuf) -> eyre::Re
     // Resolve config + state_dir up front so the subscriber has access
     // to the same SQLite the daemon writes to. A failure to open the
     // pool falls back to stderr-only tracing so the dispatch still runs.
-    let cfg = arctern_config::load_from_path(&config)
-        .map_err(|e| eyre::eyre!("config load: {e}"))?;
+    let cfg =
+        arctern_config::load_from_path(&config).map_err(|e| eyre::eyre!("config load: {e}"))?;
     let state_dir = cfg
         .state_dir
         .clone()
@@ -110,7 +110,9 @@ async fn run_stdinserver_dispatch(identity: String, config: PathBuf) -> eyre::Re
     let pool = match state::open(&state_dir).await {
         Ok(p) => Some(Arc::new(p)),
         Err(e) => {
-            eprintln!("stdinserver-dispatch: state open failed ({e}); continuing without SQLite event log");
+            eprintln!(
+                "stdinserver-dispatch: state open failed ({e}); continuing without SQLite event log"
+            );
             None
         }
     };
@@ -177,9 +179,8 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
     let runner: Arc<dyn palimpsest::runner::CommandRunner> =
         match std::env::var("PALIMPSEST_SSH_TARGET") {
             Ok(s) if !s.is_empty() => Arc::new(
-                palimpsest::SshCommandRunner::from_env().map_err(|e| {
-                    eyre::eyre!("PALIMPSEST_SSH_TARGET configuration: {e}")
-                })?,
+                palimpsest::SshCommandRunner::from_env()
+                    .map_err(|e| eyre::eyre!("PALIMPSEST_SSH_TARGET configuration: {e}"))?,
             ),
             _ => Arc::new(palimpsest::runner::RealRunner),
         };
@@ -190,9 +191,8 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
         .state_dir
         .clone()
         .unwrap_or_else(|| PathBuf::from("/var/lib/arctern"));
-    std::fs::create_dir_all(&state_dir).map_err(|e| {
-        eyre::eyre!("create state_dir {}: {e}", state_dir.display())
-    })?;
+    std::fs::create_dir_all(&state_dir)
+        .map_err(|e| eyre::eyre!("create state_dir {}: {e}", state_dir.display()))?;
 
     let pool = Arc::new(
         state::open(&state_dir)
@@ -206,8 +206,7 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
     use tracing_subscriber::EnvFilter;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let fmt_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
     let sqlite_layer = state::log_events::SqliteLogLayer::new(pool.clone());
     tracing_subscriber::registry()
@@ -265,11 +264,8 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
     // 500ms and fans them out to subscribed handlers.
     let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<arctern_api::LogEvent>(256);
     let events_cancel = tokio_util::sync::CancellationToken::new();
-    let events_poller = state::log_events::spawn_poller(
-        pool.clone(),
-        events_tx.clone(),
-        events_cancel.clone(),
-    );
+    let events_poller =
+        state::log_events::spawn_poller(pool.clone(), events_tx.clone(), events_cancel.clone());
     let app_state = app_state::AppState {
         manager: manager.clone(),
         peers: peers_state.clone(),

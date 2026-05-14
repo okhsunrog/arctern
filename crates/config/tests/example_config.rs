@@ -12,6 +12,12 @@ fn example_config_parses() {
     let cfg = arctern_config::load_from_path(&p)
         .unwrap_or_else(|e| panic!("failed to load {}: {e}", p.display()));
     let names: Vec<&str> = cfg.jobs.iter().map(|j| j.name()).collect();
-    assert!(names.contains(&"databak"), "expected databak job: {names:?}");
-    assert!(names.contains(&"rootbak"), "expected rootbak job: {names:?}");
+    assert!(
+        names.contains(&"databak"),
+        "expected databak job: {names:?}"
+    );
+    assert!(
+        names.contains(&"rootbak"),
+        "expected rootbak job: {names:?}"
+    );
 }

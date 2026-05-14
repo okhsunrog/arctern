@@ -129,11 +129,8 @@ where
 
 /// Background task: poll log_events for new rows since `since` and push
 /// them as Event frames (request_id = None) until the writer breaks.
-async fn push_events<W>(
-    pool: Arc<SqlitePool>,
-    mut since: u64,
-    writer: Arc<Mutex<BufWriter<W>>>,
-) where
+async fn push_events<W>(pool: Arc<SqlitePool>, mut since: u64, writer: Arc<Mutex<BufWriter<W>>>)
+where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     use std::time::Duration;
@@ -187,9 +184,7 @@ async fn dispatch(
         Request::GetReceiveResumeToken { dataset } => {
             handle_get_receive_resume_token(runner, acl, &dataset).await
         }
-        Request::DestroySnapshot { name } => {
-            handle_destroy_snapshot(runner, acl, &name).await
-        }
+        Request::DestroySnapshot { name } => handle_destroy_snapshot(runner, acl, &name).await,
         Request::DiscardPartialRecv { dataset } => {
             handle_discard_partial_recv(runner, acl, &dataset).await
         }
@@ -221,10 +216,7 @@ async fn dispatch(
 /// equal to or a descendant of it. Returns Ok((root_fs, dataset)) on
 /// success — the second element is just `dataset` borrowed back so the
 /// caller doesn't have to repeat the path.
-fn enforce_root_fs<'a>(
-    acl: &'a AllowedClient,
-    dataset: &'a str,
-) -> Result<(), Response> {
+fn enforce_root_fs<'a>(acl: &'a AllowedClient, dataset: &'a str) -> Result<(), Response> {
     let Some(root) = acl.root_fs.as_deref() else {
         return Ok(());
     };
@@ -237,9 +229,7 @@ fn enforce_root_fs<'a>(
     }
     Err(Response::Error {
         code: ErrorCode::Unauthorized,
-        message: format!(
-            "{dataset:?} is not under allowed root_fs {root:?}"
-        ),
+        message: format!("{dataset:?} is not under allowed root_fs {root:?}"),
     })
 }
 
@@ -257,10 +247,7 @@ async fn handle_list_snapshots(
         Err(e) => {
             return Response::Error {
                 code: ErrorCode::BadRequest,
-                message: format!(
-                    "compile prefix_regex {:?}: {e}",
-                    prefix_regex.unwrap_or("")
-                ),
+                message: format!("compile prefix_regex {:?}: {e}", prefix_regex.unwrap_or("")),
             };
         }
     };
@@ -296,7 +283,10 @@ async fn handle_list_snapshots(
             {
                 return None;
             }
-            let guid = e.properties.get("guid").and_then(|p| p.value.parse::<u64>().ok())?;
+            let guid = e
+                .properties
+                .get("guid")
+                .and_then(|p| p.value.parse::<u64>().ok())?;
             let createtxg = e.createtxg.parse::<u64>().ok()?;
             Some(SnapshotEntry {
                 name: snap_name,
@@ -329,9 +319,7 @@ async fn handle_get_receive_resume_token(
     }
     match palimpsest::recv::receive_resume_token(runner, dataset).await {
         Ok(token) => Response::GetReceiveResumeTokenOk { token },
-        Err(ZfsError::DatasetNotFound { .. }) => {
-            Response::GetReceiveResumeTokenOk { token: None }
-        }
+        Err(ZfsError::DatasetNotFound { .. }) => Response::GetReceiveResumeTokenOk { token: None },
         Err(e) => Response::Error {
             code: zfs_error_code(&e),
             message: format!("receive_resume_token {dataset}: {e}"),
@@ -344,20 +332,37 @@ async fn handle_destroy_snapshot(
     acl: &AllowedClient,
     name: &str,
 ) -> Response {
-    // Snapshot names look like `dataset@snap`; root_fs ACL applies to
-    // the dataset half.
-    let dataset = name.split('@').next().unwrap_or(name);
+    let Some((dataset, snapshot)) = parse_snapshot_target(name) else {
+        return Response::Error {
+            code: ErrorCode::BadRequest,
+            message: format!("destroy snapshot target must be dataset@snapshot, got {name:?}"),
+        };
+    };
     if let Err(r) = enforce_root_fs(acl, dataset) {
         return r;
     }
     let opts = palimpsest::dataset::DestroyOptions::new();
-    match palimpsest::dataset::destroy(runner, name, &opts).await {
+    match palimpsest::dataset::destroy(runner, &format!("{dataset}@{snapshot}"), &opts).await {
         Ok(()) => Response::DestroySnapshotOk,
         Err(e) => Response::Error {
             code: zfs_error_code(&e),
             message: format!("destroy {name}: {e}"),
         },
     }
+}
+
+fn parse_snapshot_target(name: &str) -> Option<(&str, &str)> {
+    let (dataset, snapshot) = name.split_once('@')?;
+    if dataset.is_empty()
+        || snapshot.is_empty()
+        || dataset.contains('@')
+        || snapshot.contains('@')
+        || dataset.contains('#')
+        || snapshot.contains('#')
+    {
+        return None;
+    }
+    Some((dataset, snapshot))
 }
 
 async fn handle_discard_partial_recv(
@@ -421,11 +426,7 @@ mod tests {
 
     /// One end-to-end roundtrip per request kind, using duplex pipes
     /// for the framed transport and a RecordingRunner for ZFS.
-    async fn rpc(
-        runner: Arc<dyn CommandRunner>,
-        acl: AllowedClient,
-        req: Request,
-    ) -> Response {
+    async fn rpc(runner: Arc<dyn CommandRunner>, acl: AllowedClient, req: Request) -> Response {
         let (a, b) = tokio::io::duplex(64 * 1024);
         let (areader, awriter) = tokio::io::split(a);
         let (mut breader, mut bwriter) = tokio::io::split(b);
@@ -434,7 +435,10 @@ mod tests {
         let frame = RequestFrame { id: 1, body: req };
         write_request(&mut bwriter, &frame).await.unwrap();
         // Send Shutdown to make the server exit cleanly after the reply.
-        let frame = RequestFrame { id: 2, body: Request::Shutdown };
+        let frame = RequestFrame {
+            id: 2,
+            body: Request::Shutdown,
+        };
         write_request(&mut bwriter, &frame).await.unwrap();
         let resp = read_response(&mut breader).await.unwrap();
         // Drain the Shutdown reply so the server can exit.
@@ -536,14 +540,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unimplemented_subscribe_events_reports_internal_error() {
+    async fn destroy_snapshot_rejects_dataset_target() {
         let runner = Arc::new(RecordingRunner::new());
         let r = rpc(
             runner,
-            acl(None),
-            Request::SubscribeEvents { since: None },
+            acl(Some("tank/backups/laptop")),
+            Request::DestroySnapshot {
+                name: "tank/backups/laptop".into(),
+            },
         )
         .await;
+        match r {
+            Response::Error { code, message } => {
+                assert_eq!(code, ErrorCode::BadRequest);
+                assert!(message.contains("dataset@snapshot"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn destroy_snapshot_rejects_bookmark_target() {
+        let runner = Arc::new(RecordingRunner::new());
+        let r = rpc(
+            runner,
+            acl(Some("tank/backups/laptop")),
+            Request::DestroySnapshot {
+                name: "tank/backups/laptop#cursor".into(),
+            },
+        )
+        .await;
+        match r {
+            Response::Error { code, .. } => assert_eq!(code, ErrorCode::BadRequest),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn destroy_snapshot_accepts_snapshot_inside_root() {
+        let runner = Arc::new(RecordingRunner::new().record(
+            Cmd::new("zfs").args(["destroy", "tank/backups/laptop@s1"]),
+            vec![],
+            vec![],
+            0,
+        ));
+        let r = rpc(
+            runner,
+            acl(Some("tank/backups/laptop")),
+            Request::DestroySnapshot {
+                name: "tank/backups/laptop@s1".into(),
+            },
+        )
+        .await;
+        assert!(matches!(r, Response::DestroySnapshotOk), "got {r:?}");
+    }
+
+    #[tokio::test]
+    async fn unimplemented_subscribe_events_reports_internal_error() {
+        let runner = Arc::new(RecordingRunner::new());
+        let r = rpc(runner, acl(None), Request::SubscribeEvents { since: None }).await;
         match r {
             Response::Error { code, .. } => assert_eq!(code, ErrorCode::Internal),
             other => panic!("expected Error, got {other:?}"),

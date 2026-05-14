@@ -334,7 +334,10 @@ pub struct CreateSnapshotRequest {
 mod tests {
     use super::*;
 
-    fn list_entry(name: &str, kind: palimpsest::models::DatasetType) -> palimpsest::dataset::ZfsListEntry {
+    fn list_entry(
+        name: &str,
+        kind: palimpsest::models::DatasetType,
+    ) -> palimpsest::dataset::ZfsListEntry {
         palimpsest::dataset::ZfsListEntry {
             name: name.into(),
             kind,
@@ -348,15 +351,17 @@ mod tests {
 
     #[test]
     fn from_zfs_list_entry_lowercases_kind() {
-        let s = DatasetSummary::from(list_entry("tank", palimpsest::models::DatasetType::Filesystem));
+        let s = DatasetSummary::from(list_entry(
+            "tank",
+            palimpsest::models::DatasetType::Filesystem,
+        ));
         assert_eq!(s.name, "tank");
         assert_eq!(s.dataset_type, "filesystem");
     }
 
     #[test]
     fn create_snapshot_request_defaults() {
-        let req: CreateSnapshotRequest =
-            serde_json::from_str(r#"{"snapshot_name":"s1"}"#).unwrap();
+        let req: CreateSnapshotRequest = serde_json::from_str(r#"{"snapshot_name":"s1"}"#).unwrap();
         assert_eq!(req.snapshot_name, "s1");
         assert!(!req.recursive);
         assert!(req.properties.is_empty());
@@ -375,7 +380,10 @@ mod tests {
         let back: CreateSnapshotRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.snapshot_name, req.snapshot_name);
         assert!(back.recursive);
-        assert_eq!(back.properties.get("user:reason").map(String::as_str), Some("manual"));
+        assert_eq!(
+            back.properties.get("user:reason").map(String::as_str),
+            Some("manual")
+        );
     }
 
     #[test]
@@ -391,6 +399,9 @@ mod tests {
         let back: DatasetSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(back.name, s.name);
         assert_eq!(back.dataset_type, s.dataset_type);
-        assert_eq!(back.properties.get("compression").map(String::as_str), Some("lz4"));
+        assert_eq!(
+            back.properties.get("compression").map(String::as_str),
+            Some("lz4")
+        );
     }
 }

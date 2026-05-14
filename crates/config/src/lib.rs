@@ -19,8 +19,7 @@ pub use prune::{PruneError, evaluate as evaluate_keep_rules};
 pub use schema::{
     AllowedClient, Config, Defaults, FilesystemFilter, JobConfig, KeepRule, PeerConfig,
     PruneJobConfig, PruningConfig, PruningDefaults, PushJobConfig, PushTarget, RecvConfig,
-    SendFlagsConfig, SnapJobConfig, SnapshotFilterConfig, SnapshottingConfig,
-    SnapshottingDefaults,
+    SendFlagsConfig, SnapJobConfig, SnapshotFilterConfig, SnapshottingConfig, SnapshottingDefaults,
 };
 
 #[derive(Debug, Error)]
@@ -181,6 +180,47 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
             JobConfig::Prune(s) => validate_prune(i, s)?,
         }
     }
+    for (i, client) in cfg.allowed_clients.iter().enumerate() {
+        validate_allowed_client(i, client)?;
+    }
+    Ok(())
+}
+
+fn validate_allowed_client(idx: usize, client: &AllowedClient) -> Result<(), String> {
+    if client.identity.is_empty() {
+        return Err(format!(
+            "allowed_clients[{idx}].identity: must not be empty"
+        ));
+    }
+    if client.jobs.is_empty() {
+        return Err(format!("allowed_clients[{idx}].jobs: must not be empty"));
+    }
+    if client.operations.is_empty() {
+        return Err(format!(
+            "allowed_clients[{idx}].operations: must not be empty"
+        ));
+    }
+
+    let needs_root_fs = client
+        .operations
+        .iter()
+        .any(|op| op == "recv" || op == "control");
+    if needs_root_fs {
+        let Some(root_fs) = client.root_fs.as_deref() else {
+            return Err(format!(
+                "allowed_clients[{idx}].root_fs: required when operations include recv or control"
+            ));
+        };
+        if root_fs.is_empty() {
+            return Err(format!("allowed_clients[{idx}].root_fs: must not be empty"));
+        }
+        if root_fs.starts_with('/') || root_fs.ends_with('/') {
+            return Err(format!(
+                "allowed_clients[{idx}].root_fs: {root_fs:?} must not start or end with '/'"
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -260,9 +300,7 @@ fn validate_push(idx: usize, s: &PushJobConfig) -> Result<(), String> {
         }
         (None, Some(re)) => {
             if let Err(e) = regex::Regex::new(re) {
-                return Err(format!(
-                    "jobs[{idx}].snapshot_filter.regex: {re:?}: {e}"
-                ));
+                return Err(format!("jobs[{idx}].snapshot_filter.regex: {re:?}: {e}"));
             }
         }
         (Some(_), None) => {}
@@ -313,11 +351,10 @@ mod tests {
     use super::*;
 
     fn parse(s: &str) -> Result<Config, ConfigError> {
-        let mut cfg: Config =
-            toml::from_str(s).map_err(|source| ConfigError::Parse {
-                path: "<test>".into(),
-                source,
-            })?;
+        let mut cfg: Config = toml::from_str(s).map_err(|source| ConfigError::Parse {
+            path: "<test>".into(),
+            source,
+        })?;
         resolve_defaults(&mut cfg).map_err(|message| ConfigError::Validate {
             path: "<test>".into(),
             message,
@@ -510,6 +547,62 @@ prefix = "zrepl_"
         assert_eq!(p.targets, vec!["home".to_string()]);
         assert_eq!(p.target.root_fs, "okdata/backups/laptop");
         assert_eq!(p.snapshot_filter().prefix.as_deref(), Some("zrepl_"));
+    }
+
+    #[test]
+    fn allowed_client_with_recv_requires_root_fs() {
+        let s = r#"
+[[allowed_clients]]
+identity = "laptop"
+jobs = ["backup"]
+operations = ["recv"]
+"#;
+        let err = parse(s).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("allowed_clients[0].root_fs"), "got: {msg}");
+    }
+
+    #[test]
+    fn allowed_client_with_control_requires_root_fs() {
+        let s = r#"
+[[allowed_clients]]
+identity = "laptop"
+jobs = ["backup"]
+operations = ["control"]
+"#;
+        let err = parse(s).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("allowed_clients[0].root_fs"), "got: {msg}");
+    }
+
+    #[test]
+    fn allowed_client_with_root_fs_parses() {
+        let s = r#"
+[[allowed_clients]]
+identity = "laptop"
+jobs = ["backup"]
+operations = ["control", "recv"]
+root_fs = "tank/backups/laptop"
+"#;
+        let c = parse(s).unwrap();
+        assert_eq!(
+            c.allowed_clients[0].root_fs.as_deref(),
+            Some("tank/backups/laptop")
+        );
+    }
+
+    #[test]
+    fn allowed_client_root_fs_must_be_relative_dataset_path() {
+        let s = r#"
+[[allowed_clients]]
+identity = "laptop"
+jobs = ["backup"]
+operations = ["recv"]
+root_fs = "/tank/backups/laptop"
+"#;
+        let err = parse(s).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("must not start or end"), "got: {msg}");
     }
 
     #[test]
@@ -858,7 +951,10 @@ prefix = "x_"
 "#
             );
             let err = parse(&s).unwrap_err();
-            assert!(format!("{err}").contains("root_fs"), "expected root_fs error for {root:?}");
+            assert!(
+                format!("{err}").contains("root_fs"),
+                "expected root_fs error for {root:?}"
+            );
         }
     }
 

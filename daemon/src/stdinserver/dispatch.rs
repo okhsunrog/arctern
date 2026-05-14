@@ -15,11 +15,17 @@ use palimpsest::runner::{CommandRunner, RealRunner};
 /// without re-parsing the command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchAction {
-    Control { job: String },
-    Recv { job: String },
+    Control {
+        job: String,
+    },
+    Recv {
+        job: String,
+    },
     /// Returned for unsupported / not-yet-implemented operations. Caller
     /// should log + exit cleanly with a non-zero code.
-    Unsupported { reason: String },
+    Unsupported {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -38,8 +44,8 @@ pub enum DispatchError {
 /// dispatches. Test/legacy callers without a SQLite pool use this entry.
 #[allow(dead_code)]
 pub async fn run(identity: &str, config_path: &Path) -> eyre::Result<()> {
-    let config = arctern_config::load_from_path(config_path)
-        .map_err(|e| eyre::eyre!("config load: {e}"))?;
+    let config =
+        arctern_config::load_from_path(config_path).map_err(|e| eyre::eyre!("config load: {e}"))?;
     run_with(identity, config, None).await
 }
 
@@ -163,12 +169,7 @@ mod tests {
     #[test]
     fn happy_path_control() {
         let c = cfg("laptop_nova", &["backup"], &["control", "recv"]);
-        let a = decide(
-            "laptop_nova",
-            "arctern stdinserver backup control",
-            &c,
-        )
-        .unwrap();
+        let a = decide("laptop_nova", "arctern stdinserver backup control", &c).unwrap();
         assert_eq!(
             a,
             DispatchAction::Control {
@@ -204,44 +205,28 @@ mod tests {
     #[test]
     fn unknown_identity_rejected() {
         let c = cfg("laptop_nova", &["backup"], &["control"]);
-        let err =
-            decide("intruder", "arctern stdinserver backup control", &c).unwrap_err();
+        let err = decide("intruder", "arctern stdinserver backup control", &c).unwrap_err();
         assert!(matches!(err, DispatchError::UnknownIdentity(_)));
     }
 
     #[test]
     fn job_not_in_acl_rejected() {
         let c = cfg("laptop_nova", &["backup"], &["control"]);
-        let err = decide(
-            "laptop_nova",
-            "arctern stdinserver other_job control",
-            &c,
-        )
-        .unwrap_err();
+        let err = decide("laptop_nova", "arctern stdinserver other_job control", &c).unwrap_err();
         assert!(matches!(err, DispatchError::JobNotAllowed { .. }));
     }
 
     #[test]
     fn op_not_in_acl_rejected() {
         let c = cfg("laptop_nova", &["backup"], &["control"]);
-        let err = decide(
-            "laptop_nova",
-            "arctern stdinserver backup recv",
-            &c,
-        )
-        .unwrap_err();
+        let err = decide("laptop_nova", "arctern stdinserver backup recv", &c).unwrap_err();
         assert!(matches!(err, DispatchError::OpNotAllowed { .. }));
     }
 
     #[test]
     fn unsupported_op_with_acl_returns_unsupported() {
         let c = cfg("laptop_nova", &["backup"], &["control", "weird"]);
-        let a = decide(
-            "laptop_nova",
-            "arctern stdinserver backup weird",
-            &c,
-        )
-        .unwrap();
+        let a = decide("laptop_nova", "arctern stdinserver backup weird", &c).unwrap();
         assert!(matches!(a, DispatchAction::Unsupported { .. }));
     }
 }

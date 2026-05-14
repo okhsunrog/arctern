@@ -346,9 +346,9 @@ pub async fn stream_peer_events(
     >,
     (StatusCode, HeaderMap, Json<ApiErrorBody>),
 > {
-    use std::time::Duration;
     use axum::response::Sse;
     use axum::response::sse::{Event, KeepAlive};
+    use std::time::Duration;
     use tokio_stream::StreamExt;
     use tokio_stream::wrappers::BroadcastStream;
 

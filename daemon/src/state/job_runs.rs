@@ -103,7 +103,10 @@ pub async fn list_recent(
 /// Trim rows older than `cutoff_unix_seconds` (typically `now - 30d`).
 /// Returns the number of rows removed.
 #[allow(dead_code)]
-pub async fn trim_older_than(pool: &SqlitePool, cutoff_unix_seconds: i64) -> Result<u64, StateError> {
+pub async fn trim_older_than(
+    pool: &SqlitePool,
+    cutoff_unix_seconds: i64,
+) -> Result<u64, StateError> {
     let res = sqlx::query("DELETE FROM job_runs WHERE started_at < ?")
         .bind(cutoff_unix_seconds)
         .execute(pool)
@@ -123,7 +126,14 @@ mod tests {
         record_finish(&pool, "backup", 100, 200, STATUS_OK, None, Some(2048))
             .await
             .unwrap();
-        let row: (String, i64, Option<i64>, String, Option<String>, Option<i64>) = sqlx::query_as(
+        let row: (
+            String,
+            i64,
+            Option<i64>,
+            String,
+            Option<String>,
+            Option<i64>,
+        ) = sqlx::query_as(
             "SELECT job_name, started_at, finished_at, status, error_message, bytes_sent
                FROM job_runs WHERE job_name = ? AND started_at = ?",
         )

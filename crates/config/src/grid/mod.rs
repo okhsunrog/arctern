@@ -40,7 +40,9 @@ pub enum GridParseError {
         term: String,
         message: String,
     },
-    #[error("interval lengths must be monotonically non-decreasing (saw {prev:?} then {next:?}); a `keep=all` prefix run is the only exception")]
+    #[error(
+        "interval lengths must be monotonically non-decreasing (saw {prev:?} then {next:?}); a `keep=all` prefix run is the only exception"
+    )]
     NonMonotonic { prev: Duration, next: Duration },
     #[error("grid expression must contain at least one term")]
     Empty,
@@ -73,11 +75,13 @@ impl GridSpec {
 
         for (idx, raw) in terms.iter().enumerate() {
             let trimmed = raw.trim();
-            let caps = term_re.captures(trimmed).ok_or_else(|| GridParseError::Term {
-                term_index: idx,
-                term: trimmed.to_string(),
-                message: "does not match `<count>x<duration>(keep=...)?`".to_string(),
-            })?;
+            let caps = term_re
+                .captures(trimmed)
+                .ok_or_else(|| GridParseError::Term {
+                    term_index: idx,
+                    term: trimmed.to_string(),
+                    message: "does not match `<count>x<duration>(keep=...)?`".to_string(),
+                })?;
 
             let count: u32 = caps[1].parse().map_err(|e| GridParseError::Term {
                 term_index: idx,
@@ -93,12 +97,11 @@ impl GridSpec {
             }
 
             let dur_str = caps[2].trim();
-            let length =
-                humantime::parse_duration(dur_str).map_err(|e| GridParseError::Term {
-                    term_index: idx,
-                    term: trimmed.to_string(),
-                    message: format!("duration {dur_str:?}: {e}"),
-                })?;
+            let length = humantime::parse_duration(dur_str).map_err(|e| GridParseError::Term {
+                term_index: idx,
+                term: trimmed.to_string(),
+                message: format!("duration {dur_str:?}: {e}"),
+            })?;
 
             let keep_count = if let Some(modifier) = caps.get(3) {
                 let kc =

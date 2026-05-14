@@ -15,15 +15,15 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use arctern_transport::{
     EventWire, Request, RequestFrame, Response, ResponseFrame, read_response, write_request,
 };
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use super::Pending;
@@ -57,10 +57,7 @@ impl ControlClient {
     /// background task that owns both halves and demuxes responses.
     /// Returns the client + the join handle so callers can detect a
     /// terminated background task (and trigger reconnect).
-    pub fn spawn<R, W>(
-        reader: R,
-        writer: W,
-    ) -> (Self, JoinHandle<()>)
+    pub fn spawn<R, W>(reader: R, writer: W) -> (Self, JoinHandle<()>)
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
@@ -209,8 +206,9 @@ mod tests {
         let server = tokio::spawn(async move {
             let mut frames = Vec::new();
             for _ in 0..3 {
-                let req: RequestFrame =
-                    arctern_transport::read_request(&mut server_reader).await.unwrap();
+                let req: RequestFrame = arctern_transport::read_request(&mut server_reader)
+                    .await
+                    .unwrap();
                 frames.push(req);
             }
             for req in frames.into_iter().rev() {
@@ -259,8 +257,9 @@ mod tests {
         let (client, _task) = ControlClient::spawn(client_reader, client_writer);
 
         let server = tokio::spawn(async move {
-            let req: RequestFrame =
-                arctern_transport::read_request(&mut server_reader).await.unwrap();
+            let req: RequestFrame = arctern_transport::read_request(&mut server_reader)
+                .await
+                .unwrap();
             let resp = ResponseFrame {
                 request_id: Some(req.id),
                 body: Response::Error {

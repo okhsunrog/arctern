@@ -173,7 +173,5 @@ fn enforce_root_fs(acl: &AllowedClient, dataset: &str) -> Result<(), String> {
     if dataset.starts_with(&prefix) {
         return Ok(());
     }
-    Err(format!(
-        "{dataset:?} is not under allowed root_fs {root:?}"
-    ))
+    Err(format!("{dataset:?} is not under allowed root_fs {root:?}"))
 }

@@ -57,7 +57,7 @@ fn map_to_filters(m: BTreeMap<String, bool>) -> Result<Vec<FilesystemFilter>, St
             if let Some(stripped) = k.strip_suffix('/') {
                 if stripped.is_empty() {
                     return Err(
-                        "filesystems: empty key with `/` suffix is not a valid path".to_string(),
+                        "filesystems: empty key with `/` suffix is not a valid path".to_string()
                     );
                 }
                 trues.push((stripped.to_string(), true));
@@ -212,11 +212,7 @@ mod tests {
         //               exclude=["novafs/arch0", "novafs/arch0/data"]
         // Net effect: every descendant of novafs/arch0 except the
         // root itself and the data subtree.
-        let f = f(
-            "novafs/arch0",
-            true,
-            &["novafs/arch0", "novafs/arch0/data"],
-        );
+        let f = f("novafs/arch0", true, &["novafs/arch0", "novafs/arch0/data"]);
         let cands = vec![
             "novafs",
             "novafs/arch0",

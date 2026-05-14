@@ -133,7 +133,9 @@ pub enum Response {
     ListJobsOk {
         jobs: Vec<JobStatusWire>,
     },
-    GetJobStatusOk { job: JobStatusWire },
+    GetJobStatusOk {
+        job: JobStatusWire,
+    },
     WakeupJobOk,
     GetLogCursorOk {
         id: u64,
@@ -349,7 +351,9 @@ pub async fn write_response<W: AsyncWrite + Unpin>(
     write_frame(w, r).await
 }
 
-pub async fn read_response<R: AsyncRead + Unpin>(r: &mut R) -> Result<ResponseFrame, ProtocolError> {
+pub async fn read_response<R: AsyncRead + Unpin>(
+    r: &mut R,
+) -> Result<ResponseFrame, ProtocolError> {
     read_frame(r).await
 }
 
@@ -439,7 +443,10 @@ mod tests {
     }
 
     fn check_request_roundtrip(req: Request) {
-        let f = RequestFrame { id: 7, body: req.clone() };
+        let f = RequestFrame {
+            id: 7,
+            body: req.clone(),
+        };
         let s = serde_json::to_string(&f).unwrap();
         let back: RequestFrame = serde_json::from_str(&s).unwrap();
         assert_eq!(back.id, 7);
@@ -486,12 +493,16 @@ mod tests {
 
     #[test]
     fn request_get_job_status_roundtrip() {
-        check_request_roundtrip(Request::GetJobStatus { name: "backup".into() });
+        check_request_roundtrip(Request::GetJobStatus {
+            name: "backup".into(),
+        });
     }
 
     #[test]
     fn request_wakeup_job_roundtrip() {
-        check_request_roundtrip(Request::WakeupJob { name: "backup".into() });
+        check_request_roundtrip(Request::WakeupJob {
+            name: "backup".into(),
+        });
     }
 
     #[test]
@@ -511,7 +522,10 @@ mod tests {
     }
 
     fn check_response_roundtrip(resp: Response) {
-        let f = ResponseFrame { request_id: Some(11), body: resp.clone() };
+        let f = ResponseFrame {
+            request_id: Some(11),
+            body: resp.clone(),
+        };
         let s = serde_json::to_string(&f).unwrap();
         let back: ResponseFrame = serde_json::from_str(&s).unwrap();
         assert_eq!(back.request_id, Some(11));

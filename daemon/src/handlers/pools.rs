@@ -1,8 +1,6 @@
 //! `/api/v1/pools` — list pools + per-pool full status + scrub control.
 
-use arctern_api::{
-    ApiErrorBody, PoolStatus, PoolSummary, ScanSummary, ScrubRequest, VdevNode,
-};
+use arctern_api::{ApiErrorBody, PoolStatus, PoolSummary, ScanSummary, ScrubRequest, VdevNode};
 use axum::{
     Json,
     extract::{Path, State},
@@ -75,9 +73,7 @@ fn entry_to_summary(e: &ZpoolStatusEntry) -> PoolSummary {
         (status = 500, description = "zpool returned an error", body = ApiErrorBody),
     ),
 )]
-pub async fn list_pools(
-    State(state): State<AppState>,
-) -> Result<Json<Vec<PoolSummary>>, ApiError> {
+pub async fn list_pools(State(state): State<AppState>) -> Result<Json<Vec<PoolSummary>>, ApiError> {
     let entries = palimpsest::pool::status_all(state.runner.as_ref()).await?;
     let mut out: Vec<PoolSummary> = entries.iter().map(entry_to_summary).collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -150,9 +146,7 @@ pub async fn pool_scrub(
         other => {
             return Err(ApiError(palimpsest::ZfsError::Other {
                 exit_code: None,
-                stderr: format!(
-                    "unknown scrub action {other}; expected start|pause|resume|stop"
-                ),
+                stderr: format!("unknown scrub action {other}; expected start|pause|resume|stop"),
             }));
         }
     };

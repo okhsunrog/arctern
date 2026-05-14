@@ -54,7 +54,11 @@ impl LoopbackPool {
         let img_path = format!("/tmp/{name}.img");
         let altroot = format!("/tmp/{name}_root");
 
-        run_check(&runner, Cmd::new("truncate").args(["-s", "256M", &img_path])).await?;
+        run_check(
+            &runner,
+            Cmd::new("truncate").args(["-s", "256M", &img_path]),
+        )
+        .await?;
         run_check(&runner, Cmd::new("mkdir").args(["-p", &altroot])).await?;
 
         let opts = PoolCreateOptions::new(&name)
@@ -212,9 +216,8 @@ fn spawn_daemon_full(
     config: Option<PathBuf>,
     expected_quic: usize,
 ) -> (Child, PathBuf, Vec<std::net::SocketAddr>) {
-    let socket_path = socket.unwrap_or_else(|| {
-        PathBuf::from(format!("/tmp/arctern_test_{}.sock", unique_suffix()))
-    });
+    let socket_path = socket
+        .unwrap_or_else(|| PathBuf::from(format!("/tmp/arctern_test_{}.sock", unique_suffix())));
     let _ = std::fs::remove_file(&socket_path);
 
     let config_path = config.unwrap_or_else(|| {

@@ -105,7 +105,10 @@ pub fn evaluate(rules: &[KeepRule], entries: &[SnapshotEntry]) -> Result<Vec<usi
         return Ok(Vec::new());
     }
     let mut iter = rules.iter();
-    let first = iter.next().expect("non-empty by check above").destroy_set(entries)?;
+    let first = iter
+        .next()
+        .expect("non-empty by check above")
+        .destroy_set(entries)?;
     let mut acc = first;
     for r in iter {
         let next = r.destroy_set(entries)?;
@@ -169,8 +172,8 @@ mod tests {
             },
         ];
         let entries = vec![
-            entry("zrepl_old", 0),         // grid would destroy (older than 1h from now=3600)
-            entry("zrepl_recent", 3600),   // grid keeps (in bucket)
+            entry("zrepl_old", 0),       // grid would destroy (older than 1h from now=3600)
+            entry("zrepl_recent", 3600), // grid keeps (in bucket)
             entry("manual_snapshot", 100), // grid would destroy (non-matching), regex(negate) keeps
         ];
         let destroy = evaluate(&rules, &entries).unwrap();

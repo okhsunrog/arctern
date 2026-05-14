@@ -15,10 +15,7 @@ use crate::{auth, handlers};
 
 #[derive(OpenApi)]
 #[openapi(
-    info(
-        title = "arctern",
-        description = "ZFS replication daemon HTTP API",
-    ),
+    info(title = "arctern", description = "ZFS replication daemon HTTP API",),
     components(schemas(
         arctern_api::DatasetSummary,
         arctern_api::ApiErrorBody,
@@ -38,7 +35,7 @@ use crate::{auth, handlers};
         arctern_api::ArcStats,
         arctern_api::ArcHistoryPoint,
         arctern_api::SnapshotHold,
-    )),
+    ))
 )]
 struct ApiDoc;
 

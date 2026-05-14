@@ -48,8 +48,7 @@ impl PruneJob {
         let mut s = self.status.lock().unwrap();
         let now = OffsetDateTime::now_utc();
         s.last_run = Some(now);
-        s.next_run =
-            Some(now + time::Duration::try_from(interval).unwrap_or(time::Duration::ZERO));
+        s.next_run = Some(now + time::Duration::try_from(interval).unwrap_or(time::Duration::ZERO));
         s.last_error = last_error;
     }
 }
@@ -92,12 +91,7 @@ impl Job for PruneJob {
     }
 }
 
-async fn run_and_record(
-    job: &PruneJob,
-    ctx: &JobContext,
-    job_name: &str,
-    interval: StdDuration,
-) {
+async fn run_and_record(job: &PruneJob, ctx: &JobContext, job_name: &str, interval: StdDuration) {
     let started_at = OffsetDateTime::now_utc().unix_timestamp();
     if let Some(pool) = ctx.state.as_ref() {
         let _ = crate::state::job_runs::record_start(pool, job_name, started_at).await;

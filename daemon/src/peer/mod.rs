@@ -20,7 +20,9 @@ pub mod state;
 
 use std::sync::Arc;
 
-use arctern_transport::{RecvHeader, Request, Response, ResponseFrame, read_response, write_header};
+use arctern_transport::{
+    RecvHeader, Request, Response, ResponseFrame, read_response, write_header,
+};
 use openssh::{KnownHosts, Session, SessionBuilder, Stdio};
 use thiserror::Error;
 use tokio::io::{AsyncWriteExt, BufReader};
@@ -50,11 +52,7 @@ impl PeerLink {
     /// referenced by `command="arctern stdinserver-dispatch <id>"` in
     /// authorized_keys; `job` is the value passed to the receiver as
     /// `<job>` inside `arctern stdinserver <job> <op>`.
-    pub async fn connect(
-        name: String,
-        ssh_target: &str,
-        job: &str,
-    ) -> Result<Self, PeerError> {
+    pub async fn connect(name: String, ssh_target: &str, job: &str) -> Result<Self, PeerError> {
         let session = SessionBuilder::default()
             .known_hosts_check(KnownHosts::Strict)
             .connect_mux(ssh_target)
@@ -109,7 +107,9 @@ impl PeerLink {
     /// Subscribe to server-pushed Event frames on this peer's control
     /// channel. New subscribers see events that arrive after they
     /// subscribe; backlog replay is the SSE bridge's responsibility.
-    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<arctern_transport::EventWire> {
+    pub fn subscribe_events(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<arctern_transport::EventWire> {
         self.control.subscribe_events()
     }
 

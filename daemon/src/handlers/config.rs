@@ -18,9 +18,7 @@ use crate::error::ApiError;
         (status = 500, description = "Config file unreadable", body = ApiErrorBody),
     ),
 )]
-pub async fn get_config(
-    State(state): State<AppState>,
-) -> Result<Json<ConfigView>, ApiError> {
+pub async fn get_config(State(state): State<AppState>) -> Result<Json<ConfigView>, ApiError> {
     let content_toml = tokio::fs::read_to_string(&state.config_path)
         .await
         .map_err(|e| {

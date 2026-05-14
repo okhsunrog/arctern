@@ -89,9 +89,8 @@ impl GridSpec {
                 }
                 KeepCount::Exactly(n) => {
                     // Sort youngest-to-oldest by creation.
-                    b.indices.sort_by(|a, c| {
-                        entries[*c].creation.cmp(&entries[*a].creation)
-                    });
+                    b.indices
+                        .sort_by(|a, c| entries[*c].creation.cmp(&entries[*a].creation));
                     let n = n as usize;
                     if b.indices.len() <= n {
                         keep.extend(b.indices.iter().copied());

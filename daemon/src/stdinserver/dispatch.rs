@@ -154,6 +154,7 @@ mod tests {
                 jobs: jobs.iter().map(|s| (*s).to_string()).collect(),
                 operations: ops.iter().map(|s| (*s).to_string()).collect(),
                 root_fs: None,
+                recv: Default::default(),
             }],
             ..Config::default()
         }

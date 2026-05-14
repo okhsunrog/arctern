@@ -105,10 +105,18 @@ where
         }
     }
     // -s for resumable, -u to keep the receive unmounted (the operator's
-    // mountpoint policy is set elsewhere).
-    let args = RecvArgs::new(header.target_dataset.clone())
+    // mountpoint policy is set elsewhere). `acl.recv` carries any
+    // per-client `-o k=v` / `-x k` flags from arctern.toml — mirrors
+    // zrepl's `recv.properties.override` / `recv.properties.inherit`.
+    let mut args = RecvArgs::new(header.target_dataset.clone())
         .unmounted()
         .resumable();
+    for key in &acl.recv.inherit_properties {
+        args = args.property_inherit(key);
+    }
+    for (k, v) in &acl.recv.override_properties {
+        args = args.property_override(k, v);
+    }
     let mut handle = zfs_recv(runner.as_ref(), &args)
         .await
         .map_err(|e| (ErrorCode::Zfs, format!("spawn zfs recv: {e}")))?;

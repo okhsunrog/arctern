@@ -114,6 +114,39 @@ mod tests {
     }
 
     #[test]
+    fn zrepl_tree_pattern_with_excludes_translates() {
+        // zrepl yaml: { "novafs/arch0<": true, "novafs/arch0": false,
+        //              "novafs/arch0/data": false }
+        // arctern toml: path="novafs/arch0", recursive=true,
+        //               exclude=["novafs/arch0", "novafs/arch0/data"]
+        // Net effect: every descendant of novafs/arch0 except the
+        // root itself and the data subtree.
+        let f = f(
+            "novafs/arch0",
+            true,
+            &["novafs/arch0", "novafs/arch0/data"],
+        );
+        let cands = vec![
+            "novafs",
+            "novafs/arch0",
+            "novafs/arch0/data",
+            "novafs/arch0/data/home",
+            "novafs/arch0/data/root",
+            "novafs/arch0/root",
+            "novafs/arch0/vm",
+            "novafs/arch0/docker",
+        ];
+        assert_eq!(
+            f.resolve(&cands),
+            vec![
+                "novafs/arch0/root",
+                "novafs/arch0/vm",
+                "novafs/arch0/docker",
+            ],
+        );
+    }
+
+    #[test]
     fn resolve_all_dedupes() {
         let f1 = f("tank/data", false, &[]);
         let f2 = f("tank", true, &[]);

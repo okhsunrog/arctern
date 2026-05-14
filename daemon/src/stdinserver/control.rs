@@ -411,6 +411,7 @@ mod tests {
             jobs: vec!["backup".into()],
             operations: vec!["control".into(), "recv".into()],
             root_fs: root_fs.map(str::to_string),
+            recv: Default::default(),
         }
     }
 

@@ -162,3 +162,18 @@ fingerprint = "SHA256:abc123..."
 jobs = ["push_to_home"]
 operations = ["control", "recv"]
 root_fs = "okdata/backups/laptop"
+
+# Per-client recv tuning. Maps zrepl's `recv.properties.inherit` and
+# `recv.properties.override` 1:1, applied as `zfs recv -x <key>` (force
+# inherit from parent) and `-o <k>=<v>` (force-set). The common pattern
+# below matches the "untrusted-receiver / canmount-off" sink:
+#
+#   recv:
+#     properties:
+#       inherit: ["mountpoint"]
+#       override: { "canmount": "off", "org.openzfs.systemd:ignore": "on" }
+#
+# becomes:
+[allowed_clients.recv]
+inherit_properties = ["mountpoint"]
+override_properties = { canmount = "off", "org.openzfs.systemd:ignore" = "on" }

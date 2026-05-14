@@ -65,6 +65,29 @@ pub struct AllowedClient {
     pub operations: Vec<String>,
     #[serde(default)]
     pub root_fs: Option<String>,
+    /// Per-client recv-side tuning. Empty defaults match the
+    /// historical hardcoded behaviour: unmounted, no property mutation
+    /// beyond the implicit `mountpoint=none` on placeholders.
+    #[serde(default)]
+    pub recv: RecvConfig,
+}
+
+/// Receiver-side `zfs recv` knobs for a given client. Maps zrepl's
+/// `recv.properties.inherit` / `recv.properties.override` 1:1, and
+/// translates to palimpsest's `RecvArgs::property_inherit` /
+/// `property_override` at recv time.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecvConfig {
+    /// Property keys passed to `zfs recv -x <key>`. The received
+    /// dataset will inherit each key from its parent on the receiver.
+    #[serde(default)]
+    pub inherit_properties: Vec<String>,
+    /// Property `k=v` pairs passed to `zfs recv -o <k>=<v>`. The
+    /// received dataset is forced to take each value, ignoring any
+    /// value in the send stream.
+    #[serde(default)]
+    pub override_properties: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

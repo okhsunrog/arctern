@@ -30,6 +30,10 @@ use crate::{auth, handlers};
         arctern_api::PeerSnapshotEntry,
         arctern_api::LogEvent,
         arctern_api::ConfigView,
+        arctern_api::PoolSummary,
+        arctern_api::PoolStatus,
+        arctern_api::ScanSummary,
+        arctern_api::ScrubRequest,
     )),
 )]
 struct ApiDoc;
@@ -52,6 +56,9 @@ fn openapi_router() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::peers::stream_peer_events))
         .routes(routes!(handlers::events::stream_events))
         .routes(routes!(handlers::config::get_config))
+        .routes(routes!(handlers::pools::list_pools))
+        .routes(routes!(handlers::pools::get_pool))
+        .routes(routes!(handlers::pools::pool_scrub))
 }
 
 pub fn openapi_spec() -> utoipa::openapi::OpenApi {

@@ -67,6 +67,85 @@ pub struct JobStatus {
     pub last_error: Option<String>,
 }
 
+/// One pool's slot in `GET /api/v1/pools`. Numeric fields are
+/// `zpool`-formatted strings (e.g. `"608G"`, `"1.48T"`) rather than
+/// raw bytes because that's what `zpool` emits and round-tripping
+/// through bytes risks rounding mismatches in the UI.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PoolSummary {
+    pub name: String,
+    /// `"ONLINE"`, `"DEGRADED"`, `"FAULTED"`, …
+    pub state: String,
+    /// Aggregate error count across all vdevs.
+    pub error_count: String,
+    pub alloc_space: String,
+    pub total_space: String,
+    /// Most recent scrub/resilver status if zpool reports one.
+    pub scan: Option<ScanSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ScanSummary {
+    /// `"SCRUB"`, `"RESILVER"`, `"NONE"`.
+    pub function: String,
+    /// `"SCANNING"`, `"FINISHED"`, `"CANCELED"`.
+    pub state: String,
+    pub start_time: Option<String>,
+    pub end_time: Option<String>,
+    pub to_examine: Option<String>,
+    pub examined: Option<String>,
+    pub errors: Option<String>,
+    pub pass_start: Option<String>,
+    pub scrub_pause: Option<String>,
+    pub issued: Option<String>,
+}
+
+/// `GET /api/v1/pools/{name}` — full status: scrub + recursive vdev tree.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PoolStatus {
+    pub name: String,
+    pub state: String,
+    pub error_count: String,
+    pub pool_guid: String,
+    pub txg: String,
+    pub scan: Option<ScanSummary>,
+    /// Tree of vdevs. Schema is opaque (`Vec<serde_json::Value>`) here
+    /// because the underlying `VdevNode` is recursive and utoipa can't
+    /// auto-inline it — see the comment on `VdevNode`. The wire format
+    /// is still a real `Vec<VdevNode>`.
+    #[schema(value_type = Vec<serde_json::Value>)]
+    pub vdevs: Vec<VdevNode>,
+}
+
+/// Recursive vdev tree as a flat list of trees. Wire-friendlier than
+/// palimpsest's map<name, VdevStatus> for UIs that want to render in
+/// declared order.
+///
+/// `ToSchema` is deliberately NOT derived — `children: Vec<VdevNode>`
+/// is recursive, and utoipa's schema generator infinite-recurses at
+/// `ApiDoc::openapi()` time when trying to inline the type. The wire
+/// format (serde_json) handles recursion natively.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VdevNode {
+    pub name: String,
+    pub vdev_type: String,
+    pub state: String,
+    pub alloc_space: String,
+    pub total_space: String,
+    pub read_errors: String,
+    pub write_errors: String,
+    pub checksum_errors: String,
+    pub path: Option<String>,
+    pub children: Vec<VdevNode>,
+}
+
+/// Body of `POST /api/v1/pools/{name}/scrub`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ScrubRequest {
+    /// `"start"`, `"pause"`, `"resume"`, or `"stop"`.
+    pub action: String,
+}
+
 /// Body of `GET /api/v1/config` — the on-disk TOML the daemon was
 /// started with, plus its absolute path. Read-only: there is no
 /// write-back endpoint, so this is a faithful echo of what's loaded,

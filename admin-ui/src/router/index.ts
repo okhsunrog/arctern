@@ -15,6 +15,16 @@ const router = createRouter({
       component: () => import('../views/SnapshotsView.vue'),
     },
     {
+      path: '/pools',
+      name: 'pools',
+      component: () => import('../views/PoolsView.vue'),
+    },
+    {
+      path: '/pools/:name',
+      name: 'pool-detail',
+      component: () => import('../views/PoolDetailView.vue'),
+    },
+    {
       path: '/config',
       name: 'config',
       component: () => import('../views/ConfigView.vue'),

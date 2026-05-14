@@ -2,7 +2,7 @@
 
 import type { Client, Options as Options2, TDataShape } from './client';
 import { client } from './client.gen';
-import type { CreateSnapshotData, CreateSnapshotErrors, CreateSnapshotResponses, DestroyPeerSnapshotData, DestroyPeerSnapshotErrors, DestroyPeerSnapshotResponses, DestroySnapshotData, DestroySnapshotErrors, DestroySnapshotResponses, GetConfigData, GetConfigErrors, GetConfigResponses, GetPeerJobData, GetPeerJobErrors, GetPeerJobResponses, ListDatasetsData, ListDatasetsErrors, ListDatasetsResponses, ListJobsData, ListJobsResponses, ListPeerJobsData, ListPeerJobsErrors, ListPeerJobsResponses, ListPeersData, ListPeerSnapshotsData, ListPeerSnapshotsErrors, ListPeerSnapshotsResponses, ListPeersResponses, ListRunsData, ListRunsResponses, ListSnapshotsData, ListSnapshotsErrors, ListSnapshotsResponses, StreamEventsData, StreamEventsResponses, StreamPeerEventsData, StreamPeerEventsErrors, StreamPeerEventsResponses, WakeupData, WakeupErrors, WakeupPeerJobData, WakeupPeerJobErrors, WakeupPeerJobResponses, WakeupResponses } from './types.gen';
+import type { CreateSnapshotData, CreateSnapshotErrors, CreateSnapshotResponses, DestroyPeerSnapshotData, DestroyPeerSnapshotErrors, DestroyPeerSnapshotResponses, DestroySnapshotData, DestroySnapshotErrors, DestroySnapshotResponses, GetConfigData, GetConfigErrors, GetConfigResponses, GetPeerJobData, GetPeerJobErrors, GetPeerJobResponses, GetPoolData, GetPoolErrors, GetPoolResponses, ListDatasetsData, ListDatasetsErrors, ListDatasetsResponses, ListJobsData, ListJobsResponses, ListPeerJobsData, ListPeerJobsErrors, ListPeerJobsResponses, ListPeersData, ListPeerSnapshotsData, ListPeerSnapshotsErrors, ListPeerSnapshotsResponses, ListPeersResponses, ListPoolsData, ListPoolsErrors, ListPoolsResponses, ListRunsData, ListRunsResponses, ListSnapshotsData, ListSnapshotsErrors, ListSnapshotsResponses, PoolScrubData, PoolScrubErrors, PoolScrubResponses, StreamEventsData, StreamEventsResponses, StreamPeerEventsData, StreamPeerEventsErrors, StreamPeerEventsResponses, WakeupData, WakeupErrors, WakeupPeerJobData, WakeupPeerJobErrors, WakeupPeerJobResponses, WakeupResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean> = Options2<TData, ThrowOnError> & {
     /**
@@ -87,3 +87,16 @@ export const wakeupPeerJob = <ThrowOnError extends boolean = false>(options: Opt
 export const listPeerSnapshots = <ThrowOnError extends boolean = false>(options: Options<ListPeerSnapshotsData, ThrowOnError>) => (options.client ?? client).get<ListPeerSnapshotsResponses, ListPeerSnapshotsErrors, ThrowOnError>({ url: '/api/v1/peers/{peer}/snapshots', ...options });
 
 export const destroyPeerSnapshot = <ThrowOnError extends boolean = false>(options: Options<DestroyPeerSnapshotData, ThrowOnError>) => (options.client ?? client).post<DestroyPeerSnapshotResponses, DestroyPeerSnapshotErrors, ThrowOnError>({ url: '/api/v1/peers/{peer}/snapshots/{name}/destroy', ...options });
+
+export const listPools = <ThrowOnError extends boolean = false>(options?: Options<ListPoolsData, ThrowOnError>) => (options?.client ?? client).get<ListPoolsResponses, ListPoolsErrors, ThrowOnError>({ url: '/api/v1/pools', ...options });
+
+export const getPool = <ThrowOnError extends boolean = false>(options: Options<GetPoolData, ThrowOnError>) => (options.client ?? client).get<GetPoolResponses, GetPoolErrors, ThrowOnError>({ url: '/api/v1/pools/{name}', ...options });
+
+export const poolScrub = <ThrowOnError extends boolean = false>(options: Options<PoolScrubData, ThrowOnError>) => (options.client ?? client).post<PoolScrubResponses, PoolScrubErrors, ThrowOnError>({
+    url: '/api/v1/pools/{name}/scrub',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});

@@ -767,6 +767,144 @@
           }
         }
       }
+    },
+    "/api/v1/pools": {
+      "get": {
+        "tags": [
+          "pools"
+        ],
+        "operationId": "list_pools",
+        "responses": {
+          "200": {
+            "description": "All imported pools with health + capacity",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PoolSummary"
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "zpool returned an error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/pools/{name}": {
+      "get": {
+        "tags": [
+          "pools"
+        ],
+        "operationId": "get_pool",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Pool name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Full status with vdev tree + scrub progress",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PoolStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No imported pool with that name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "zpool returned an error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/pools/{name}/scrub": {
+      "post": {
+        "tags": [
+          "pools"
+        ],
+        "operationId": "pool_scrub",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Pool name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScrubRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "zpool scrub accepted the action"
+          },
+          "400": {
+            "description": "Unknown action",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "zpool returned an error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1062,6 +1200,169 @@
           },
           "reachability": {
             "$ref": "#/components/schemas/PeerReachability"
+          }
+        }
+      },
+      "PoolStatus": {
+        "type": "object",
+        "description": "`GET /api/v1/pools/{name}` — full status: scrub + recursive vdev tree.",
+        "required": [
+          "name",
+          "state",
+          "error_count",
+          "pool_guid",
+          "txg",
+          "vdevs"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "error_count": {
+            "type": "string"
+          },
+          "pool_guid": {
+            "type": "string"
+          },
+          "txg": {
+            "type": "string"
+          },
+          "scan": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ScanSummary"
+              }
+            ]
+          },
+          "vdevs": {
+            "type": "array",
+            "items": {},
+            "description": "Tree of vdevs. Schema is opaque (`Vec<serde_json::Value>`) here\nbecause the underlying `VdevNode` is recursive and utoipa can't\nauto-inline it — see the comment on `VdevNode`. The wire format\nis still a real `Vec<VdevNode>`."
+          }
+        }
+      },
+      "PoolSummary": {
+        "type": "object",
+        "description": "One pool's slot in `GET /api/v1/pools`. Numeric fields are\n`zpool`-formatted strings (e.g. `\"608G\"`, `\"1.48T\"`) rather than\nraw bytes because that's what `zpool` emits and round-tripping\nthrough bytes risks rounding mismatches in the UI.",
+        "required": [
+          "name",
+          "state",
+          "error_count",
+          "alloc_space",
+          "total_space"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "description": "`\"ONLINE\"`, `\"DEGRADED\"`, `\"FAULTED\"`, …"
+          },
+          "error_count": {
+            "type": "string",
+            "description": "Aggregate error count across all vdevs."
+          },
+          "alloc_space": {
+            "type": "string"
+          },
+          "total_space": {
+            "type": "string"
+          },
+          "scan": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ScanSummary",
+                "description": "Most recent scrub/resilver status if zpool reports one."
+              }
+            ]
+          }
+        }
+      },
+      "ScanSummary": {
+        "type": "object",
+        "required": [
+          "function",
+          "state"
+        ],
+        "properties": {
+          "function": {
+            "type": "string",
+            "description": "`\"SCRUB\"`, `\"RESILVER\"`, `\"NONE\"`."
+          },
+          "state": {
+            "type": "string",
+            "description": "`\"SCANNING\"`, `\"FINISHED\"`, `\"CANCELED\"`."
+          },
+          "start_time": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "end_time": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "to_examine": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "examined": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "errors": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pass_start": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scrub_pause": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "issued": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "ScrubRequest": {
+        "type": "object",
+        "description": "Body of `POST /api/v1/pools/{name}/scrub`.",
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "`\"start\"`, `\"pause\"`, `\"resume\"`, or `\"stop\"`."
           }
         }
       }

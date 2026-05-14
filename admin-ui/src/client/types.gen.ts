@@ -147,6 +147,75 @@ export type PeerSummary = {
     reachability: PeerReachability;
 };
 
+/**
+ * `GET /api/v1/pools/{name}` — full status: scrub + recursive vdev tree.
+ */
+export type PoolStatus = {
+    name: string;
+    state: string;
+    error_count: string;
+    pool_guid: string;
+    txg: string;
+    scan?: null | ScanSummary;
+    /**
+     * Tree of vdevs. Schema is opaque (`Vec<serde_json::Value>`) here
+     * because the underlying `VdevNode` is recursive and utoipa can't
+     * auto-inline it — see the comment on `VdevNode`. The wire format
+     * is still a real `Vec<VdevNode>`.
+     */
+    vdevs: Array<unknown>;
+};
+
+/**
+ * One pool's slot in `GET /api/v1/pools`. Numeric fields are
+ * `zpool`-formatted strings (e.g. `"608G"`, `"1.48T"`) rather than
+ * raw bytes because that's what `zpool` emits and round-tripping
+ * through bytes risks rounding mismatches in the UI.
+ */
+export type PoolSummary = {
+    name: string;
+    /**
+     * `"ONLINE"`, `"DEGRADED"`, `"FAULTED"`, …
+     */
+    state: string;
+    /**
+     * Aggregate error count across all vdevs.
+     */
+    error_count: string;
+    alloc_space: string;
+    total_space: string;
+    scan?: null | ScanSummary;
+};
+
+export type ScanSummary = {
+    /**
+     * `"SCRUB"`, `"RESILVER"`, `"NONE"`.
+     */
+    function: string;
+    /**
+     * `"SCANNING"`, `"FINISHED"`, `"CANCELED"`.
+     */
+    state: string;
+    start_time?: string | null;
+    end_time?: string | null;
+    to_examine?: string | null;
+    examined?: string | null;
+    errors?: string | null;
+    pass_start?: string | null;
+    scrub_pause?: string | null;
+    issued?: string | null;
+};
+
+/**
+ * Body of `POST /api/v1/pools/{name}/scrub`.
+ */
+export type ScrubRequest = {
+    /**
+     * `"start"`, `"pause"`, `"resume"`, or `"stop"`.
+     */
+    action: string;
+};
+
 export type GetConfigData = {
     body?: never;
     path?: never;
@@ -648,3 +717,96 @@ export type DestroyPeerSnapshotResponses = {
 };
 
 export type DestroyPeerSnapshotResponse = DestroyPeerSnapshotResponses[keyof DestroyPeerSnapshotResponses];
+
+export type ListPoolsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/pools';
+};
+
+export type ListPoolsErrors = {
+    /**
+     * zpool returned an error
+     */
+    500: ApiErrorBody;
+};
+
+export type ListPoolsError = ListPoolsErrors[keyof ListPoolsErrors];
+
+export type ListPoolsResponses = {
+    /**
+     * All imported pools with health + capacity
+     */
+    200: Array<PoolSummary>;
+};
+
+export type ListPoolsResponse = ListPoolsResponses[keyof ListPoolsResponses];
+
+export type GetPoolData = {
+    body?: never;
+    path: {
+        /**
+         * Pool name
+         */
+        name: string;
+    };
+    query?: never;
+    url: '/api/v1/pools/{name}';
+};
+
+export type GetPoolErrors = {
+    /**
+     * No imported pool with that name
+     */
+    404: ApiErrorBody;
+    /**
+     * zpool returned an error
+     */
+    500: ApiErrorBody;
+};
+
+export type GetPoolError = GetPoolErrors[keyof GetPoolErrors];
+
+export type GetPoolResponses = {
+    /**
+     * Full status with vdev tree + scrub progress
+     */
+    200: PoolStatus;
+};
+
+export type GetPoolResponse = GetPoolResponses[keyof GetPoolResponses];
+
+export type PoolScrubData = {
+    body: ScrubRequest;
+    path: {
+        /**
+         * Pool name
+         */
+        name: string;
+    };
+    query?: never;
+    url: '/api/v1/pools/{name}/scrub';
+};
+
+export type PoolScrubErrors = {
+    /**
+     * Unknown action
+     */
+    400: ApiErrorBody;
+    /**
+     * zpool returned an error
+     */
+    500: ApiErrorBody;
+};
+
+export type PoolScrubError = PoolScrubErrors[keyof PoolScrubErrors];
+
+export type PoolScrubResponses = {
+    /**
+     * zpool scrub accepted the action
+     */
+    204: void;
+};
+
+export type PoolScrubResponse = PoolScrubResponses[keyof PoolScrubResponses];

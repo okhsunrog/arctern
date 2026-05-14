@@ -38,6 +38,12 @@ pub enum DispatchError {
     JobNotAllowed { identity: String, job: String },
     #[error("identity {identity:?} not allowed for operation {op:?}")]
     OpNotAllowed { identity: String, op: String },
+    #[error("identity {identity:?} authenticated with unexpected key fingerprint")]
+    FingerprintMismatch { identity: String },
+    #[error(
+        "identity {identity:?} requires SSH key fingerprint verification, but SSH_AUTH_INFO_0 is unavailable"
+    )]
+    MissingAuthInfo { identity: String },
 }
 
 /// Top-level entry. Loads config, parses argv + env, validates ACL,
@@ -58,7 +64,8 @@ pub async fn run_with(
     pool: Option<Arc<sqlx::SqlitePool>>,
 ) -> eyre::Result<()> {
     let original = std::env::var("SSH_ORIGINAL_COMMAND").unwrap_or_default();
-    let action = match decide(identity, &original, &config) {
+    let auth_info = std::env::var("SSH_AUTH_INFO_0").ok();
+    let action = match decide(identity, &original, auth_info.as_deref(), &config) {
         Ok(a) => a,
         Err(e) => {
             tracing::warn!(error = %e, identity, "stdinserver-dispatch refused");
@@ -102,6 +109,7 @@ pub async fn run_with(
 pub fn decide(
     identity: &str,
     original_command: &str,
+    auth_info: Option<&str>,
     config: &Config,
 ) -> Result<DispatchAction, DispatchError> {
     let parts: Vec<&str> = original_command.split_whitespace().collect();
@@ -115,6 +123,7 @@ pub fn decide(
     };
     let acl = lookup_identity(config, identity)
         .ok_or_else(|| DispatchError::UnknownIdentity(identity.to_string()))?;
+    verify_fingerprint(identity, acl, auth_info)?;
     if !acl.jobs.iter().any(|j| j == job) {
         return Err(DispatchError::JobNotAllowed {
             identity: identity.to_string(),
@@ -147,16 +156,47 @@ fn lookup_identity<'a>(config: &'a Config, identity: &str) -> Option<&'a Allowed
         .find(|c| c.identity == identity)
 }
 
+fn verify_fingerprint(
+    identity: &str,
+    acl: &AllowedClient,
+    auth_info: Option<&str>,
+) -> Result<(), DispatchError> {
+    let Some(expected) = acl.fingerprint.as_deref() else {
+        return Ok(());
+    };
+    let Some(auth_info) = auth_info else {
+        return Err(DispatchError::MissingAuthInfo {
+            identity: identity.to_string(),
+        });
+    };
+    if auth_info.split_whitespace().any(|part| part == expected) {
+        Ok(())
+    } else {
+        Err(DispatchError::FingerprintMismatch {
+            identity: identity.to_string(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use arctern_config::AllowedClient;
 
     fn cfg(identity: &str, jobs: &[&str], ops: &[&str]) -> Config {
+        cfg_with_fingerprint(identity, jobs, ops, None)
+    }
+
+    fn cfg_with_fingerprint(
+        identity: &str,
+        jobs: &[&str],
+        ops: &[&str],
+        fingerprint: Option<&str>,
+    ) -> Config {
         Config {
             allowed_clients: vec![AllowedClient {
                 identity: identity.into(),
-                fingerprint: None,
+                fingerprint: fingerprint.map(str::to_string),
                 jobs: jobs.iter().map(|s| (*s).to_string()).collect(),
                 operations: ops.iter().map(|s| (*s).to_string()).collect(),
                 root_fs: None,
@@ -169,7 +209,13 @@ mod tests {
     #[test]
     fn happy_path_control() {
         let c = cfg("laptop_nova", &["backup"], &["control", "recv"]);
-        let a = decide("laptop_nova", "arctern stdinserver backup control", &c).unwrap();
+        let a = decide(
+            "laptop_nova",
+            "arctern stdinserver backup control",
+            None,
+            &c,
+        )
+        .unwrap();
         assert_eq!(
             a,
             DispatchAction::Control {
@@ -184,6 +230,7 @@ mod tests {
         let a = decide(
             "laptop_nova",
             "arctern stdinserver backup recv extra args ignored",
+            None,
             &c,
         )
         .unwrap();
@@ -198,35 +245,95 @@ mod tests {
     #[test]
     fn malformed_command_rejected() {
         let c = cfg("laptop_nova", &["backup"], &["control"]);
-        let err = decide("laptop_nova", "ls -la", &c).unwrap_err();
+        let err = decide("laptop_nova", "ls -la", None, &c).unwrap_err();
         assert!(matches!(err, DispatchError::MalformedCommand(_)));
     }
 
     #[test]
     fn unknown_identity_rejected() {
         let c = cfg("laptop_nova", &["backup"], &["control"]);
-        let err = decide("intruder", "arctern stdinserver backup control", &c).unwrap_err();
+        let err = decide("intruder", "arctern stdinserver backup control", None, &c).unwrap_err();
         assert!(matches!(err, DispatchError::UnknownIdentity(_)));
     }
 
     #[test]
     fn job_not_in_acl_rejected() {
         let c = cfg("laptop_nova", &["backup"], &["control"]);
-        let err = decide("laptop_nova", "arctern stdinserver other_job control", &c).unwrap_err();
+        let err = decide(
+            "laptop_nova",
+            "arctern stdinserver other_job control",
+            None,
+            &c,
+        )
+        .unwrap_err();
         assert!(matches!(err, DispatchError::JobNotAllowed { .. }));
     }
 
     #[test]
     fn op_not_in_acl_rejected() {
         let c = cfg("laptop_nova", &["backup"], &["control"]);
-        let err = decide("laptop_nova", "arctern stdinserver backup recv", &c).unwrap_err();
+        let err = decide("laptop_nova", "arctern stdinserver backup recv", None, &c).unwrap_err();
         assert!(matches!(err, DispatchError::OpNotAllowed { .. }));
     }
 
     #[test]
     fn unsupported_op_with_acl_returns_unsupported() {
         let c = cfg("laptop_nova", &["backup"], &["control", "weird"]);
-        let a = decide("laptop_nova", "arctern stdinserver backup weird", &c).unwrap();
+        let a = decide("laptop_nova", "arctern stdinserver backup weird", None, &c).unwrap();
         assert!(matches!(a, DispatchAction::Unsupported { .. }));
+    }
+
+    #[test]
+    fn fingerprint_match_allows_dispatch() {
+        let c = cfg_with_fingerprint(
+            "laptop_nova",
+            &["backup"],
+            &["control"],
+            Some("SHA256:abc123"),
+        );
+        let a = decide(
+            "laptop_nova",
+            "arctern stdinserver backup control",
+            Some("publickey SHA256:abc123"),
+            &c,
+        )
+        .unwrap();
+        assert!(matches!(a, DispatchAction::Control { .. }));
+    }
+
+    #[test]
+    fn fingerprint_mismatch_rejected() {
+        let c = cfg_with_fingerprint(
+            "laptop_nova",
+            &["backup"],
+            &["control"],
+            Some("SHA256:abc123"),
+        );
+        let err = decide(
+            "laptop_nova",
+            "arctern stdinserver backup control",
+            Some("publickey SHA256:def456"),
+            &c,
+        )
+        .unwrap_err();
+        assert!(matches!(err, DispatchError::FingerprintMismatch { .. }));
+    }
+
+    #[test]
+    fn configured_fingerprint_requires_auth_info() {
+        let c = cfg_with_fingerprint(
+            "laptop_nova",
+            &["backup"],
+            &["control"],
+            Some("SHA256:abc123"),
+        );
+        let err = decide(
+            "laptop_nova",
+            "arctern stdinserver backup control",
+            None,
+            &c,
+        )
+        .unwrap_err();
+        assert!(matches!(err, DispatchError::MissingAuthInfo { .. }));
     }
 }

@@ -1242,8 +1242,9 @@
           },
           "vdevs": {
             "type": "array",
-            "items": {},
-            "description": "Tree of vdevs. Schema is opaque (`Vec<serde_json::Value>`) here\nbecause the underlying `VdevNode` is recursive and utoipa can't\nauto-inline it — see the comment on `VdevNode`. The wire format\nis still a real `Vec<VdevNode>`."
+            "items": {
+              "$ref": "#/components/schemas/VdevNode"
+            }
           }
         }
       },
@@ -1363,6 +1364,59 @@
           "action": {
             "type": "string",
             "description": "`\"start\"`, `\"pause\"`, `\"resume\"`, or `\"stop\"`."
+          }
+        }
+      },
+      "VdevNode": {
+        "type": "object",
+        "description": "Recursive vdev tree as a flat list of trees. Wire-friendlier than\npalimpsest's map<name, VdevStatus> for UIs that want to render in\ndeclared order.\n\n`children` carries the `#[schema(no_recursion)]` attribute so\nutoipa's auto-collector stops at the cycle and emits a `$ref` to\n`VdevNode` itself instead of inlining the type — without this\n`ApiDoc::openapi()` infinite-recurses and overflows the stack at\nstartup. See utoipa docs on recursive schemas.",
+        "required": [
+          "name",
+          "vdev_type",
+          "state",
+          "alloc_space",
+          "total_space",
+          "read_errors",
+          "write_errors",
+          "checksum_errors",
+          "children"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "vdev_type": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "alloc_space": {
+            "type": "string"
+          },
+          "total_space": {
+            "type": "string"
+          },
+          "read_errors": {
+            "type": "string"
+          },
+          "write_errors": {
+            "type": "string"
+          },
+          "checksum_errors": {
+            "type": "string"
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "children": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VdevNode"
+            }
           }
         }
       }

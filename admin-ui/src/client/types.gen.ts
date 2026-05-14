@@ -157,13 +157,7 @@ export type PoolStatus = {
     pool_guid: string;
     txg: string;
     scan?: null | ScanSummary;
-    /**
-     * Tree of vdevs. Schema is opaque (`Vec<serde_json::Value>`) here
-     * because the underlying `VdevNode` is recursive and utoipa can't
-     * auto-inline it — see the comment on `VdevNode`. The wire format
-     * is still a real `Vec<VdevNode>`.
-     */
-    vdevs: Array<unknown>;
+    vdevs: Array<VdevNode>;
 };
 
 /**
@@ -214,6 +208,30 @@ export type ScrubRequest = {
      * `"start"`, `"pause"`, `"resume"`, or `"stop"`.
      */
     action: string;
+};
+
+/**
+ * Recursive vdev tree as a flat list of trees. Wire-friendlier than
+ * palimpsest's map<name, VdevStatus> for UIs that want to render in
+ * declared order.
+ *
+ * `children` carries the `#[schema(no_recursion)]` attribute so
+ * utoipa's auto-collector stops at the cycle and emits a `$ref` to
+ * `VdevNode` itself instead of inlining the type — without this
+ * `ApiDoc::openapi()` infinite-recurses and overflows the stack at
+ * startup. See utoipa docs on recursive schemas.
+ */
+export type VdevNode = {
+    name: string;
+    vdev_type: string;
+    state: string;
+    alloc_space: string;
+    total_space: string;
+    read_errors: string;
+    write_errors: string;
+    checksum_errors: string;
+    path?: string | null;
+    children: Array<VdevNode>;
 };
 
 export type GetConfigData = {

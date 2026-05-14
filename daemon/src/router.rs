@@ -33,6 +33,7 @@ use crate::{auth, handlers};
         arctern_api::PoolSummary,
         arctern_api::PoolStatus,
         arctern_api::ScanSummary,
+        arctern_api::VdevNode,
         arctern_api::ScrubRequest,
     )),
 )]

@@ -9,7 +9,6 @@ import {
 } from '../utils/pool'
 import { formatRelative } from '../utils/format'
 import VdevTree from '../components/VdevTree.vue'
-import type { VdevNode } from '../types/pool'
 
 const route = useRoute()
 const name = computed(() => String(route.params.name))
@@ -17,7 +16,7 @@ const { pool, error, scrub } = usePool(name.value)
 
 // Top-level vdev capacity totals so the UI can show a real "X% used".
 const totals = computed(() => {
-  const vs = (pool.value?.vdevs as VdevNode[] | undefined) ?? []
+  const vs = pool.value?.vdevs ?? []
   let alloc = 0
   let total = 0
   for (const v of vs) {
@@ -152,7 +151,7 @@ function scrubProgressPercent(): number {
             >{{ pool.error_count }} aggregate errors</UBadge>
           </div>
         </template>
-        <VdevTree :vdevs="(pool.vdevs as VdevNode[])" />
+        <VdevTree :vdevs="pool.vdevs" />
       </UCard>
     </template>
   </div>

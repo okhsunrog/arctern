@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { VdevNode } from '../types/pool'
+import type { VdevNode } from '../client'
 import { poolStateColor } from '../utils/pool'
 
 defineProps<{ vdevs: VdevNode[]; depth?: number }>()

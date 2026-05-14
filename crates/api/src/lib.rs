@@ -109,11 +109,6 @@ pub struct PoolStatus {
     pub pool_guid: String,
     pub txg: String,
     pub scan: Option<ScanSummary>,
-    /// Tree of vdevs. Schema is opaque (`Vec<serde_json::Value>`) here
-    /// because the underlying `VdevNode` is recursive and utoipa can't
-    /// auto-inline it — see the comment on `VdevNode`. The wire format
-    /// is still a real `Vec<VdevNode>`.
-    #[schema(value_type = Vec<serde_json::Value>)]
     pub vdevs: Vec<VdevNode>,
 }
 
@@ -121,11 +116,12 @@ pub struct PoolStatus {
 /// palimpsest's map<name, VdevStatus> for UIs that want to render in
 /// declared order.
 ///
-/// `ToSchema` is deliberately NOT derived — `children: Vec<VdevNode>`
-/// is recursive, and utoipa's schema generator infinite-recurses at
-/// `ApiDoc::openapi()` time when trying to inline the type. The wire
-/// format (serde_json) handles recursion natively.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `children` carries the `#[schema(no_recursion)]` attribute so
+/// utoipa's auto-collector stops at the cycle and emits a `$ref` to
+/// `VdevNode` itself instead of inlining the type — without this
+/// `ApiDoc::openapi()` infinite-recurses and overflows the stack at
+/// startup. See utoipa docs on recursive schemas.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct VdevNode {
     pub name: String,
     pub vdev_type: String,
@@ -136,6 +132,7 @@ pub struct VdevNode {
     pub write_errors: String,
     pub checksum_errors: String,
     pub path: Option<String>,
+    #[schema(no_recursion)]
     pub children: Vec<VdevNode>,
 }
 

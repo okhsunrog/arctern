@@ -265,6 +265,16 @@ export type ScrubRequest = {
 };
 
 /**
+ * One hold entry returned by
+ * `GET /api/v1/datasets/{name}/snapshots/{snapshot}/holds`.
+ * `timestamp` is unix seconds.
+ */
+export type SnapshotHold = {
+    tag: string;
+    timestamp: number;
+};
+
+/**
  * Recursive vdev tree as a flat list of trees. Wire-friendlier than
  * palimpsest's map<name, VdevStatus> for UIs that want to render in
  * declared order.
@@ -458,6 +468,44 @@ export type DestroySnapshotResponses = {
 };
 
 export type DestroySnapshotResponse = DestroySnapshotResponses[keyof DestroySnapshotResponses];
+
+export type ListHoldsData = {
+    body?: never;
+    path: {
+        /**
+         * Parent dataset (URL-encode `/` as %2F)
+         */
+        name: string;
+        /**
+         * Snapshot tag (the part after `@`)
+         */
+        snapshot: string;
+    };
+    query?: never;
+    url: '/api/v1/datasets/{name}/snapshots/{snapshot}/holds';
+};
+
+export type ListHoldsErrors = {
+    /**
+     * Snapshot not found
+     */
+    404: ApiErrorBody;
+    /**
+     * ZFS returned an error
+     */
+    500: ApiErrorBody;
+};
+
+export type ListHoldsError = ListHoldsErrors[keyof ListHoldsErrors];
+
+export type ListHoldsResponses = {
+    /**
+     * Holds on the snapshot, oldest first
+     */
+    200: Array<SnapshotHold>;
+};
+
+export type ListHoldsResponse = ListHoldsResponses[keyof ListHoldsResponses];
 
 export type StreamEventsData = {
     body?: never;

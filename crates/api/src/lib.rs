@@ -143,6 +143,15 @@ pub struct ScrubRequest {
     pub action: String,
 }
 
+/// One hold entry returned by
+/// `GET /api/v1/datasets/{name}/snapshots/{snapshot}/holds`.
+/// `timestamp` is unix seconds.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SnapshotHold {
+    pub tag: String,
+    pub timestamp: u64,
+}
+
 /// `GET /api/v1/system/arc` — a typed echo of the kernel's
 /// `/proc/spl/kstat/zfs/arcstats`, plus a precomputed hit_ratio
 /// (NaN encoded as `null` for empty caches). Fields mirror the

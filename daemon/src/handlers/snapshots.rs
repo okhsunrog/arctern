@@ -1,6 +1,6 @@
 //! `/api/v1/datasets/{name}/snapshots` — list + create + destroy.
 
-use arctern_api::{ApiErrorBody, CreateSnapshotRequest, DatasetSummary};
+use arctern_api::{ApiErrorBody, CreateSnapshotRequest, DatasetSummary, SnapshotHold};
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -135,4 +135,39 @@ pub async fn destroy_snapshot(
     let full = format!("{name}@{snapshot}");
     palimpsest::dataset::destroy(state.runner.as_ref(), &full, &DestroyOptions::default()).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `zfs holds <snapshot>` — list user holds blocking destroy. Empty
+/// vec means the snapshot is destroy-eligible (as far as holds are
+/// concerned; sub-clones still block independently).
+#[utoipa::path(
+    get,
+    path = "/api/v1/datasets/{name}/snapshots/{snapshot}/holds",
+    tag = "snapshots",
+    params(
+        ("name" = String, Path, description = "Parent dataset (URL-encode `/` as %2F)"),
+        ("snapshot" = String, Path, description = "Snapshot tag (the part after `@`)"),
+    ),
+    responses(
+        (status = 200, description = "Holds on the snapshot, oldest first",
+         body = Vec<SnapshotHold>),
+        (status = 404, description = "Snapshot not found", body = ApiErrorBody),
+        (status = 500, description = "ZFS returned an error", body = ApiErrorBody),
+    ),
+)]
+pub async fn list_holds(
+    State(state): State<AppState>,
+    Path((name, snapshot)): Path<(String, String)>,
+) -> Result<Json<Vec<SnapshotHold>>, ApiError> {
+    let full = format!("{name}@{snapshot}");
+    let holds = palimpsest::hold::list_holds(state.runner.as_ref(), &full).await?;
+    let mut out: Vec<SnapshotHold> = holds
+        .into_iter()
+        .map(|h| SnapshotHold {
+            tag: h.tag,
+            timestamp: h.timestamp,
+        })
+        .collect();
+    out.sort_by_key(|h| h.timestamp);
+    Ok(Json(out))
 }

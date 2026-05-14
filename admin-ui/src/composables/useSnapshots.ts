@@ -1,6 +1,6 @@
 import { onUnmounted, ref } from 'vue'
-import { destroySnapshot, listSnapshots } from '../client'
-import type { DatasetSummary } from '../client'
+import { destroySnapshot, listHolds, listSnapshots } from '../client'
+import type { DatasetSummary, SnapshotHold } from '../client'
 
 export function useSnapshots() {
   const dataset = ref<string>('')
@@ -36,16 +36,54 @@ export function useSnapshots() {
     loading.value = false
   }
 
-  async function destroy(snapshotName: string) {
+  // Lazy hold cache: snapshot name → list of holds. Filled on demand
+  // when the user clicks a row's holds button. Null means "not yet
+  // fetched"; empty array means "fetched, no holds".
+  const holdsCache = ref<Map<string, SnapshotHold[]>>(new Map())
+
+  function splitName(snapshotName: string): { ds: string; tag: string } | null {
     const at = snapshotName.indexOf('@')
-    if (at < 0) {
+    if (at < 0) return null
+    return { ds: snapshotName.slice(0, at), tag: snapshotName.slice(at + 1) }
+  }
+
+  async function loadHolds(snapshotName: string) {
+    const parts = splitName(snapshotName)
+    if (!parts) return
+    const r = await listHolds({
+      path: { name: parts.ds, snapshot: parts.tag },
+    })
+    if (r.error) {
+      setError(r.error)
+      return
+    }
+    holdsCache.value.set(snapshotName, r.data ?? [])
+  }
+
+  async function destroy(snapshotName: string) {
+    const parts = splitName(snapshotName)
+    if (!parts) {
       setError(`malformed snapshot name: ${snapshotName}`)
       return
     }
-    const ds = snapshotName.slice(0, at)
-    const tag = snapshotName.slice(at + 1)
-    const r = await destroySnapshot({ path: { name: ds, snapshot: tag } })
-    if (r.error) setError(r.error)
+    const r = await destroySnapshot({
+      path: { name: parts.ds, snapshot: parts.tag },
+    })
+    if (r.error) {
+      // Detect the held case so the UI can surface the holds inline
+      // instead of just dumping the daemon's error string.
+      const body = r.error as { error?: string; message?: string } | null
+      if (body?.error === 'snapshot_held') {
+        await loadHolds(snapshotName)
+        const holds = holdsCache.value.get(snapshotName) ?? []
+        const tagList = holds.map((h) => h.tag).join(', ') || 'unknown'
+        setError(
+          `Cannot destroy ${snapshotName}: held by ${holds.length} tag(s) — ${tagList}. Run 'zfs release <tag>' to release.`,
+        )
+      } else {
+        setError(r.error)
+      }
+    }
     await refresh()
   }
 
@@ -56,5 +94,15 @@ export function useSnapshots() {
   }, 10_000)
   onUnmounted(() => clearInterval(handle))
 
-  return { dataset, prefix, snapshots, error, loading, refresh, destroy }
+  return {
+    dataset,
+    prefix,
+    snapshots,
+    error,
+    loading,
+    refresh,
+    destroy,
+    loadHolds,
+    holdsCache,
+  }
 }

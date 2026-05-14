@@ -37,6 +37,7 @@ use crate::{auth, handlers};
         arctern_api::ScrubRequest,
         arctern_api::ArcStats,
         arctern_api::ArcHistoryPoint,
+        arctern_api::SnapshotHold,
     )),
 )]
 struct ApiDoc;
@@ -47,6 +48,7 @@ fn openapi_router() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::snapshots::list_snapshots))
         .routes(routes!(handlers::snapshots::create_snapshot))
         .routes(routes!(handlers::snapshots::destroy_snapshot))
+        .routes(routes!(handlers::snapshots::list_holds))
         .routes(routes!(handlers::jobs::list_jobs))
         .routes(routes!(handlers::jobs::wakeup))
         .routes(routes!(handlers::jobs::list_runs))

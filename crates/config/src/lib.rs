@@ -17,9 +17,10 @@ pub mod schema;
 pub use grid::{GridParseError, GridSpec, KeepCount, RetentionInterval, SnapshotEntry};
 pub use prune::{PruneError, evaluate as evaluate_keep_rules};
 pub use schema::{
-    AllowedClient, Config, FilesystemFilter, JobConfig, KeepRule, PeerConfig, PruningConfig,
-    PushJobConfig, PushTarget, SendFlagsConfig, SnapJobConfig, SnapshotFilterConfig,
-    SnapshottingConfig,
+    AllowedClient, Config, Defaults, FilesystemFilter, JobConfig, KeepRule, PeerConfig,
+    PruneJobConfig, PruningConfig, PruningDefaults, PushJobConfig, PushTarget, RecvConfig,
+    SendFlagsConfig, SnapJobConfig, SnapshotFilterConfig, SnapshottingConfig,
+    SnapshottingDefaults,
 };
 
 #[derive(Debug, Error)]
@@ -46,15 +47,122 @@ pub fn load_from_path(path: &Path) -> Result<Config, ConfigError> {
         path: display.clone(),
         source,
     })?;
-    let cfg: Config = toml::from_str(&raw).map_err(|source| ConfigError::Parse {
+    let mut cfg: Config = toml::from_str(&raw).map_err(|source| ConfigError::Parse {
         path: display.clone(),
         source,
+    })?;
+    resolve_defaults(&mut cfg).map_err(|message| ConfigError::Validate {
+        path: display.clone(),
+        message,
     })?;
     validate(&cfg).map_err(|message| ConfigError::Validate {
         path: display,
         message,
     })?;
     Ok(cfg)
+}
+
+/// Fill missing per-job fields from `[defaults]`. Mutates in place;
+/// downstream code can rely on `SnapJobConfig::snapshotting()` etc.
+/// not panicking. Returns the offending `jobs[N].<field>` path when a
+/// required field is missing from both the job and the defaults.
+pub fn resolve_defaults(cfg: &mut Config) -> Result<(), String> {
+    use schema::{KeepRule, PruningConfig, SnapshotFilterConfig};
+
+    let defaults_prefix = cfg.defaults.prefix.clone();
+    let defaults_snapshotting = cfg.defaults.snapshotting.clone();
+    let defaults_pruning = cfg.defaults.pruning.clone();
+
+    // Build pruning keep-rules from `[defaults.pruning]` + `[defaults]
+    // .prefix`. Returns `None` (without erroring) when defaults aren't
+    // available — empty `keep` is a valid "do nothing" prune so we
+    // leave it alone rather than rejecting the config.
+    let build_default_pruning = || -> Option<PruningConfig> {
+        let pd = defaults_pruning.as_ref()?;
+        let prefix = defaults_prefix.clone()?;
+        let mut keep: Vec<KeepRule> = vec![KeepRule::Grid {
+            grid: pd.grid.clone(),
+            regex: format!("^{}.*", regex::escape(&prefix)),
+        }];
+        if pd.protect_non_prefixed {
+            keep.push(KeepRule::Regex {
+                regex: format!("^{}.*", regex::escape(&prefix)),
+                negate: true,
+            });
+        }
+        Some(PruningConfig { keep })
+    };
+
+    for (i, job) in cfg.jobs.iter_mut().enumerate() {
+        match job {
+            JobConfig::Snap(s) => {
+                // Fill any field the per-job [jobs.snapshotting] left
+                // blank from defaults. Empty fields propagate as
+                // errors (a snap job needs both an interval and a
+                // prefix to operate).
+                if s.snapshotting.interval == std::time::Duration::ZERO {
+                    s.snapshotting.interval = defaults_snapshotting
+                        .as_ref()
+                        .map(|d| d.interval)
+                        .ok_or_else(|| {
+                            format!(
+                                "jobs[{i}].snapshotting.interval: missing — set [jobs.snapshotting].interval or [defaults.snapshotting]"
+                            )
+                        })?;
+                }
+                if s.snapshotting.prefix.is_empty() {
+                    s.snapshotting.prefix = defaults_prefix.clone().ok_or_else(|| {
+                        format!(
+                            "jobs[{i}].snapshotting.prefix: missing — set [defaults.prefix] or [jobs.snapshotting].prefix"
+                        )
+                    })?;
+                }
+                if s.pruning.keep.is_empty()
+                    && let Some(pd) = build_default_pruning()
+                {
+                    s.pruning = pd;
+                }
+            }
+            JobConfig::Push(p) => {
+                // Resolve `peer = "x"` → `targets = ["x"]`. Reject
+                // both-given and neither-given as config errors.
+                match (p.peer.take(), p.targets.is_empty()) {
+                    (Some(single), true) => p.targets = vec![single],
+                    (None, false) => {}
+                    (Some(_), false) => {
+                        return Err(format!(
+                            "jobs[{i}]: `peer` and `targets` are mutually exclusive — use one or the other"
+                        ));
+                    }
+                    (None, true) => {
+                        return Err(format!(
+                            "jobs[{i}]: missing target peer — set `peer = \"...\"` or `targets = [\"...\"]`"
+                        ));
+                    }
+                }
+                if p.snapshot_filter.prefix.is_none()
+                    && p.snapshot_filter.regex.is_none()
+                    && let Some(prefix) = defaults_prefix.clone()
+                {
+                    p.snapshot_filter = SnapshotFilterConfig {
+                        prefix: Some(prefix),
+                        regex: None,
+                    };
+                }
+                // Don't error if filter still unset here — let
+                // validate_push surface the canonical "exactly one of
+                // prefix or regex required" message.
+            }
+            JobConfig::Prune(p) => {
+                if p.pruning.keep.is_empty()
+                    && let Some(pd) = build_default_pruning()
+                {
+                    p.pruning = pd;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Semantic validation that serde cannot express. Returns a string with
@@ -70,6 +178,33 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
         match job {
             JobConfig::Snap(s) => validate_snap(i, s)?,
             JobConfig::Push(s) => validate_push(i, s)?,
+            JobConfig::Prune(s) => validate_prune(i, s)?,
+        }
+    }
+    Ok(())
+}
+
+fn validate_prune(idx: usize, s: &PruneJobConfig) -> Result<(), String> {
+    if s.name.is_empty() {
+        return Err(format!("jobs[{idx}].name: must not be empty"));
+    }
+    // Reuse the same filesystem-filter shape as snap/push.
+    for (fi, f) in s.filesystems.iter().enumerate() {
+        if !f.exclude.is_empty() && !f.recursive {
+            return Err(format!(
+                "jobs[{idx}].filesystems[{fi}]: exclude requires recursive = true"
+            ));
+        }
+    }
+    for (ki, k) in s.pruning().keep.iter().enumerate() {
+        let pat = match k {
+            KeepRule::Grid { regex, .. } => regex,
+            KeepRule::Regex { regex, .. } => regex,
+        };
+        if let Err(e) = regex::Regex::new(pat) {
+            return Err(format!(
+                "jobs[{idx}].pruning.keep[{ki}].regex: {pat:?}: {e}"
+            ));
         }
     }
     Ok(())
@@ -111,7 +246,8 @@ fn validate_push(idx: usize, s: &PushJobConfig) -> Result<(), String> {
         }
     }
     // Snapshot filter: exactly one of prefix xor regex.
-    match (&s.snapshot_filter.prefix, &s.snapshot_filter.regex) {
+    let snapshot_filter = s.snapshot_filter();
+    match (&snapshot_filter.prefix, &snapshot_filter.regex) {
         (None, None) => {
             return Err(format!(
                 "jobs[{idx}].snapshot_filter: exactly one of prefix or regex required"
@@ -158,7 +294,7 @@ fn validate_snap(idx: usize, s: &SnapJobConfig) -> Result<(), String> {
         }
     }
     // Compile every regex once to surface bad patterns early.
-    for (ki, k) in s.pruning.keep.iter().enumerate() {
+    for (ki, k) in s.pruning().keep.iter().enumerate() {
         let pat = match k {
             KeepRule::Grid { regex, .. } => regex,
             KeepRule::Regex { regex, .. } => regex,
@@ -177,11 +313,15 @@ mod tests {
     use super::*;
 
     fn parse(s: &str) -> Result<Config, ConfigError> {
-        let cfg: Config =
+        let mut cfg: Config =
             toml::from_str(s).map_err(|source| ConfigError::Parse {
                 path: "<test>".into(),
                 source,
             })?;
+        resolve_defaults(&mut cfg).map_err(|message| ConfigError::Validate {
+            path: "<test>".into(),
+            message,
+        })?;
         validate(&cfg).map_err(|message| ConfigError::Validate {
             path: "<test>".into(),
             message,
@@ -196,7 +336,6 @@ name = "x"
 [[jobs.filesystems]]
 path = "tank"
 [jobs.snapshotting]
-type = "periodic"
 interval = "1s"
 prefix = "x_"
 [jobs.pruning]
@@ -224,7 +363,6 @@ name = "x"
 [[jobs.filesystems]]
 path = "tank"
 [jobs.snapshotting]
-type = "periodic"
 interval = "1s"
 prefix = "x_"
 [jobs.pruning]
@@ -236,7 +374,6 @@ name = "x"
 [[jobs.filesystems]]
 path = "tank"
 [jobs.snapshotting]
-type = "periodic"
 interval = "1s"
 prefix = "x_"
 [jobs.pruning]
@@ -272,7 +409,6 @@ name = "x"
 path = "tank"
 exclude = ["tank/foo"]
 [jobs.snapshotting]
-type = "periodic"
 interval = "1s"
 prefix = "x_"
 [jobs.pruning]
@@ -292,7 +428,6 @@ path = "tank/data"
 recursive = true
 exclude = ["other/foo"]
 [jobs.snapshotting]
-type = "periodic"
 interval = "1s"
 prefix = "x_"
 [jobs.pruning]
@@ -310,7 +445,6 @@ name = "x"
 [[jobs.filesystems]]
 path = "tank"
 [jobs.snapshotting]
-type = "periodic"
 interval = "1s"
 prefix = "x_"
 [[jobs.pruning.keep]]
@@ -332,7 +466,6 @@ name = "x"
 [[jobs.filesystems]]
 path = "tank"
 [jobs.snapshotting]
-type = "periodic"
 interval = "1s"
 prefix = "x_"
 [[jobs.pruning.keep]]
@@ -372,9 +505,11 @@ prefix = "zrepl_"
             panic!("expected Push")
         };
         assert_eq!(p.name, "push_to_server");
-        assert_eq!(p.peer, "home");
+        // Legacy `peer = "home"` is normalised into targets at load.
+        assert!(p.peer.is_none());
+        assert_eq!(p.targets, vec!["home".to_string()]);
         assert_eq!(p.target.root_fs, "okdata/backups/laptop");
-        assert_eq!(p.snapshot_filter.prefix.as_deref(), Some("zrepl_"));
+        assert_eq!(p.snapshot_filter().prefix.as_deref(), Some("zrepl_"));
     }
 
     #[test]
@@ -412,6 +547,240 @@ prefix = "x_"
         };
         assert!(!p.send.encrypted);
         assert!(p.send.embedded_data);
+    }
+
+    #[test]
+    fn defaults_fill_in_snap_snapshotting_and_pruning() {
+        let s = r#"
+[defaults]
+prefix = "zrepl_"
+[defaults.snapshotting]
+interval = "15m"
+[defaults.pruning]
+grid = "4x15m | 24x1h"
+
+[[jobs]]
+type = "snap"
+name = "minimal"
+[[jobs.filesystems]]
+path = "tank"
+"#;
+        let c = parse(s).unwrap();
+        let JobConfig::Snap(snap) = &c.jobs[0] else {
+            panic!("expected Snap")
+        };
+        let snap_cfg = snap.snapshotting();
+        assert_eq!(snap_cfg.interval, std::time::Duration::from_secs(15 * 60));
+        assert_eq!(snap_cfg.prefix, "zrepl_");
+        // Default protect_non_prefixed = true → two rules.
+        let keep = &snap.pruning().keep;
+        assert_eq!(keep.len(), 2);
+        matches!(keep[0], KeepRule::Grid { .. });
+        matches!(keep[1], KeepRule::Regex { negate: true, .. });
+    }
+
+    #[test]
+    fn defaults_fill_in_push_snapshot_filter() {
+        let s = r#"
+[defaults]
+prefix = "zrepl_"
+
+[[peers]]
+name = "home"
+ssh_target = "user@host"
+
+[[jobs]]
+type = "push"
+name = "p"
+peer = "home"
+interval = "5m"
+[[jobs.filesystems]]
+path = "tank/data"
+[jobs.target]
+root_fs = "okdata/backups/laptop"
+"#;
+        let c = parse(s).unwrap();
+        let JobConfig::Push(p) = &c.jobs[0] else {
+            panic!("expected Push")
+        };
+        assert_eq!(p.snapshot_filter().prefix.as_deref(), Some("zrepl_"));
+    }
+
+    #[test]
+    fn defaults_protect_non_prefixed_false_drops_negate_rule() {
+        let s = r#"
+[defaults]
+prefix = "zrepl_"
+[defaults.snapshotting]
+interval = "15m"
+[defaults.pruning]
+grid = "4x15m"
+protect_non_prefixed = false
+
+[[jobs]]
+type = "snap"
+name = "x"
+[[jobs.filesystems]]
+path = "tank"
+"#;
+        let c = parse(s).unwrap();
+        let JobConfig::Snap(snap) = &c.jobs[0] else {
+            panic!("expected Snap")
+        };
+        assert_eq!(snap.pruning().keep.len(), 1);
+    }
+
+    #[test]
+    fn filesystems_map_form_translates_to_filters() {
+        let s = r#"
+[defaults]
+prefix = "zrepl_"
+[defaults.snapshotting]
+interval = "15m"
+[defaults.pruning]
+grid = "4x15m"
+
+[[jobs]]
+type = "snap"
+name = "arch0"
+filesystems = { "novafs/arch0/" = true, "novafs/arch0" = false, "novafs/arch0/data" = false }
+"#;
+        let c = parse(s).unwrap();
+        let JobConfig::Snap(snap) = &c.jobs[0] else {
+            panic!()
+        };
+        assert_eq!(snap.filesystems.len(), 1);
+        let f = &snap.filesystems[0];
+        assert_eq!(f.path, "novafs/arch0");
+        assert!(f.recursive);
+        assert!(f.exclude.contains(&"novafs/arch0".to_string()));
+        assert!(f.exclude.contains(&"novafs/arch0/data".to_string()));
+    }
+
+    #[test]
+    fn filesystems_map_bare_key_is_exact_match() {
+        let s = r#"
+[defaults]
+prefix = "zrepl_"
+[defaults.snapshotting]
+interval = "15m"
+[defaults.pruning]
+grid = "4x15m"
+
+[[jobs]]
+type = "snap"
+name = "x"
+filesystems = { "tank/data/home" = true }
+"#;
+        let c = parse(s).unwrap();
+        let JobConfig::Snap(snap) = &c.jobs[0] else {
+            panic!()
+        };
+        assert_eq!(snap.filesystems.len(), 1);
+        let f = &snap.filesystems[0];
+        assert_eq!(f.path, "tank/data/home");
+        assert!(!f.recursive);
+        assert!(f.exclude.is_empty());
+    }
+
+    #[test]
+    fn filesystems_map_orphan_exclude_errors() {
+        let s = r#"
+[defaults]
+prefix = "zrepl_"
+[defaults.snapshotting]
+interval = "15m"
+[defaults.pruning]
+grid = "4x15m"
+
+[[jobs]]
+type = "snap"
+name = "x"
+filesystems = { "tank/data" = true, "tank/other" = false }
+"#;
+        let err = parse(s).unwrap_err();
+        assert!(err.to_string().contains("tank/other"), "got: {err}");
+    }
+
+    #[test]
+    fn push_multi_target_parses() {
+        let s = r#"
+[defaults]
+prefix = "zrepl_"
+
+[[peers]]
+name = "home"
+ssh_target = "u@h1"
+[[peers]]
+name = "remote"
+ssh_target = "u@h2"
+
+[[jobs]]
+type = "push"
+name = "p"
+targets = ["home", "remote"]
+interval = "5m"
+filesystems = { "tank/data" = true }
+[jobs.target]
+root_fs = "okdata/backups/laptop"
+"#;
+        let c = parse(s).unwrap();
+        let JobConfig::Push(p) = &c.jobs[0] else {
+            panic!()
+        };
+        assert_eq!(p.targets, vec!["home".to_string(), "remote".to_string()]);
+    }
+
+    #[test]
+    fn push_peer_and_targets_both_given_rejected() {
+        let s = r#"
+[defaults]
+prefix = "zrepl_"
+
+[[jobs]]
+type = "push"
+name = "p"
+peer = "home"
+targets = ["home"]
+interval = "5m"
+filesystems = { "tank/data" = true }
+[jobs.target]
+root_fs = "okdata/backups/laptop"
+"#;
+        let err = parse(s).unwrap_err();
+        assert!(err.to_string().contains("mutually exclusive"), "got: {err}");
+    }
+
+    #[test]
+    fn push_neither_peer_nor_targets_rejected() {
+        let s = r#"
+[defaults]
+prefix = "zrepl_"
+
+[[jobs]]
+type = "push"
+name = "p"
+interval = "5m"
+filesystems = { "tank/data" = true }
+[jobs.target]
+root_fs = "okdata/backups/laptop"
+"#;
+        let err = parse(s).unwrap_err();
+        assert!(err.to_string().contains("target peer"), "got: {err}");
+    }
+
+    #[test]
+    fn missing_snapshotting_without_defaults_errors() {
+        let s = r#"
+[[jobs]]
+type = "snap"
+name = "x"
+[[jobs.filesystems]]
+path = "tank"
+"#;
+        let err = parse(s).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("snapshotting"), "got: {msg}");
     }
 
     #[test]
@@ -552,7 +921,6 @@ name = "x"
 [[jobs.filesystems]]
 path = "tank"
 [jobs.snapshotting]
-type = "periodic"
 interval = "4 fortnights"
 prefix = "x_"
 [jobs.pruning]

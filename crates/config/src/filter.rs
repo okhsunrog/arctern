@@ -6,7 +6,98 @@
 //! act on. Doing the matching in-process means we never have to issue
 //! one `zfs list` per filter.
 
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde::Deserialize;
+
 use crate::schema::FilesystemFilter;
+
+/// `filesystems` accepts two shapes:
+///
+/// 1. The original array of tables (`[[jobs.filesystems]] path=...`),
+///    which deserializes straight into `Vec<FilesystemFilter>`.
+/// 2. A zrepl-style inline map:
+///
+///    ```toml
+///    filesystems = {
+///      "novafs/arch0/" = true,
+///      "novafs/arch0" = false,
+///      "novafs/arch0/data" = false,
+///    }
+///    ```
+///
+///    Keys ending in `/` mean "include this subtree" (recursive=true).
+///    Bare keys mean "include this exact dataset" (recursive=false).
+///    `false` values are excludes for whichever `true` subtree they sit
+///    under. An exclude with no matching parent is a config error.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum FilesystemsInput {
+    List(Vec<FilesystemFilter>),
+    Map(BTreeMap<String, bool>),
+}
+
+pub fn deserialize_filesystems<'de, D>(d: D) -> Result<Vec<FilesystemFilter>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let input = FilesystemsInput::deserialize(d)?;
+    match input {
+        FilesystemsInput::List(v) => Ok(v),
+        FilesystemsInput::Map(m) => map_to_filters(m).map_err(serde::de::Error::custom),
+    }
+}
+
+fn map_to_filters(m: BTreeMap<String, bool>) -> Result<Vec<FilesystemFilter>, String> {
+    // (resolved-path, recursive)
+    let mut trues: Vec<(String, bool)> = Vec::new();
+    let mut falses: Vec<String> = Vec::new();
+    for (k, v) in m {
+        if v {
+            if let Some(stripped) = k.strip_suffix('/') {
+                if stripped.is_empty() {
+                    return Err(
+                        "filesystems: empty key with `/` suffix is not a valid path".to_string(),
+                    );
+                }
+                trues.push((stripped.to_string(), true));
+            } else {
+                trues.push((k, false));
+            }
+        } else {
+            // Trailing slash on a false is harmless; strip for matching.
+            let trimmed = k.trim_end_matches('/').to_string();
+            falses.push(trimmed);
+        }
+    }
+
+    let mut used: BTreeSet<String> = BTreeSet::new();
+    let mut out: Vec<FilesystemFilter> = Vec::new();
+    for (path, recursive) in &trues {
+        let mut exclude: Vec<String> = Vec::new();
+        if *recursive {
+            for f in &falses {
+                if f == path || f.starts_with(&format!("{path}/")) {
+                    exclude.push(f.clone());
+                    used.insert(f.clone());
+                }
+            }
+        }
+        out.push(FilesystemFilter {
+            path: path.clone(),
+            recursive: *recursive,
+            exclude,
+        });
+    }
+    for f in &falses {
+        if !used.contains(f) {
+            return Err(format!(
+                "filesystems: exclude {f:?} has no matching `\"<parent>/\" = true` to belong to"
+            ));
+        }
+    }
+    Ok(out)
+}
 
 impl FilesystemFilter {
     /// Returns the subset of `candidates` selected by this filter.

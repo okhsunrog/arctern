@@ -5,6 +5,7 @@
 //! Slice 003 introduces this; only `SnapJob` implements it. Future
 //! slices add push/pull/source/sink as siblings.
 
+pub mod prune;
 pub mod push;
 pub mod snap;
 

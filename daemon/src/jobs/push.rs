@@ -317,13 +317,16 @@ pub fn build_send_args(
     Some(args)
 }
 
-/// Naming conventions pinned in ARCHITECTURE.md.
-fn step_hold_tag(job_name: &str) -> String {
-    format!("arctern_step_J_{job_name}")
+/// Naming conventions pinned in ARCHITECTURE.md. Peer-namespaced so a
+/// multi-target push job tracks each receiver's cursor independently:
+/// peer A can be a week behind peer B and still catch up cleanly from
+/// its own bookmark instead of triggering a full resend.
+fn step_hold_tag(job_name: &str, peer: &str) -> String {
+    format!("arctern_step_J_{job_name}_P_{peer}")
 }
 
-fn cursor_bookmark_name(dataset: &str, job_name: &str) -> String {
-    format!("{dataset}#arctern_cursor_J_{job_name}")
+fn cursor_bookmark_name(dataset: &str, job_name: &str, peer: &str) -> String {
+    format!("{dataset}#arctern_cursor_J_{job_name}_P_{peer}")
 }
 
 /// Plan one filesystem cycle against the receiver. Pure planner glue
@@ -488,6 +491,7 @@ async fn run_one_filesystem(
     runner: &dyn CommandRunner,
     peer: &PeerLink,
     job_name: &str,
+    peer_name: &str,
     sender_dataset: &str,
     target_dataset: &str,
     plan: &SnapshotPlan,
@@ -501,7 +505,7 @@ async fn run_one_filesystem(
         SnapshotPlan::Resume { decoded, .. } => Some(decoded.to_name.clone()),
         SnapshotPlan::Nothing => None,
     };
-    let tag = step_hold_tag(job_name);
+    let tag = step_hold_tag(job_name, peer_name);
     if let Some(snap) = &to_snap_name {
         // hold is idempotent at the palimpsest layer (no-op when the
         // tag already exists for that snapshot).
@@ -518,7 +522,7 @@ async fn run_one_filesystem(
     .await?;
 
     if let Some(snap) = &to_snap_name {
-        let cursor = cursor_bookmark_name(sender_dataset, job_name);
+        let cursor = cursor_bookmark_name(sender_dataset, job_name, peer_name);
         if let Err(e) = palimpsest::bookmark::create(runner, snap, &cursor).await {
             warn!(snapshot = %snap, bookmark = %cursor, error = %e, "create cursor bookmark");
         }
@@ -544,7 +548,7 @@ pub struct PushJob {
 
 impl PushJob {
     pub fn new(config: PushJobConfig, peers: Option<PeersState>) -> Result<Self, regex::Error> {
-        let filter = CompiledFilter::from_config(&config.snapshot_filter)?;
+        let filter = CompiledFilter::from_config(config.snapshot_filter())?;
         Ok(Self {
             config,
             filter,
@@ -554,10 +558,20 @@ impl PushJob {
         })
     }
 
-    async fn current_link(&self) -> Option<Arc<PeerLink>> {
+    /// Walk `config.targets` in order, return the first peer whose
+    /// reachability state has produced a live `PeerLink`. None of them
+    /// connected ⇒ `None` and the cycle errors out.
+    async fn current_link(&self) -> Option<(String, Arc<PeerLink>)> {
         let peers = self.peers.as_ref()?;
         let g = peers.read().await;
-        g.get(&self.config.peer).and_then(|e| e.link.clone())
+        for name in &self.config.targets {
+            if let Some(entry) = g.get(name)
+                && let Some(link) = entry.link.clone()
+            {
+                return Some((name.clone(), link));
+            }
+        }
+        None
     }
 
     fn record_cycle(&self, last_error: Option<String>, interval: StdDuration) {
@@ -591,12 +605,13 @@ impl PushJob {
     }
 
     async fn run_cycle(&self, ctx: &JobContext, cancel: &CancellationToken) -> Result<(), String> {
-        let Some(peer) = self.current_link().await else {
+        let Some((peer_name, peer)) = self.current_link().await else {
             return Err(format!(
-                "push job {:?}: peer {:?} not currently connected",
-                self.config.name, self.config.peer
+                "push job {:?}: none of targets {:?} currently connected",
+                self.config.name, self.config.targets
             ));
         };
+        tracing::info!(peer = %peer_name, "push: cycle using target");
         let runner = ctx.runner.as_ref();
         let mut errors: Vec<String> = Vec::new();
         let sender_paths = self.expand_filesystems(runner).await?;
@@ -673,6 +688,7 @@ impl PushJob {
                 runner,
                 peer.as_ref(),
                 &self.config.name,
+                &peer_name,
                 sender_path,
                 &target,
                 &plan,
@@ -867,15 +883,15 @@ mod tests {
     }
 
     #[test]
-    fn step_hold_tag_format_matches_architecture_doc() {
-        assert_eq!(step_hold_tag("backup"), "arctern_step_J_backup");
+    fn step_hold_tag_includes_peer_for_multi_target_isolation() {
+        assert_eq!(step_hold_tag("backup", "home"), "arctern_step_J_backup_P_home");
     }
 
     #[test]
-    fn cursor_bookmark_name_format_matches_architecture_doc() {
+    fn cursor_bookmark_name_includes_peer_for_multi_target_isolation() {
         assert_eq!(
-            cursor_bookmark_name("tank/data", "backup"),
-            "tank/data#arctern_cursor_J_backup"
+            cursor_bookmark_name("tank/data", "backup", "home"),
+            "tank/data#arctern_cursor_J_backup_P_home"
         );
     }
 

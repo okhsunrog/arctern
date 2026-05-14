@@ -18,6 +18,11 @@ pub struct Config {
     /// `/var/lib/arctern` (see daemon main).
     #[serde(default)]
     pub state_dir: Option<PathBuf>,
+    /// Host-wide defaults applied to every job at config-load time. Lets
+    /// an operator write 5-line jobs that say only what differs from
+    /// the standard zrepl idiom.
+    #[serde(default)]
+    pub defaults: Defaults,
     #[serde(default)]
     pub jobs: Vec<JobConfig>,
     /// Receiver-side ACL for the SSH transport. `arctern stdinserver-
@@ -31,6 +36,48 @@ pub struct Config {
     /// inline. Empty on a server-only host.
     #[serde(default, rename = "peers")]
     pub peers: Vec<PeerConfig>,
+}
+
+/// Host-wide defaults. Resolved into every job at load time
+/// (`Config::resolve_defaults`); jobs that override a field win.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Defaults {
+    /// Snapshot tag prefix shared by snap, push, and prune jobs. A
+    /// per-job `prefix` (in snapshotting or snapshot_filter) wins.
+    #[serde(default)]
+    pub prefix: Option<String>,
+    /// Snapshotting cadence for snap jobs that don't specify their own.
+    #[serde(default)]
+    pub snapshotting: Option<SnapshottingDefaults>,
+    /// Prune defaults — both the grid and whether to auto-inject the
+    /// "protect manual snapshots" rule.
+    #[serde(default)]
+    pub pruning: Option<PruningDefaults>,
+    /// Default `zfs send` flags. The four flags default true here as
+    /// they do on `SendFlagsConfig`; spelling out `[defaults.send]`
+    /// lets an operator flip one off host-wide.
+    #[serde(default)]
+    pub send: SendFlagsConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshottingDefaults {
+    #[serde(with = "humantime_serde")]
+    pub interval: Duration,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PruningDefaults {
+    pub grid: GridSpec,
+    /// When true (the default), the resolver appends a
+    /// `{ type: regex, regex: "^<prefix>.*", negate: true }` rule so
+    /// snapshots without the configured prefix survive prune. Mirrors
+    /// the standard zrepl idiom.
+    #[serde(default = "yes")]
+    pub protect_non_prefixed: bool,
 }
 
 /// One outbound peer the daemon can open an SSH session to. Field
@@ -95,6 +142,11 @@ pub struct RecvConfig {
 pub enum JobConfig {
     Snap(SnapJobConfig),
     Push(PushJobConfig),
+    /// Prune-only job. Walks `filesystems`, evaluates `pruning` rules,
+    /// destroys victims — no `zfs snapshot` calls. Designed for the
+    /// receiver-side scenario where the local node is not the snapshot
+    /// source (the sender owns that) but still needs retention.
+    Prune(PruneJobConfig),
 }
 
 impl JobConfig {
@@ -102,7 +154,30 @@ impl JobConfig {
         match self {
             JobConfig::Snap(s) => &s.name,
             JobConfig::Push(s) => &s.name,
+            JobConfig::Prune(s) => &s.name,
         }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PruneJobConfig {
+    pub name: String,
+    #[serde(deserialize_with = "crate::filter::deserialize_filesystems")]
+    pub filesystems: Vec<FilesystemFilter>,
+    /// How often the prune loop fires.
+    #[serde(with = "humantime_serde")]
+    pub interval: Duration,
+    /// `keep` empty after parsing means "use [defaults.pruning]";
+    /// loader fills it. Non-Option for the TOML-subtable reason
+    /// above.
+    #[serde(default)]
+    pub pruning: PruningConfig,
+}
+
+impl PruneJobConfig {
+    pub fn pruning(&self) -> &PruningConfig {
+        &self.pruning
     }
 }
 
@@ -110,9 +185,29 @@ impl JobConfig {
 #[serde(deny_unknown_fields)]
 pub struct SnapJobConfig {
     pub name: String,
+    #[serde(deserialize_with = "crate::filter::deserialize_filesystems")]
     pub filesystems: Vec<FilesystemFilter>,
+    /// Use `SnapshottingConfig::Unset` (the `Default`) when missing
+    /// from TOML; `resolve_defaults` replaces with the host-wide
+    /// `[defaults.snapshotting]` block. Downstream callers go through
+    /// the `snapshotting()` accessor.
+    ///
+    /// (This is `T` rather than `Option<T>` so TOML's subtable form
+    /// `[jobs.snapshotting]` parses; serde-toml drops nested subtables
+    /// for `Option<T>` fields. Same pattern below for `pruning`.)
+    #[serde(default)]
     pub snapshotting: SnapshottingConfig,
+    #[serde(default)]
     pub pruning: PruningConfig,
+}
+
+impl SnapJobConfig {
+    pub fn snapshotting(&self) -> &SnapshottingConfig {
+        &self.snapshotting
+    }
+    pub fn pruning(&self) -> &PruningConfig {
+        &self.pruning
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -125,15 +220,30 @@ pub struct FilesystemFilter {
     pub exclude: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum SnapshottingConfig {
-    Periodic {
-        // humantime accepts "15m", "4h", "1d", etc.
-        #[serde(with = "humantime_serde")]
-        interval: Duration,
-        prefix: String,
-    },
+/// Periodic snapshot creation. Currently the only mode (cron / manual
+/// modes deferred until somebody actually asks); kept as a flat struct
+/// rather than a tagged enum so a job can override one field without
+/// re-declaring `type = "periodic"`.
+///
+/// Default value (both fields zero/empty) is the "unset" sentinel
+/// `resolve_defaults` replaces with `[defaults.snapshotting]`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshottingConfig {
+    // humantime accepts "15m", "4h", "1d", etc.
+    #[serde(default, with = "humantime_serde")]
+    pub interval: Duration,
+    #[serde(default)]
+    pub prefix: String,
+}
+
+impl SnapshottingConfig {
+    /// True for the `Default::default()` sentinel — both fields blank.
+    /// Used by `resolve_defaults` to decide when to substitute from
+    /// `[defaults.snapshotting]`.
+    pub fn is_unset(&self) -> bool {
+        self.interval == Duration::ZERO && self.prefix.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -165,17 +275,40 @@ pub enum KeepRule {
 #[serde(deny_unknown_fields)]
 pub struct PushJobConfig {
     pub name: String,
-    /// Receiver peer name. Must match a `[[peers]]` entry.
-    pub peer: String,
+    /// Legacy single-target form (`peer = "home"`). Equivalent to
+    /// `targets = ["home"]` and resolved into that during config load;
+    /// mutually exclusive with `targets`. Kept for backwards
+    /// compatibility with configs written before multi-target landed.
+    #[serde(default)]
+    pub peer: Option<String>,
+    /// Ordered list of peer names to attempt each cycle. The cycle
+    /// picks the first peer whose reachability is `Connected`,
+    /// falling back to subsequent entries when earlier ones are
+    /// unreachable. Each peer keeps its own per-dataset cursor
+    /// bookmark, so a peer that's been offline for a week catches up
+    /// from where it left off when it comes back.
+    #[serde(default)]
+    pub targets: Vec<String>,
     /// How often the planner cycle fires. The wakeup endpoint
     /// (POST /api/v1/jobs/{name}/wakeup) re-enters the cycle on demand.
     #[serde(with = "humantime_serde")]
     pub interval: Duration,
+    #[serde(deserialize_with = "crate::filter::deserialize_filesystems")]
     pub filesystems: Vec<FilesystemFilter>,
     pub target: PushTarget,
     #[serde(default)]
     pub send: SendFlagsConfig,
+    /// Both fields `None` after parsing means "build from
+    /// `[defaults].prefix`"; resolved at load time. (Non-Option for
+    /// the same TOML-subtable-vs-Option reason as `snapshotting`.)
+    #[serde(default)]
     pub snapshot_filter: SnapshotFilterConfig,
+}
+
+impl PushJobConfig {
+    pub fn snapshot_filter(&self) -> &SnapshotFilterConfig {
+        &self.snapshot_filter
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -220,8 +353,10 @@ fn yes() -> bool {
 }
 
 /// Per-job snapshot filter. Exactly one of `prefix` (sugar for
-/// `^<prefix>`) or `regex` must be present — enforced in `validate`.
-#[derive(Debug, Clone, Deserialize)]
+/// `^<prefix>`) or `regex` must be present — enforced in `validate`
+/// after `resolve_defaults` fills in `prefix` from `[defaults].prefix`
+/// when neither is given.
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SnapshotFilterConfig {
     #[serde(default)]

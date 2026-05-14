@@ -1,179 +1,132 @@
-# arctern.toml — annotated example for the SSH-transport pivot.
+# arctern.toml — annotated example.
 #
-# Two host roles:
-#
-# - The LAPTOP runs `arctern daemon`. It owns snap jobs (local) plus
-#   push jobs that reference a `[[peers]]` entry.
-# - The HOME SERVER runs sshd with an authorized_keys ForcedCommand
-#   pointing at `arctern stdinserver-dispatch <identity>`. The
-#   home server's arctern config carries `[[allowed_clients]]` rows
-#   that authorise the laptop's identity for the requested operations.
-#
-# Both hosts may also run their own snap jobs and their own loopback
-# UI; the daemon binary is identical, the role is determined by which
-# of [[peers]] / [[allowed_clients]] / [[jobs]] sections are populated.
-#
-# Snapshot tags use `<prefix><RFC3339-utc-no-colons>` (e.g.
-# `zrepl_20260509T134500Z`). Wire-compatible with Go zrepl per the
-# durable design — a host migrating from zrepl can keep its existing
-# snapshot history under arctern.
+# This file shows the *idiomatic* form. Every section below has more
+# verbose long-hand equivalents; you only need them when you want to
+# override per-job. Snapshot tags use `<prefix><RFC3339-utc-no-colons>`
+# (e.g. `zrepl_20260514T134500Z`) — wire-compatible with Go zrepl, so a
+# host migrating from zrepl can keep its existing snapshot history.
 
-# ─── databak: 4-hourly snapshots of three nas/root/home filesystems ──
+# ─── Host-wide defaults ──────────────────────────────────────────────
+#
+# Applied to every job at config-load time. Per-job overrides win.
+# Keeps the rest of the file short — operators see the *interesting*
+# differences, not boilerplate.
+
+state_dir = "/var/lib/arctern"
+
+[defaults]
+# Prefix used by snap jobs creating snapshots, push jobs filtering
+# which snapshots to replicate, and the auto-generated prune rules.
+# Pick one string and forget about it.
+prefix = "zrepl_"
+
+[defaults.snapshotting]
+# Cadence for snap jobs that don't set their own interval.
+interval = "15m"
+
+[defaults.pruning]
+# Grid used by snap jobs that don't set their own pruning.
+# Format: <count>x<interval> | ... (oldest to youngest, left to right).
+grid = "4x15m | 24x1h | 14x1d"
+# `protect_non_prefixed = true` (the default) auto-appends a
+# `{ type: regex, regex: "^<prefix>.*", negate: true }` rule so
+# snapshots WITHOUT the prefix survive prune. This is the standard
+# zrepl idiom for protecting manual snapshots.
+protect_non_prefixed = true
+
+# ─── Outbound SSH peers ──────────────────────────────────────────────
+
+[[peers]]
+name = "nas-home"
+ssh_target = "arctern-replicator@10.44.44.1"
+
+[[peers]]
+name = "nas-remote"
+ssh_target = "arctern-replicator@10.66.66.2"
+
+# ─── databak: snap job ───────────────────────────────────────────────
+#
+# Filesystems map: keys with trailing `/` mean "include this subtree"
+# (recursive), bare keys mean exact-match. `false` excludes a path
+# from any subtree include it sits under.
 
 [[jobs]]
 type = "snap"
 name = "databak"
+filesystems = { "okdata/data/nas" = true, "okdata/data/root" = true, "okdata/data/home" = true }
+# snapshotting + pruning omitted — inherited from [defaults] above.
 
-[[jobs.filesystems]]
-path = "okdata/data/nas"
-[[jobs.filesystems]]
-path = "okdata/data/root"
-[[jobs.filesystems]]
-path = "okdata/data/home"
-
-[jobs.snapshotting]
-type = "periodic"
-interval = "4h"
-prefix = "zrepl_"
-
-# Keep 6 snapshots from the last 24h (one per 4h slot) plus 14 daily
-# snapshots from before that. Snapshots NOT matching `^zrepl_.*` (the
-# user's manual snapshots, snapshots from another tool, etc.) survive
-# unconditionally because the second rule below protects them.
-[[jobs.pruning.keep]]
-type = "grid"
-grid = "6x4h | 14x1d"
-regex = "^zrepl_.*"
-
-# negate = true means "destroy snapshots whose name MATCHES this regex"
-# — so the rule's destroy list is exactly the zrepl_-prefixed ones,
-# and the destroy list across rules is the intersection. Manual
-# snapshots are NOT in this rule's destroy list, so they are NEVER
-# destroyed. This is the standard zrepl idiom paired with a grid rule.
-[[jobs.pruning.keep]]
-type = "regex"
-regex = "^zrepl_.*"
-negate = true
-
-# ─── rootbak: daily snapshots of the system dataset ──────────────────
+# ─── rootbak: snap with non-default interval ────────────────────────
 
 [[jobs]]
 type = "snap"
 name = "rootbak"
-
-[[jobs.filesystems]]
-path = "okdata/ROOT/default"
-
+filesystems = { "okdata/ROOT/default" = true }
 [jobs.snapshotting]
-type = "periodic"
 interval = "1d"
-prefix = "zrepl_"
+[jobs.pruning]
+keep = [
+  { type = "grid", grid = "7x1d", regex = "^zrepl_.*" },
+  { type = "regex", regex = "^zrepl_.*", negate = true },
+]
 
-[[jobs.pruning.keep]]
-type = "grid"
-grid = "7x1d"
-regex = "^zrepl_.*"
-
-[[jobs.pruning.keep]]
-type = "regex"
-regex = "^zrepl_.*"
-negate = true
-
-# ─── peers: outbound SSH connections this daemon may open ───────────
+# ─── push_to_nas: replicate to home, fall back to remote ────────────
 #
-# The daemon hands `ssh_target` verbatim to openssh; any string that
-# `ssh -G <ssh_target> exit` accepts works (host alias from
-# ~/.ssh/config, `user@host:port`, an inventory of ProxyJump'd hops).
-# ControlMaster keeps one TCP connection alive across every channel
-# the push job opens.
-
-[[peers]]
-name = "home"
-ssh_target = "arctern-replicator@homeserver.lan"
-
-# ─── push_to_home: replicate snapshots to the home server peer ──────
-#
-# Path mapping is literal concatenation:
-#   sender path  okdata/data/home
-#   target.root_fs  okdata/backups/laptop
-#   becomes      okdata/backups/laptop/okdata/data/home
-# on the receiver. NO path stripping. The full sender path is
-# preserved under the receiver's root_fs so a single receiver can
-# host many sender peers without name collisions.
-#
-# `interval` is the planner-cycle interval — the snap job above
-# decides snapshot frequency. The push job's only job is to ferry
-# whatever the sender currently has across to the receiver. Use
-# `POST /api/v1/jobs/push_to_home/wakeup` (or the dashboard button)
-# to trigger an immediate cycle.
+# `targets` is ordered: the cycle picks the first peer whose
+# reachability is "Connected" and uses it. When 10.44 is unreachable
+# (laptop is off the home network), 10.66 takes over. Each peer keeps
+# its own cursor bookmark, so the offline peer catches up cleanly when
+# it's reachable again.
 
 [[jobs]]
 type = "push"
-name = "push_to_home"
-peer = "home"
+name = "push_to_nas"
+targets = ["nas-home", "nas-remote"]
 interval = "15m"
-
-[[jobs.filesystems]]
-path = "okdata/data/home"
-[[jobs.filesystems]]
-path = "okdata/data/nas"
-[[jobs.filesystems]]
-path = "okdata/data/root"
-
+filesystems = { "novafs/arch0/" = true, "novafs/arch0" = false, "novafs/arch0/data" = false }
 [jobs.target]
 root_fs = "okdata/backups/laptop"
+# `send` flags default to encrypted+embedded+compressed+large_blocks =
+# all true — what `zfs send -w -e -c -L` produces. Override one off with
+# `[jobs.send] encrypted = false` if you want plaintext.
 
-# All four flags default true — they map to `zfs send -w -e -c -L`
-# which is what zrepl's canonical push job uses. Set `encrypted = false`
-# only if the source dataset isn't encrypted and you want the receiver
-# to see the property values in cleartext.
-[jobs.send]
-encrypted = true
-embedded_data = true
-compressed = true
-large_blocks = true
+# ─── received_prune: receiver-side retention ─────────────────────────
+#
+# Prune-only job — never creates snapshots. Use this on the receiver
+# (the NAS) to apply a longer-form retention to whatever the laptop
+# pushes. zrepl's `push.pruning.keep_receiver` lives here in arctern.
 
-# Exactly one of `prefix` (sugar for `^<escaped>`) or `regex`. The
-# planner only considers snapshots matching this filter — keeps user-
-# created or system-created snapshots out of the replication loop.
-[jobs.snapshot_filter]
-prefix = "zrepl_"
+[[jobs]]
+type = "prune"
+name = "received_prune"
+interval = "1h"
+filesystems = { "okdata/backups/laptop/" = true, "okdata/backups/laptop" = false }
+[jobs.pruning]
+keep = [
+  { type = "grid", grid = "1x1h | 24x1h | 14x1d | 8x1w", regex = "^zrepl_.*" },
+  { type = "regex", regex = "^zrepl_.*", negate = true },
+]
 
-# ─── HOME SERVER side: ACL for the laptop's inbound channels ────────
+# ─── allowed_clients: NAS-side ACL ──────────────────────────────────
 #
-# This block lives in the home server's arctern.toml (NOT the laptop's,
-# despite appearing in the same example file for documentation).
-#
-# `identity` matches the literal argv passed to stdinserver-dispatch
-# from the home server's authorized_keys line:
-#
-#   command="/usr/local/bin/arctern stdinserver-dispatch laptop_nova",restrict ssh-ed25519 AAAA...
-#
-# `fingerprint` is an optional defense-in-depth pin: when set, the
-# dispatcher compares it to SSH_AUTH_INFO_0 (OpenSSH ≥ 7.4) before
-# granting access.
-#
-# `jobs` and `operations` are allow-lists; `root_fs` restricts recv
-# operations to that subtree.
+# This block lives in the NAS's arctern.toml (despite appearing here
+# for documentation). On the NAS, sshd's authorized_keys ForcedCommand
+# is `arctern stdinserver-dispatch laptop_nova`; the dispatcher matches
+# that argv against `identity` and consults this row before serving any
+# control or recv channel.
 
 [[allowed_clients]]
 identity = "laptop_nova"
 fingerprint = "SHA256:abc123..."
-jobs = ["push_to_home"]
+jobs = ["push_to_nas"]
 operations = ["control", "recv"]
 root_fs = "okdata/backups/laptop"
 
 # Per-client recv tuning. Maps zrepl's `recv.properties.inherit` and
 # `recv.properties.override` 1:1, applied as `zfs recv -x <key>` (force
-# inherit from parent) and `-o <k>=<v>` (force-set). The common pattern
-# below matches the "untrusted-receiver / canmount-off" sink:
-#
-#   recv:
-#     properties:
-#       inherit: ["mountpoint"]
-#       override: { "canmount": "off", "org.openzfs.systemd:ignore": "on" }
-#
-# becomes:
+# inherit from parent) and `-o <k>=<v>` (force-set). The pattern below
+# matches an "untrusted-receiver" sink that wants its children
+# unmounted by default.
 [allowed_clients.recv]
 inherit_properties = ["mountpoint"]
 override_properties = { canmount = "off", "org.openzfs.systemd:ignore" = "on" }

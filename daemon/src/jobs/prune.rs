@@ -1,43 +1,38 @@
-//! Periodic-snapshot job. Loops on `interval`, snapshots every matched
-//! filesystem, then prunes per the configured `KeepRule` chain.
+//! Prune-only job. Lists matching snapshots per filesystem, evaluates
+//! the configured keep-rule chain, destroys victims. Never creates
+//! snapshots — that's the snap job's responsibility.
 //!
-//! Algorithm matches zrepl's snap-job behaviour:
-//! - On startup, take an "immediate" snapshot if the youngest matching
-//!   snapshot is older than `interval` (so a daemon restart doesn't
-//!   miss its window).
-//! - Each cycle: list datasets (recursive), resolve filters, for each
-//!   matched dataset: snapshot (idempotent on SnapshotExists); list
-//!   snapshots with `creation`; build SnapshotEntry vec; evaluate
-//!   keep-rules; destroy each victim (idempotent on SnapshotHeld).
-//! - Snapshot tag is `<prefix><RFC3339-utc-no-colons>` — wire-compatible
-//!   with zrepl per constitution VII.
+//! Use case: a receiver host that gets snapshots from a push sender
+//! still needs retention. zrepl handled this with
+//! `push.pruning.keep_receiver`; arctern's push doesn't manage
+//! receiver-side retention, so the receiver defines a `prune` job over
+//! the received subtree with the desired grid.
 
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration as StdDuration;
 
-use arctern_config::{SnapJobConfig, SnapshotEntry, evaluate_keep_rules, filter::resolve_all};
-use palimpsest::dataset::{DestroyOptions, ListOptions, SnapshotOptions};
+use arctern_config::{PruneJobConfig, SnapshotEntry, evaluate_keep_rules, filter::resolve_all};
+use palimpsest::dataset::{DestroyOptions, ListOptions};
 use palimpsest::models::DatasetType;
 use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info_span, warn};
 
 use super::{Job, JobContext, JobStatusInner};
 
-pub const KIND: &str = "snap";
+pub const KIND: &str = "prune";
 
-pub struct SnapJob {
-    config: SnapJobConfig,
+pub struct PruneJob {
+    config: PruneJobConfig,
     status: Mutex<JobStatusInner>,
     wakeup: Arc<tokio::sync::Notify>,
 }
 
-impl SnapJob {
-    pub fn new(config: SnapJobConfig) -> Self {
+impl PruneJob {
+    pub fn new(config: PruneJobConfig) -> Self {
         Self {
             config,
             status: Mutex::new(JobStatusInner::default()),
@@ -46,23 +41,20 @@ impl SnapJob {
     }
 
     fn interval(&self) -> StdDuration {
-        self.config.snapshotting().interval
-    }
-
-    fn prefix(&self) -> &str {
-        &self.config.snapshotting().prefix
+        self.config.interval
     }
 
     fn record_cycle(&self, last_error: Option<String>, interval: StdDuration) {
         let mut s = self.status.lock().unwrap();
         let now = OffsetDateTime::now_utc();
         s.last_run = Some(now);
-        s.next_run = Some(now + time::Duration::try_from(interval).unwrap_or(time::Duration::ZERO));
+        s.next_run =
+            Some(now + time::Duration::try_from(interval).unwrap_or(time::Duration::ZERO));
         s.last_error = last_error;
     }
 }
 
-impl Job for SnapJob {
+impl Job for PruneJob {
     fn name(&self) -> &str {
         &self.config.name
     }
@@ -80,13 +72,11 @@ impl Job for SnapJob {
         ctx: JobContext,
         cancel: CancellationToken,
     ) -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        let span = info_span!("snap_job", name = %self.config.name);
+        let span = info_span!("prune_job", name = %self.config.name);
         let job_name = self.config.name.clone();
         Box::pin(
             async move {
                 let interval = self.interval();
-                // Startup-immediate: if no recent matching snapshot, run a
-                // cycle now instead of waiting `interval`.
                 run_and_record(&self, &ctx, &job_name, interval).await;
                 loop {
                     tokio::select! {
@@ -103,7 +93,7 @@ impl Job for SnapJob {
 }
 
 async fn run_and_record(
-    job: &SnapJob,
+    job: &PruneJob,
     ctx: &JobContext,
     job_name: &str,
     interval: StdDuration,
@@ -133,17 +123,9 @@ async fn run_and_record(
     job.record_cycle(outcome.err(), interval);
 }
 
-impl SnapJob {
-    /// One snapshot+prune pass. Returns Err only if the cycle failed in
-    /// a way the operator should see at the per-job status level.
-    /// Per-dataset failures are logged and accumulated into a summary
-    /// string; the cycle still completes the work it can.
+impl PruneJob {
     async fn run_cycle(&self, ctx: &JobContext) -> Result<(), String> {
         let runner = ctx.runner.as_ref();
-        // 1. List every filesystem + volume under any pool a filter
-        //    references. Scoping to those pools (rather than a global
-        //    list) keeps unrelated pools out of the result and makes
-        //    integration tests robust against parallel test pools.
         let mut pools: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for f in &self.config.filesystems {
             let pool = f.path.split('/').next().unwrap_or(&f.path).to_string();
@@ -162,38 +144,15 @@ impl SnapJob {
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         let targets = resolve_all(&self.config.filesystems, &names);
         if targets.is_empty() {
-            tracing::info!("no datasets matched filesystem filter");
             return Ok(());
         }
-
-        let tag = snapshot_tag(self.prefix());
         let mut errors: Vec<String> = Vec::new();
-        for ds in &targets {
-            let full = format!("{ds}@{tag}");
-            tracing::info!(dataset = %ds, snapshot = %tag, "creating snapshot");
-            match palimpsest::dataset::snapshot(runner, &full, &SnapshotOptions::new()).await {
-                Ok(()) => {}
-                Err(palimpsest::ZfsError::SnapshotExists { .. }) => {
-                    warn!(snapshot = %full, "snapshot already exists; treating as no-op");
-                }
-                Err(e) => {
-                    let msg = format!("snapshot {full}: {e}");
-                    warn!(error = %msg);
-                    errors.push(msg);
-                }
-            }
-        }
-
-        // 2. Prune. Per-dataset to keep the algorithm's "now" reference
-        //    local (so a stale dataset's youngest snapshot does not
-        //    skew the bucket math for an active dataset).
         for ds in &targets {
             if let Err(e) = self.prune_one(runner, ds).await {
                 warn!(dataset = %ds, error = %e, "prune cycle errored");
                 errors.push(format!("prune {ds}: {e}"));
             }
         }
-
         if errors.is_empty() {
             Ok(())
         } else {
@@ -217,10 +176,6 @@ impl SnapJob {
             .await
             .map_err(|e| format!("list snapshots: {e}"))?;
         let mut entries: Vec<SnapshotEntry> = Vec::with_capacity(snaps.len());
-        // Parallel vector of full ZFS names (`pool/ds@tag`); the prune
-        // algorithm matches on the bare tag (so a user's `^zrepl_.*`
-        // regex does not have to embed the dataset name), but destroy
-        // needs the fully-qualified target.
         let mut full_names: Vec<String> = Vec::with_capacity(snaps.len());
         for s in &snaps {
             let creation = s
@@ -255,27 +210,5 @@ impl SnapJob {
             }
         }
         Ok(())
-    }
-}
-
-/// `<prefix><RFC3339-utc-no-colons>`. Colons stripped because some
-/// downstream tooling chokes on them and zrepl uses the same shape.
-fn snapshot_tag(prefix: &str) -> String {
-    let now = OffsetDateTime::now_utc();
-    // Format with second precision; colons replaced.
-    let formatted = now.format(&Rfc3339).expect("Rfc3339 format always succeeds");
-    let stripped: String = formatted.chars().filter(|c| *c != ':').collect();
-    format!("{prefix}{stripped}")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn snapshot_tag_strips_colons() {
-        let t = snapshot_tag("zrepl_");
-        assert!(t.starts_with("zrepl_"));
-        assert!(!t.contains(':'));
     }
 }

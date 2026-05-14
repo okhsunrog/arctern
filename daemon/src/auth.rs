@@ -10,7 +10,7 @@ use arctern_api::ApiErrorBody;
 use axum::{
     Json,
     extract::{ConnectInfo, Request},
-    http::StatusCode,
+    http::{Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     serve::IncomingStream,
@@ -53,6 +53,48 @@ pub async fn enforce_same_uid(
             ),
         };
         return (StatusCode::FORBIDDEN, Json(body)).into_response();
+    }
+    next.run(request).await
+}
+
+/// CSRF guard for the loopback TCP bind. Mutating methods (POST / PUT /
+/// PATCH / DELETE) are blocked when the browser-supplied
+/// `Sec-Fetch-Site` header indicates a cross-origin request — that
+/// header is always present on modern browser-issued fetches, always
+/// trustworthy (a page cannot forge it cross-origin), and absent on
+/// non-browser callers (curl, `arctern-client`, `reqwest`).
+///
+/// The rule:
+/// - GET / HEAD / OPTIONS — always allowed (no side effects).
+/// - Mutating method + `Sec-Fetch-Site: same-origin` or `none` —
+///   allowed.
+/// - Mutating method + `Sec-Fetch-Site: same-site` or `cross-site` —
+///   403.
+/// - Mutating method + header absent — allowed (assumed to be a
+///   non-browser CLI / library client).
+///
+/// CSRF threat model: a malicious page in another tab fetches into
+/// `127.0.0.1:7878` with the user's "credentials" (which here are
+/// just being on the same host). Sec-Fetch-Site blocks this because
+/// the browser cannot be tricked into omitting or rewriting the
+/// header from a cross-origin context.
+pub async fn enforce_csrf(request: Request, next: Next) -> Response {
+    let method = request.method().clone();
+    let mutating = matches!(
+        method,
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    );
+    if mutating
+        && let Some(sfs) = request.headers().get("sec-fetch-site")
+    {
+        let v = sfs.to_str().unwrap_or("");
+        if v != "same-origin" && v != "none" {
+            let body = ApiErrorBody {
+                error: "cross_origin".into(),
+                message: format!("cross-origin {method} blocked (Sec-Fetch-Site: {v})"),
+            };
+            return (StatusCode::FORBIDDEN, Json(body)).into_response();
+        }
     }
     next.run(request).await
 }

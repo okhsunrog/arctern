@@ -38,6 +38,7 @@ utoipa-axum = "0.2.0"
 [dev-dependencies]
 arctern-client = { path = "../crates/client" }
 palimpsest = { path = "../../palimpsest" }
+tower = { version = "0.5.3", features = ["util"] }
 
 [features]
 # Enables `daemon/tests/integration_*.rs` against a real ZFS-capable host

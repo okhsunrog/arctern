@@ -96,7 +96,118 @@ pub fn build_loopback_router(state: AppState) -> Router {
     // memory-serve handles /, /index.html, /assets/*; client-side
     // router paths (/jobs/foo, /events, ...) fall through to spa_fallback
     // which serves the embedded index.html so vue-router can render them.
+    //
+    // CSRF guard layered on the whole stack: GETs to /index.html and
+    // /assets are unaffected (the middleware only acts on mutating
+    // methods); mutating /api/v1/* requests must originate same-origin
+    // (or carry no Sec-Fetch-Site, i.e. be a non-browser CLI client).
     build_api_router(state)
         .merge(static_routes)
         .fallback(spa_fallback)
+        .layer(middleware::from_fn(auth::enforce_csrf))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_state::AppState;
+    use crate::jobs::JobManager;
+    use crate::peer::state::new_state;
+    use crate::state;
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    async fn test_state() -> AppState {
+        let pool = Arc::new(state::open_in_memory().await.unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(16);
+        AppState {
+            manager: Arc::new(JobManager::new()),
+            peers: new_state(),
+            events,
+            state: pool,
+            runner: Arc::new(palimpsest::runner::RealRunner),
+            config_path: std::path::PathBuf::from("/dev/null"),
+        }
+    }
+
+    fn req(method: Method, uri: &str, sec_fetch_site: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder().method(method).uri(uri);
+        if let Some(v) = sec_fetch_site {
+            b = b.header("sec-fetch-site", v);
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn cross_site_post_is_blocked() {
+        let app = build_loopback_router(test_state().await);
+        let resp = app
+            .oneshot(req(
+                Method::POST,
+                "/api/v1/jobs/no_such_job/wakeup",
+                Some("cross-site"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn same_site_post_is_blocked() {
+        // same-site != same-origin: e.g. an attacker on a subdomain that
+        // shares the registrable domain. We block it just like cross-site.
+        let app = build_loopback_router(test_state().await);
+        let resp = app
+            .oneshot(req(
+                Method::POST,
+                "/api/v1/jobs/no_such_job/wakeup",
+                Some("same-site"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn same_origin_post_passes_csrf() {
+        // No job named "no_such_job" is registered, so the wakeup handler
+        // returns 404 — that's the signal that CSRF didn't shortcut us.
+        let app = build_loopback_router(test_state().await);
+        let resp = app
+            .oneshot(req(
+                Method::POST,
+                "/api/v1/jobs/no_such_job/wakeup",
+                Some("same-origin"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn cli_caller_without_header_passes_csrf() {
+        // No Sec-Fetch-Site → assumed non-browser (curl, arctern-client,
+        // reqwest). Same 404 from the handler proves we got past the guard.
+        let app = build_loopback_router(test_state().await);
+        let resp = app
+            .oneshot(req(Method::POST, "/api/v1/jobs/no_such_job/wakeup", None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn cross_site_get_is_allowed() {
+        // GETs have no side effects; the rule must not block them or the
+        // SSE event stream + UI bootstrap break under strict referrer-
+        // policy regimes.
+        let app = build_loopback_router(test_state().await);
+        let resp = app
+            .oneshot(req(Method::GET, "/api/v1/jobs", Some("cross-site")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
 }

@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 
+use arctern_config::zfs_names::{parse_snapshot_target, validate_dataset_name};
 use arctern_config::{AllowedClient, Config};
 use arctern_transport::{
     ErrorCode, EventWire, JobStatusWire, Request, RequestFrame, Response, ResponseFrame,
@@ -308,6 +309,12 @@ async fn handle_list_snapshots(
     dataset: &str,
     prefix_regex: Option<&str>,
 ) -> Response {
+    if let Err(e) = validate_dataset_name(dataset) {
+        return Response::Error {
+            code: ErrorCode::BadRequest,
+            message: format!("invalid dataset {dataset:?}: {e}"),
+        };
+    }
     if let Err(r) = enforce_root_fs(acl, dataset) {
         return r;
     }
@@ -383,6 +390,12 @@ async fn handle_get_receive_resume_token(
     acl: &AllowedClient,
     dataset: &str,
 ) -> Response {
+    if let Err(e) = validate_dataset_name(dataset) {
+        return Response::Error {
+            code: ErrorCode::BadRequest,
+            message: format!("invalid dataset {dataset:?}: {e}"),
+        };
+    }
     if let Err(r) = enforce_root_fs(acl, dataset) {
         return r;
     }
@@ -401,17 +414,20 @@ async fn handle_destroy_snapshot(
     acl: &AllowedClient,
     name: &str,
 ) -> Response {
-    let Some((dataset, snapshot)) = parse_snapshot_target(name) else {
-        return Response::Error {
-            code: ErrorCode::BadRequest,
-            message: format!("destroy snapshot target must be dataset@snapshot, got {name:?}"),
-        };
+    let target = match parse_snapshot_target(name) {
+        Ok(target) => target,
+        Err(e) => {
+            return Response::Error {
+                code: ErrorCode::BadRequest,
+                message: format!("invalid destroy snapshot target {name:?}: {e}"),
+            };
+        }
     };
-    if let Err(r) = enforce_root_fs(acl, dataset) {
+    if let Err(r) = enforce_root_fs(acl, target.dataset) {
         return r;
     }
     let opts = palimpsest::dataset::DestroyOptions::new();
-    match palimpsest::dataset::destroy(runner, &format!("{dataset}@{snapshot}"), &opts).await {
+    match palimpsest::dataset::destroy(runner, name, &opts).await {
         Ok(()) => Response::DestroySnapshotOk,
         Err(e) => Response::Error {
             code: zfs_error_code(&e),
@@ -420,25 +436,17 @@ async fn handle_destroy_snapshot(
     }
 }
 
-fn parse_snapshot_target(name: &str) -> Option<(&str, &str)> {
-    let (dataset, snapshot) = name.split_once('@')?;
-    if dataset.is_empty()
-        || snapshot.is_empty()
-        || dataset.contains('@')
-        || snapshot.contains('@')
-        || dataset.contains('#')
-        || snapshot.contains('#')
-    {
-        return None;
-    }
-    Some((dataset, snapshot))
-}
-
 async fn handle_discard_partial_recv(
     runner: &dyn CommandRunner,
     acl: &AllowedClient,
     dataset: &str,
 ) -> Response {
+    if let Err(e) = validate_dataset_name(dataset) {
+        return Response::Error {
+            code: ErrorCode::BadRequest,
+            message: format!("invalid dataset {dataset:?}: {e}"),
+        };
+    }
     if let Err(r) = enforce_root_fs(acl, dataset) {
         return r;
     }
@@ -695,6 +703,73 @@ mod tests {
         )
         .await;
         assert!(matches!(r, Response::DestroySnapshotOk), "got {r:?}");
+    }
+
+    #[tokio::test]
+    async fn list_snapshots_rejects_invalid_dataset_name() {
+        let runner = Arc::new(RecordingRunner::new());
+        let r = rpc(
+            runner,
+            acl(Some("tank/backups/laptop")),
+            Request::ListSnapshots {
+                dataset: "tank/backups/laptop/../escape".into(),
+                prefix_regex: None,
+            },
+        )
+        .await;
+        match r {
+            Response::Error { code, message } => {
+                assert_eq!(code, ErrorCode::BadRequest);
+                assert!(message.contains("invalid dataset"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn destroy_snapshot_rejects_invalid_snapshot_name() {
+        let runner = Arc::new(RecordingRunner::new());
+        let r = rpc(
+            runner,
+            acl_with_ops(
+                Some("tank/backups/laptop"),
+                &["control", "control:destroy_snapshot", "recv"],
+            ),
+            Request::DestroySnapshot {
+                name: "tank/backups/laptop@bad snap".into(),
+            },
+        )
+        .await;
+        match r {
+            Response::Error { code, message } => {
+                assert_eq!(code, ErrorCode::BadRequest);
+                assert!(message.contains("invalid destroy snapshot target"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn discard_partial_recv_rejects_invalid_dataset_name() {
+        let runner = Arc::new(RecordingRunner::new());
+        let r = rpc(
+            runner,
+            acl_with_ops(
+                Some("tank/backups/laptop"),
+                &["control", "control:discard_partial_recv", "recv"],
+            ),
+            Request::DiscardPartialRecv {
+                dataset: "tank/backups/laptop#bookmark".into(),
+            },
+        )
+        .await;
+        match r {
+            Response::Error { code, message } => {
+                assert_eq!(code, ErrorCode::BadRequest);
+                assert!(message.contains("invalid dataset"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
     }
 
     #[tokio::test]

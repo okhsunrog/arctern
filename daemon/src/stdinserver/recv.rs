@@ -11,6 +11,7 @@
 use std::sync::Arc;
 
 use arctern_config::AllowedClient;
+use arctern_config::zfs_names::{validate_dataset_name, validate_snapshot_leaf};
 use arctern_transport::{
     ErrorCode, RecvHeader, Response, ResponseFrame, read_header, write_response,
 };
@@ -71,6 +72,7 @@ async fn drive<R>(
 where
     R: AsyncRead + Unpin,
 {
+    validate_header(header)?;
     if let Err(msg) = enforce_root_fs(acl, &header.target_dataset) {
         return Err((ErrorCode::Unauthorized, msg));
     }
@@ -162,6 +164,30 @@ where
     Ok(())
 }
 
+fn validate_header(header: &RecvHeader) -> Result<(), (ErrorCode, String)> {
+    if let Err(e) = validate_dataset_name(&header.target_dataset) {
+        return Err((
+            ErrorCode::BadRequest,
+            format!("invalid target_dataset {:?}: {e}", header.target_dataset),
+        ));
+    }
+    validate_snapshot_ref("to_snap", &header.send.to_snap.name)?;
+    if let Some(from) = &header.send.from_snap {
+        validate_snapshot_ref("from_snap", &from.name)?;
+    }
+    Ok(())
+}
+
+fn validate_snapshot_ref(field: &str, name: &str) -> Result<(), (ErrorCode, String)> {
+    if let Err(e) = validate_snapshot_leaf(name) {
+        return Err((
+            ErrorCode::BadRequest,
+            format!("invalid {field} snapshot name {name:?}: {e}"),
+        ));
+    }
+    Ok(())
+}
+
 fn enforce_root_fs(acl: &AllowedClient, dataset: &str) -> Result<(), String> {
     let Some(root) = acl.root_fs.as_deref() else {
         return Ok(());
@@ -174,4 +200,66 @@ fn enforce_root_fs(acl: &AllowedClient, dataset: &str) -> Result<(), String> {
         return Ok(());
     }
     Err(format!("{dataset:?} is not under allowed root_fs {root:?}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arctern_transport::{SendFlagsWire, SendHeader, SendKind, SnapshotRef};
+
+    fn header(target_dataset: &str, from_snap: Option<&str>, to_snap: &str) -> RecvHeader {
+        RecvHeader {
+            version: arctern_transport::PROTOCOL_VERSION,
+            target_dataset: target_dataset.to_string(),
+            send: SendHeader {
+                send_kind: SendKind::Full,
+                from_snap: from_snap.map(|name| SnapshotRef {
+                    name: name.to_string(),
+                    guid: 1,
+                }),
+                to_snap: SnapshotRef {
+                    name: to_snap.to_string(),
+                    guid: 2,
+                },
+                flags: SendFlagsWire {
+                    raw: false,
+                    embedded: false,
+                    compressed: false,
+                    large_blocks: false,
+                },
+                discard_partial_recv: false,
+            },
+        }
+    }
+
+    #[test]
+    fn validate_header_rejects_invalid_target_dataset() {
+        let h = header("tank/backups#bookmark", None, "snap1");
+        let err = validate_header(&h).unwrap_err();
+        assert_eq!(err.0, ErrorCode::BadRequest);
+        assert!(err.1.contains("invalid target_dataset"));
+    }
+
+    #[test]
+    fn validate_header_rejects_invalid_snapshot_refs() {
+        let h = header("tank/backups", Some("base snap"), "snap1");
+        let err = validate_header(&h).unwrap_err();
+        assert_eq!(err.0, ErrorCode::BadRequest);
+        assert!(err.1.contains("from_snap"));
+
+        let h = header("tank/backups", None, "snap/child");
+        let err = validate_header(&h).unwrap_err();
+        assert_eq!(err.0, ErrorCode::BadRequest);
+        assert!(err.1.contains("to_snap"));
+    }
+
+    #[test]
+    fn validate_header_accepts_common_names() {
+        let h = header(
+            "tank/backups/laptop",
+            Some("zrepl_2026-05-15"),
+            "zrepl_2026-05-16",
+        );
+        validate_header(&h).unwrap();
+    }
 }

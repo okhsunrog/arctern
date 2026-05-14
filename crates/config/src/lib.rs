@@ -9,10 +9,13 @@ use std::path::Path;
 
 use thiserror::Error;
 
+use crate::zfs_names::validate_dataset_name;
+
 pub mod filter;
 pub mod grid;
 pub mod prune;
 pub mod schema;
+pub mod zfs_names;
 
 pub use grid::{GridParseError, GridSpec, KeepCount, RetentionInterval, SnapshotEntry};
 pub use prune::{PruneError, evaluate as evaluate_keep_rules};
@@ -214,9 +217,9 @@ fn validate_allowed_client(idx: usize, client: &AllowedClient) -> Result<(), Str
         if root_fs.is_empty() {
             return Err(format!("allowed_clients[{idx}].root_fs: must not be empty"));
         }
-        if root_fs.starts_with('/') || root_fs.ends_with('/') {
+        if let Err(e) = validate_dataset_name(root_fs) {
             return Err(format!(
-                "allowed_clients[{idx}].root_fs: {root_fs:?} must not start or end with '/'"
+                "allowed_clients[{idx}].root_fs: invalid dataset name {root_fs:?}: {e}"
             ));
         }
     }
@@ -224,17 +227,44 @@ fn validate_allowed_client(idx: usize, client: &AllowedClient) -> Result<(), Str
     Ok(())
 }
 
+fn validate_filesystem_filter(idx: usize, fi: usize, f: &FilesystemFilter) -> Result<(), String> {
+    if let Err(e) = validate_dataset_name(&f.path) {
+        return Err(format!(
+            "jobs[{idx}].filesystems[{fi}].path: invalid dataset name {:?}: {e}",
+            f.path
+        ));
+    }
+    if !f.exclude.is_empty() && !f.recursive {
+        return Err(format!(
+            "jobs[{idx}].filesystems[{fi}]: exclude requires recursive = true"
+        ));
+    }
+    if f.recursive {
+        for (ei, e) in f.exclude.iter().enumerate() {
+            if let Err(err) = validate_dataset_name(e) {
+                return Err(format!(
+                    "jobs[{idx}].filesystems[{fi}].exclude[{ei}]: invalid dataset name {e:?}: {err}"
+                ));
+            }
+            let same = e == &f.path;
+            let descendant = e.starts_with(&format!("{}/", f.path));
+            if !(same || descendant) {
+                return Err(format!(
+                    "jobs[{idx}].filesystems[{fi}].exclude[{ei}]: {e:?} is not a descendant of {:?}",
+                    f.path
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_prune(idx: usize, s: &PruneJobConfig) -> Result<(), String> {
     if s.name.is_empty() {
         return Err(format!("jobs[{idx}].name: must not be empty"));
     }
-    // Reuse the same filesystem-filter shape as snap/push.
     for (fi, f) in s.filesystems.iter().enumerate() {
-        if !f.exclude.is_empty() && !f.recursive {
-            return Err(format!(
-                "jobs[{idx}].filesystems[{fi}]: exclude requires recursive = true"
-            ));
-        }
+        validate_filesystem_filter(idx, fi, f)?;
     }
     for (ki, k) in s.pruning().keep.iter().enumerate() {
         let pat = match k {
@@ -257,9 +287,9 @@ fn validate_push(idx: usize, s: &PushJobConfig) -> Result<(), String> {
     if s.target.root_fs.is_empty() {
         return Err(format!("jobs[{idx}].target.root_fs: must not be empty"));
     }
-    if s.target.root_fs.starts_with('/') || s.target.root_fs.ends_with('/') {
+    if let Err(e) = validate_dataset_name(&s.target.root_fs) {
         return Err(format!(
-            "jobs[{idx}].target.root_fs: {:?} must not start or end with '/'",
+            "jobs[{idx}].target.root_fs: invalid dataset name {:?}: {e}",
             s.target.root_fs
         ));
     }
@@ -267,23 +297,7 @@ fn validate_push(idx: usize, s: &PushJobConfig) -> Result<(), String> {
     // calling through validate_snap would also try to read pruning, so we
     // walk filesystems explicitly here.
     for (fi, f) in s.filesystems.iter().enumerate() {
-        if !f.exclude.is_empty() && !f.recursive {
-            return Err(format!(
-                "jobs[{idx}].filesystems[{fi}]: exclude requires recursive = true"
-            ));
-        }
-        if f.recursive {
-            for (ei, e) in f.exclude.iter().enumerate() {
-                let same = e == &f.path;
-                let descendant = e.starts_with(&format!("{}/", f.path));
-                if !(same || descendant) {
-                    return Err(format!(
-                        "jobs[{idx}].filesystems[{fi}].exclude[{ei}]: {e:?} is not a descendant of {:?}",
-                        f.path
-                    ));
-                }
-            }
-        }
+        validate_filesystem_filter(idx, fi, f)?;
     }
     // Snapshot filter: exactly one of prefix xor regex.
     let snapshot_filter = s.snapshot_filter();
@@ -313,23 +327,7 @@ fn validate_snap(idx: usize, s: &SnapJobConfig) -> Result<(), String> {
         return Err(format!("jobs[{idx}].name: must not be empty"));
     }
     for (fi, f) in s.filesystems.iter().enumerate() {
-        if !f.exclude.is_empty() && !f.recursive {
-            return Err(format!(
-                "jobs[{idx}].filesystems[{fi}]: exclude requires recursive = true"
-            ));
-        }
-        if f.recursive {
-            for (ei, e) in f.exclude.iter().enumerate() {
-                let same = e == &f.path;
-                let descendant = e.starts_with(&format!("{}/", f.path));
-                if !(same || descendant) {
-                    return Err(format!(
-                        "jobs[{idx}].filesystems[{fi}].exclude[{ei}]: {e:?} is not a descendant of {:?}",
-                        f.path
-                    ));
-                }
-            }
-        }
+        validate_filesystem_filter(idx, fi, f)?;
     }
     // Compile every regex once to surface bad patterns early.
     for (ki, k) in s.pruning().keep.iter().enumerate() {
@@ -956,6 +954,37 @@ prefix = "x_"
                 "expected root_fs error for {root:?}"
             );
         }
+    }
+
+    #[test]
+    fn invalid_filesystem_paths_are_rejected() {
+        let s = MIN_OK.replace("path = \"tank\"", "path = \"tank/data//escape\"");
+        let err = parse(&s).unwrap_err();
+        assert!(
+            format!("{err}").contains("invalid dataset name"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn invalid_filesystem_excludes_are_rejected() {
+        let s = r#"
+[[jobs]]
+type = "push"
+name = "p"
+peer = "p"
+interval = "1s"
+[[jobs.filesystems]]
+path = "tank/data"
+recursive = true
+exclude = ["tank/data#bookmark"]
+[jobs.target]
+root_fs = "tank/sink"
+[jobs.snapshot_filter]
+prefix = "x_"
+"#;
+        let err = parse(s).unwrap_err();
+        assert!(format!("{err}").contains("invalid dataset name"));
     }
 
     #[test]

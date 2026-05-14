@@ -83,6 +83,7 @@ type = "push"
 name = "push_to_nas"
 targets = ["nas-home", "nas-remote"]
 interval = "15m"
+dry_run = true # first-run safety: plan and log actions without sending
 filesystems = { "novafs/arch0/" = true, "novafs/arch0" = false, "novafs/arch0/data" = false }
 [jobs.target]
 root_fs = "okdata/backups/laptop"
@@ -119,7 +120,9 @@ keep = [
 identity = "laptop_nova"
 fingerprint = "SHA256:abc123..."
 jobs = ["push_to_nas"]
-operations = ["control", "recv"]
+operations = ["control", "control:discard_partial_recv", "recv"]
+# Add "control:destroy_snapshot" only if this client should be allowed
+# to remotely delete snapshots inside root_fs.
 root_fs = "okdata/backups/laptop"
 
 # Per-client recv tuning. Maps zrepl's `recv.properties.inherit` and

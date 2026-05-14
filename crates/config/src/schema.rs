@@ -298,6 +298,12 @@ pub struct PushJobConfig {
     pub target: PushTarget,
     #[serde(default)]
     pub send: SendFlagsConfig,
+    /// Plan-only mode. The job lists local/remote snapshots and logs the
+    /// chosen action for each filesystem, but does not discard partial
+    /// receives, open recv channels, run `zfs send`, create holds, or update
+    /// cursor bookmarks. Intended for first-run verification.
+    #[serde(default)]
+    pub dry_run: bool,
     /// Both fields `None` after parsing means "build from
     /// `[defaults].prefix`"; resolved at load time. (Non-Option for
     /// the same TOML-subtable-vs-Option reason as `snapshotting`.)

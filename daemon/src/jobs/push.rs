@@ -660,14 +660,17 @@ impl PushJob {
                     ..
                 }
             );
-            if needs_discard
-                && let Err(e) = peer
+            if needs_discard {
+                if self.config.dry_run {
+                    tracing::info!(target = %target, "push: dry-run would discard partial receive state");
+                } else if let Err(e) = peer
                     .rpc(Request::DiscardPartialRecv {
                         dataset: target.clone(),
                     })
                     .await
-            {
-                warn!(target = %target, error = %e, "DiscardPartialRecv RPC failed");
+                {
+                    warn!(target = %target, error = %e, "DiscardPartialRecv RPC failed");
+                }
             }
             match &plan {
                 SnapshotPlan::Nothing => {
@@ -691,6 +694,10 @@ impl PushJob {
                         "push: resuming from token"
                     );
                 }
+            }
+            if self.config.dry_run {
+                tracing::info!(sender = %sender_path, target = %target, "push: dry-run skipping execution");
+                continue;
             }
             if let Err(e) = run_one_filesystem(
                 runner,

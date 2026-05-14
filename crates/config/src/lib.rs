@@ -590,6 +590,38 @@ root_fs = "tank/backups/laptop"
     }
 
     #[test]
+    fn push_dry_run_defaults_false() {
+        let c = parse(PUSH_OK).unwrap();
+        let JobConfig::Push(p) = &c.jobs[0] else {
+            panic!("expected Push")
+        };
+        assert!(!p.dry_run);
+    }
+
+    #[test]
+    fn push_dry_run_can_be_enabled() {
+        let s = r#"
+[[jobs]]
+type = "push"
+name = "p"
+peer = "home"
+interval = "5m"
+dry_run = true
+[[jobs.filesystems]]
+path = "tank/data"
+[jobs.target]
+root_fs = "okdata/backups/laptop"
+[jobs.snapshot_filter]
+prefix = "zrepl_"
+"#;
+        let c = parse(s).unwrap();
+        let JobConfig::Push(p) = &c.jobs[0] else {
+            panic!("expected Push")
+        };
+        assert!(p.dry_run);
+    }
+
+    #[test]
     fn allowed_client_root_fs_must_be_relative_dataset_path() {
         let s = r#"
 [[allowed_clients]]

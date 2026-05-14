@@ -76,6 +76,16 @@ where
             let since = since.unwrap_or(0);
             match pool.clone() {
                 Some(p) => {
+                    if let Err(r) = enforce_control_acl(&acl, "control:subscribe_events", true) {
+                        let resp = ResponseFrame {
+                            request_id: Some(id),
+                            body: r,
+                        };
+                        let mut w = writer.lock().await;
+                        let _ = write_response(&mut *w, &resp).await;
+                        let _ = w.flush().await;
+                        continue;
+                    }
                     let resp = ResponseFrame {
                         request_id: Some(id),
                         body: Response::Ok,
@@ -180,36 +190,95 @@ async fn dispatch(
         Request::ListSnapshots {
             dataset,
             prefix_regex,
-        } => handle_list_snapshots(runner, acl, &dataset, prefix_regex.as_deref()).await,
+        } => {
+            if let Err(r) = enforce_control_acl(acl, "control:list_snapshots", true) {
+                return r;
+            }
+            handle_list_snapshots(runner, acl, &dataset, prefix_regex.as_deref()).await
+        }
         Request::GetReceiveResumeToken { dataset } => {
+            if let Err(r) = enforce_control_acl(acl, "control:get_resume_token", true) {
+                return r;
+            }
             handle_get_receive_resume_token(runner, acl, &dataset).await
         }
-        Request::DestroySnapshot { name } => handle_destroy_snapshot(runner, acl, &name).await,
+        Request::DestroySnapshot { name } => {
+            if let Err(r) = enforce_control_acl(acl, "control:destroy_snapshot", false) {
+                return r;
+            }
+            handle_destroy_snapshot(runner, acl, &name).await
+        }
         Request::DiscardPartialRecv { dataset } => {
+            if let Err(r) = enforce_control_acl(acl, "control:discard_partial_recv", false) {
+                return r;
+            }
             handle_discard_partial_recv(runner, acl, &dataset).await
         }
-        Request::ListJobs => Response::ListJobsOk { jobs: Vec::new() },
-        Request::GetJobStatus { name: _ } => Response::Error {
-            code: ErrorCode::NotFound,
-            message: "GetJobStatus not yet implemented on the receiver".into(),
-        },
-        Request::WakeupJob { name: _ } => Response::Error {
-            code: ErrorCode::NotFound,
-            message: "WakeupJob not yet implemented on the receiver".into(),
-        },
+        Request::ListJobs => {
+            if let Err(r) = enforce_control_acl(acl, "control:list_jobs", true) {
+                return r;
+            }
+            Response::ListJobsOk { jobs: Vec::new() }
+        }
+        Request::GetJobStatus { name: _ } => {
+            if let Err(r) = enforce_control_acl(acl, "control:get_job_status", true) {
+                return r;
+            }
+            Response::Error {
+                code: ErrorCode::NotFound,
+                message: "GetJobStatus not yet implemented on the receiver".into(),
+            }
+        }
+        Request::WakeupJob { name: _ } => {
+            if let Err(r) = enforce_control_acl(acl, "control:wakeup_job", false) {
+                return r;
+            }
+            Response::Error {
+                code: ErrorCode::NotFound,
+                message: "WakeupJob not yet implemented on the receiver".into(),
+            }
+        }
         Request::SubscribeEvents { .. } => unreachable!("handled in run()"),
-        Request::GetLogCursor => match pool {
-            Some(p) => match crate::state::log_events::cursor(p).await {
-                Ok(id) => Response::GetLogCursorOk { id: id as u64 },
-                Err(e) => Response::Error {
-                    code: ErrorCode::Internal,
-                    message: format!("log_events cursor: {e}"),
+        Request::GetLogCursor => {
+            if let Err(r) = enforce_control_acl(acl, "control:get_log_cursor", true) {
+                return r;
+            }
+            match pool {
+                Some(p) => match crate::state::log_events::cursor(p).await {
+                    Ok(id) => Response::GetLogCursorOk { id: id as u64 },
+                    Err(e) => Response::Error {
+                        code: ErrorCode::Internal,
+                        message: format!("log_events cursor: {e}"),
+                    },
                 },
-            },
-            None => Response::GetLogCursorOk { id: 0 },
-        },
+                None => Response::GetLogCursorOk { id: 0 },
+            }
+        }
         Request::Shutdown => unreachable!("handled in run()"),
     }
+}
+
+fn enforce_control_acl(
+    acl: &AllowedClient,
+    op: &'static str,
+    allow_legacy_control: bool,
+) -> Result<(), Response> {
+    if acl.operations.iter().any(|configured| configured == op)
+        || (allow_legacy_control
+            && acl
+                .operations
+                .iter()
+                .any(|configured| configured == "control"))
+    {
+        return Ok(());
+    }
+    Err(Response::Error {
+        code: ErrorCode::Unauthorized,
+        message: format!(
+            "identity {:?} is not allowed for control operation {op:?}",
+            acl.identity
+        ),
+    })
 }
 
 /// Reject `dataset` if the ACL has a `root_fs` set and `dataset` is not
@@ -410,11 +479,15 @@ mod tests {
     use std::sync::Arc;
 
     fn acl(root_fs: Option<&str>) -> AllowedClient {
+        acl_with_ops(root_fs, &["control", "recv"])
+    }
+
+    fn acl_with_ops(root_fs: Option<&str>, operations: &[&str]) -> AllowedClient {
         AllowedClient {
             identity: "test".into(),
             fingerprint: None,
             jobs: vec!["backup".into()],
-            operations: vec!["control".into(), "recv".into()],
+            operations: operations.iter().map(|op| (*op).to_string()).collect(),
             root_fs: root_fs.map(str::to_string),
             recv: Default::default(),
         }
@@ -544,7 +617,10 @@ mod tests {
         let runner = Arc::new(RecordingRunner::new());
         let r = rpc(
             runner,
-            acl(Some("tank/backups/laptop")),
+            acl_with_ops(
+                Some("tank/backups/laptop"),
+                &["control", "control:destroy_snapshot", "recv"],
+            ),
             Request::DestroySnapshot {
                 name: "tank/backups/laptop".into(),
             },
@@ -564,7 +640,10 @@ mod tests {
         let runner = Arc::new(RecordingRunner::new());
         let r = rpc(
             runner,
-            acl(Some("tank/backups/laptop")),
+            acl_with_ops(
+                Some("tank/backups/laptop"),
+                &["control", "control:destroy_snapshot", "recv"],
+            ),
             Request::DestroySnapshot {
                 name: "tank/backups/laptop#cursor".into(),
             },
@@ -572,6 +651,26 @@ mod tests {
         .await;
         match r {
             Response::Error { code, .. } => assert_eq!(code, ErrorCode::BadRequest),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn destroy_snapshot_requires_fine_grained_acl() {
+        let runner = Arc::new(RecordingRunner::new());
+        let r = rpc(
+            runner,
+            acl(Some("tank/backups/laptop")),
+            Request::DestroySnapshot {
+                name: "tank/backups/laptop@s1".into(),
+            },
+        )
+        .await;
+        match r {
+            Response::Error { code, message } => {
+                assert_eq!(code, ErrorCode::Unauthorized);
+                assert!(message.contains("control:destroy_snapshot"));
+            }
             other => panic!("expected Error, got {other:?}"),
         }
     }
@@ -586,13 +685,65 @@ mod tests {
         ));
         let r = rpc(
             runner,
-            acl(Some("tank/backups/laptop")),
+            acl_with_ops(
+                Some("tank/backups/laptop"),
+                &["control", "control:destroy_snapshot", "recv"],
+            ),
             Request::DestroySnapshot {
                 name: "tank/backups/laptop@s1".into(),
             },
         )
         .await;
         assert!(matches!(r, Response::DestroySnapshotOk), "got {r:?}");
+    }
+
+    #[tokio::test]
+    async fn discard_partial_recv_requires_fine_grained_acl() {
+        let runner = Arc::new(RecordingRunner::new());
+        let r = rpc(
+            runner,
+            acl(Some("tank/backups/laptop")),
+            Request::DiscardPartialRecv {
+                dataset: "tank/backups/laptop".into(),
+            },
+        )
+        .await;
+        match r {
+            Response::Error { code, message } => {
+                assert_eq!(code, ErrorCode::Unauthorized);
+                assert!(message.contains("control:discard_partial_recv"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_control_still_allows_read_only_requests() {
+        let runner = Arc::new(RecordingRunner::new().record(
+            Cmd::new("zfs").args([
+                "list",
+                "-j",
+                "-p",
+                "-t",
+                "snapshot",
+                "-o",
+                "guid",
+                "tank/backups/laptop",
+            ]),
+            Vec::new(),
+            b"cannot open 'tank/backups/laptop': dataset does not exist".to_vec(),
+            1,
+        ));
+        let r = rpc(
+            runner,
+            acl(Some("tank/backups/laptop")),
+            Request::ListSnapshots {
+                dataset: "tank/backups/laptop".into(),
+                prefix_regex: None,
+            },
+        )
+        .await;
+        assert!(matches!(r, Response::ListSnapshotsOk { .. }), "got {r:?}");
     }
 
     #[tokio::test]

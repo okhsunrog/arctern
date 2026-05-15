@@ -120,7 +120,7 @@ root_fs = {receiver_root:?}
     let setup = format!(
         "set -e; \
          printf '%s\n' 'ExposeAuthInfo yes' > /etc/ssh/sshd_config.d/99-arctern-test.conf; \
-         systemctl restart sshd; \
+         systemctl reload sshd; \
          useradd -m -s /bin/sh {remote_user}; \
          mkdir -p {remote_home}/.ssh {state_dir}; \
          chmod 700 {remote_home}/.ssh; \

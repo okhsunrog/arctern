@@ -2,10 +2,12 @@
 //!
 //! sshd invokes this via `authorized_keys` `command="..."`. The dispatcher
 //! parses `SSH_ORIGINAL_COMMAND`, looks up the identity in
-//! `[[allowed_clients]]`, and (in this commit) logs an unimplemented
-//! exit. The `control` and `recv` handlers land in steps 7 and 8.
+//! `[[allowed_clients]]`, verifies ACL/fingerprint policy, and dispatches
+//! to the `control` or `recv` stdinserver handler.
 
+use std::fs;
 use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 
 use arctern_config::{AllowedClient, Config};
@@ -41,7 +43,7 @@ pub enum DispatchError {
     #[error("identity {identity:?} authenticated with unexpected key fingerprint")]
     FingerprintMismatch { identity: String },
     #[error(
-        "identity {identity:?} requires SSH key fingerprint verification, but SSH_AUTH_INFO_0 is unavailable"
+        "identity {identity:?} requires SSH key fingerprint verification, but no SSH auth info is available"
     )]
     MissingAuthInfo { identity: String },
 }
@@ -64,7 +66,7 @@ pub async fn run_with(
     pool: Option<Arc<sqlx::SqlitePool>>,
 ) -> eyre::Result<()> {
     let original = std::env::var("SSH_ORIGINAL_COMMAND").unwrap_or_default();
-    let auth_info = std::env::var("SSH_AUTH_INFO_0").ok();
+    let auth_info = ssh_auth_info();
     let action = match decide(identity, &original, auth_info.as_deref(), &config) {
         Ok(a) => a,
         Err(e) => {
@@ -156,6 +158,23 @@ fn lookup_identity<'a>(config: &'a Config, identity: &str) -> Option<&'a Allowed
         .find(|c| c.identity == identity)
 }
 
+fn ssh_auth_info() -> Option<String> {
+    if let Ok(info) = std::env::var("SSH_AUTH_INFO_0")
+        && !info.trim().is_empty()
+    {
+        return Some(info);
+    }
+
+    let path = std::env::var("SSH_USER_AUTH").ok()?;
+    let text = fs::read_to_string(path).ok()?;
+    let text = text.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
 fn verify_fingerprint(
     identity: &str,
     acl: &AllowedClient,
@@ -169,13 +188,138 @@ fn verify_fingerprint(
             identity: identity.to_string(),
         });
     };
-    if auth_info.split_whitespace().any(|part| part == expected) {
+    if auth_info_matches_fingerprint(auth_info, expected) {
         Ok(())
     } else {
         Err(DispatchError::FingerprintMismatch {
             identity: identity.to_string(),
         })
     }
+}
+
+fn auth_info_matches_fingerprint(auth_info: &str, expected: &str) -> bool {
+    if auth_info.split_whitespace().any(|part| part == expected) {
+        return true;
+    }
+
+    for line in auth_info.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(method) = parts.next() else {
+            continue;
+        };
+        if method != "publickey" {
+            continue;
+        }
+        let Some(key_type) = parts.next() else {
+            continue;
+        };
+        let Some(key_blob) = parts.next() else {
+            continue;
+        };
+        if fingerprint_from_public_key_parts(key_type, key_blob).as_deref() == Some(expected) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn fingerprint_from_public_key_parts(key_type: &str, key_blob: &str) -> Option<String> {
+    let mut child = Command::new("ssh-keygen")
+        .args(["-l", "-f", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut()?;
+        writeln!(stdin, "{key_type} {key_blob}").ok()?;
+    }
+
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    stdout.split_whitespace().nth(1).map(str::to_string)
+}
+
+#[cfg(test)]
+fn fingerprint_from_public_key_line(line: &str) -> Option<String> {
+    let mut parts = line.split_whitespace();
+    let key_type = parts.next()?;
+    let key_blob = parts.next()?;
+    fingerprint_from_public_key_parts(key_type, key_blob)
+}
+
+#[cfg(test)]
+fn ssh_keygen_available() -> bool {
+    Command::new("ssh-keygen")
+        .arg("-V")
+        .output()
+        .map(|_| true)
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+fn temp_path(prefix: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!("{prefix}-{nanos}"))
+}
+
+#[cfg(test)]
+fn generate_test_public_key() -> Option<(std::path::PathBuf, String, String)> {
+    if !ssh_keygen_available() {
+        return None;
+    }
+    let key_path = temp_path("arctern-dispatch-test-key");
+    let status = Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+        .arg(&key_path)
+        .status()
+        .ok()?;
+    if !status.success() {
+        return None;
+    }
+    let pub_path = key_path.with_extension("pub");
+    let public_key = fs::read_to_string(&pub_path).ok()?;
+    let fingerprint = fingerprint_from_public_key_line(&public_key)?;
+    let _ = fs::remove_file(&pub_path);
+    Some((key_path, public_key, fingerprint))
+}
+
+#[cfg(test)]
+fn cleanup_test_key(path: &std::path::Path) {
+    let _ = fs::remove_file(path);
+    let _ = fs::remove_file(path.with_extension("pub"));
+}
+
+#[cfg(test)]
+fn with_env_var<T>(key: &str, value: Option<&str>, f: impl FnOnce() -> T) -> T {
+    let old = std::env::var_os(key);
+    match value {
+        Some(v) => unsafe { std::env::set_var(key, v) },
+        None => unsafe { std::env::remove_var(key) },
+    }
+    let result = f();
+    match old {
+        Some(v) => unsafe { std::env::set_var(key, v) },
+        None => unsafe { std::env::remove_var(key) },
+    }
+    result
+}
+
+#[cfg(test)]
+fn with_clean_auth_env<T>(f: impl FnOnce() -> T) -> T {
+    with_env_var("SSH_AUTH_INFO_0", None, || {
+        with_env_var("SSH_USER_AUTH", None, f)
+    })
 }
 
 #[cfg(test)]
@@ -317,6 +461,42 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, DispatchError::FingerprintMismatch { .. }));
+    }
+
+    #[test]
+    fn exposes_auth_info_public_key_blob_matches_fingerprint() {
+        let Some((key_path, public_key, fingerprint)) = generate_test_public_key() else {
+            eprintln!("skipping: ssh-keygen unavailable");
+            return;
+        };
+        let auth_info = format!("publickey {public_key}");
+        assert!(auth_info_matches_fingerprint(&auth_info, &fingerprint));
+        cleanup_test_key(&key_path);
+    }
+
+    #[test]
+    fn ssh_user_auth_file_is_used_when_auth_info_env_missing() {
+        let Some((key_path, public_key, fingerprint)) = generate_test_public_key() else {
+            eprintln!("skipping: ssh-keygen unavailable");
+            return;
+        };
+        let auth_file = temp_path("arctern-dispatch-ssh-user-auth");
+        fs::write(&auth_file, format!("publickey {public_key}")).expect("write auth file");
+
+        let got = with_clean_auth_env(|| {
+            with_env_var(
+                "SSH_USER_AUTH",
+                Some(auth_file.to_str().unwrap()),
+                ssh_auth_info,
+            )
+        });
+        assert!(auth_info_matches_fingerprint(
+            got.as_deref().expect("auth info from SSH_USER_AUTH"),
+            &fingerprint
+        ));
+
+        let _ = fs::remove_file(&auth_file);
+        cleanup_test_key(&key_path);
     }
 
     #[test]

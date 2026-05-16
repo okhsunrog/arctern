@@ -81,6 +81,13 @@ test-integration:
     PALIMPSEST_SSH_PASSWORD="" \
         cargo test -p arctern-daemon --features integration -- --test-threads=1
 
+# Real OpenSSH forced-command control-channel test. Requires the shared VM.
+test-openssh: vm-up
+    PALIMPSEST_SSH_TARGET={{SSH_TARGET}} \
+    PALIMPSEST_SSH_PASSWORD="" \
+    ARCTERN_OPENSSH_INTEGRATION=1 \
+        cargo test -p arctern-daemon --test integration_openssh_forced_command --features integration -- --nocapture
+
 # One-shot: vm-up + integration + vm-down. For CI / clean checks.
 test-vm: vm-up
     just test-integration

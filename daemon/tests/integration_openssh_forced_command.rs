@@ -3,7 +3,7 @@
 
 mod common;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use arctern_transport::{Request, RequestFrame, Response, read_response, write_request};
@@ -28,6 +28,81 @@ fn shell_quote(s: &str) -> String {
     }
     out.push('\'');
     out
+}
+
+fn run_remote_shell_best_effort(remote_cmd: &str) {
+    let Ok(raw_target) = std::env::var("PALIMPSEST_SSH_TARGET") else {
+        return;
+    };
+    let Ok(target) = palimpsest::runner::SshTarget::parse(&raw_target) else {
+        return;
+    };
+    let password = std::env::var("PALIMPSEST_SSH_PASSWORD").ok();
+    let mut cmd = match password.as_deref() {
+        Some(pw) => {
+            let mut c = Command::new("sshpass");
+            c.args(["-p", pw, "ssh"]);
+            c
+        }
+        None => Command::new("ssh"),
+    };
+    cmd.args([
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "LogLevel=ERROR",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "ServerAliveInterval=5",
+        "-o",
+        "ServerAliveCountMax=1",
+        "-p",
+        &target.port.to_string(),
+        &format!("{}@{}", target.user, target.host),
+        "--",
+        remote_cmd,
+    ]);
+    let _ = cmd.status();
+}
+
+struct OpenSshTestCleanup {
+    local_paths: Vec<PathBuf>,
+    remote_cmd: String,
+}
+
+impl OpenSshTestCleanup {
+    fn new(local_paths: Vec<PathBuf>, remote_cmd: String) -> Self {
+        Self {
+            local_paths,
+            remote_cmd,
+        }
+    }
+}
+
+impl Drop for OpenSshTestCleanup {
+    fn drop(&mut self) {
+        if !self.remote_cmd.is_empty() {
+            run_remote_shell_best_effort(&self.remote_cmd);
+        }
+        for path in &self.local_paths {
+            remove_local_path_best_effort(path);
+        }
+    }
+}
+
+fn remove_local_path_best_effort(path: &Path) {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_dir() => {
+            let _ = std::fs::remove_dir_all(path);
+        }
+        Ok(_) => {
+            let _ = std::fs::remove_file(path);
+        }
+        Err(_) => {}
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -60,6 +135,24 @@ async fn forced_command_control_channel_enforces_acl_and_fingerprint() {
 
     let receiver_root = format!("tank/arctern-openssh-{suffix}");
     let state_dir = format!("/tmp/arctern-openssh-state-{suffix}");
+    let cleanup = OpenSshTestCleanup::new(
+        vec![
+            local_key.clone(),
+            local_pub.clone(),
+            local_known_hosts.clone(),
+            ssh_config.clone(),
+        ],
+        format!(
+            "rm -rf {remote_bin} {remote_cfg} {state_dir}; \
+             userdel -r {remote_user} >/dev/null 2>&1 || true; \
+             rm -f /etc/ssh/sshd_config.d/99-arctern-test.conf; \
+             systemctl reload sshd >/dev/null 2>&1 || true",
+            remote_bin = shell_quote(&remote_bin),
+            remote_cfg = shell_quote(&remote_cfg),
+            state_dir = shell_quote(&state_dir),
+            remote_user = shell_quote(&remote_user),
+        ),
+    );
 
     eprintln!("openssh test: copying arctern binary");
     let arctern_bin = PathBuf::from(env!("CARGO_BIN_EXE_arctern"));
@@ -260,15 +353,5 @@ root_fs = {receiver_root:?}
         );
     }
 
-    run_remote_shell(&format!(
-        "rm -rf {} {} {}; userdel -r {} >/dev/null 2>&1 || true",
-        shell_quote(&remote_bin),
-        shell_quote(&remote_cfg),
-        shell_quote(&state_dir),
-        shell_quote(&remote_user)
-    ));
-    let _ = std::fs::remove_file(&local_key);
-    let _ = std::fs::remove_file(&local_pub);
-    let _ = std::fs::remove_file(&local_known_hosts);
-    let _ = std::fs::remove_file(&ssh_config);
+    drop(cleanup);
 }

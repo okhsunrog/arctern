@@ -6,7 +6,10 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use arctern_transport::{Request, RequestFrame, Response, read_response, write_request};
+use arctern_transport::{
+    RecvHeader, Request, RequestFrame, Response, SendFlagsWire, SendHeader, SendKind, SnapshotRef,
+    read_response, write_header, write_request,
+};
 use openssh::{KnownHosts, SessionBuilder, Stdio};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{Duration, timeout};
@@ -133,7 +136,11 @@ async fn forced_command_control_channel_enforces_acl_and_fingerprint() {
     let local_pub = local_key.with_extension("pub");
     let local_known_hosts = PathBuf::from(format!("/tmp/arctern-openssh-known-hosts-{suffix}"));
 
-    let receiver_root = format!("tank/arctern-openssh-{suffix}");
+    let pool = common::LoopbackPool::create(common::ssh_runner_from_env())
+        .await
+        .expect("create OpenSSH recv test pool");
+    let source_dataset = format!("{}/source", pool.name());
+    let receiver_root = format!("{}/receiver", pool.name());
     let state_dir = format!("/tmp/arctern-openssh-state-{suffix}");
     let cleanup = OpenSshTestCleanup::new(
         vec![
@@ -228,6 +235,20 @@ root_fs = {receiver_root:?}
     );
     run_remote_shell(&setup);
 
+    eprintln!("openssh test: creating ZFS source/receiver datasets");
+    let zfs_setup = format!(
+        "set -e; \
+         zfs create -p {receiver_root}; \
+         zfs allow -u {remote_user} create,mount,receive {receiver_root}; \
+         zfs create {source_dataset}; \
+         zfs snapshot {source_snapshot}",
+        receiver_root = shell_quote(&receiver_root),
+        remote_user = shell_quote(&remote_user),
+        source_dataset = shell_quote(&source_dataset),
+        source_snapshot = shell_quote(&format!("{source_dataset}@snap1")),
+    );
+    run_remote_shell(&zfs_setup);
+
     let target = ssh_target_from_env();
     let mut scan = Command::new("ssh-keyscan");
     scan.args(["-p", &target.port.to_string(), &target.host]);
@@ -319,6 +340,118 @@ root_fs = {receiver_root:?}
     let _ = timeout(Duration::from_secs(10), child.wait())
         .await
         .expect("timed out waiting for control channel exit");
+
+    eprintln!("openssh test: capturing source zfs send stream");
+    let send_output = run_local_command({
+        let mut cmd = match std::env::var("PALIMPSEST_SSH_PASSWORD").ok().as_deref() {
+            Some(pw) => {
+                let mut c = Command::new("sshpass");
+                c.args(["-p", pw, "ssh"]);
+                c
+            }
+            None => Command::new("ssh"),
+        };
+        cmd.args([
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "LogLevel=ERROR",
+            "-p",
+            &target.port.to_string(),
+            &format!("{}@{}", target.user, target.host),
+            "--",
+            "zfs",
+            "send",
+            &format!("{source_dataset}@snap1"),
+        ]);
+        cmd
+    });
+
+    eprintln!("openssh test: spawning recv channel");
+    let target_dataset = format!("{receiver_root}/copy");
+    let mut recv_child = session
+        .raw_command("arctern")
+        .arg("stdinserver")
+        .arg("push_test")
+        .arg("recv")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .await
+        .expect("spawn forced-command recv channel");
+    let mut recv_stdin = recv_child.stdin().take().expect("recv stdin");
+    let mut recv_stdout = recv_child.stdout().take().expect("recv stdout");
+    let mut recv_stderr = recv_child.stderr().take().expect("recv stderr");
+    let recv_header = RecvHeader {
+        version: arctern_transport::PROTOCOL_VERSION,
+        target_dataset: target_dataset.clone(),
+        send: SendHeader {
+            send_kind: SendKind::Full,
+            from_snap: None,
+            to_snap: SnapshotRef {
+                name: "snap1".to_string(),
+                guid: 1,
+            },
+            flags: SendFlagsWire {
+                raw: false,
+                embedded: false,
+                compressed: false,
+                large_blocks: false,
+            },
+            discard_partial_recv: false,
+        },
+    };
+    write_header(&mut recv_stdin, &recv_header)
+        .await
+        .expect("write recv header");
+    recv_stdin
+        .write_all(&send_output.stdout)
+        .await
+        .expect("write zfs stream to recv channel");
+    recv_stdin.shutdown().await.expect("shutdown recv stdin");
+    drop(recv_stdin);
+
+    let recv_response_frame =
+        match timeout(Duration::from_secs(30), read_response(&mut recv_stdout)).await {
+            Ok(frame) => frame,
+            Err(e) => {
+                let mut stderr_text = String::new();
+                let _ = timeout(
+                    Duration::from_secs(2),
+                    recv_stderr.read_to_string(&mut stderr_text),
+                )
+                .await;
+                panic!("timed out waiting for recv response: {e}; stderr:\n{stderr_text}");
+            }
+        };
+    if let Err(e) = &recv_response_frame {
+        let mut stderr_text = String::new();
+        let _ = timeout(
+            Duration::from_secs(2),
+            recv_stderr.read_to_string(&mut stderr_text),
+        )
+        .await;
+        panic!("read recv response: {e}; stderr:\n{stderr_text}");
+    }
+    match recv_response_frame
+        .expect("checked recv response frame")
+        .body
+    {
+        Response::Ok => {}
+        other => panic!("unexpected recv response: {other:?}"),
+    }
+    let recv_status = timeout(Duration::from_secs(10), recv_child.wait())
+        .await
+        .expect("timed out waiting for recv channel exit")
+        .expect("wait recv child");
+    assert!(recv_status.success(), "recv child failed: {recv_status}");
+    run_remote_shell(&format!(
+        "zfs list -H -t snapshot -o name {}",
+        shell_quote(&format!("{target_dataset}@snap1"))
+    ));
 
     eprintln!("openssh test: checking bad fingerprint");
     let bad_cfg = cfg.replace(

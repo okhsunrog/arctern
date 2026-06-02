@@ -35,7 +35,10 @@ jobs:
       # build.rs embeds admin-ui/dist via memory_serve; an empty dir is enough
       # to compile (integration tests are gated behind the `integration` feature
       # and need real ZFS/SSH, so they stay off here).
-      - run: mkdir -p admin-ui/dist
+      # build.rs embeds admin-ui/dist via memory_serve (empty dir is fine), and
+      # router.rs `include_bytes!`s dist/index.html for the SPA fallback — so a
+      # stub index.html must exist to compile without building the real UI.
+      - run: mkdir -p admin-ui/dist && printf '<!doctype html><title>arctern</title>' > admin-ui/dist/index.html
         working-directory: arctern
       # Scope fmt to arctern's own packages: `--all` also pulls in the
       # palimpsest path dependency, which has its own repo and CI and must not

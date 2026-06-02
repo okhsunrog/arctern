@@ -4,10 +4,7 @@ import type { VdevNode } from '../client'
 import { poolStateColor } from '../utils/pool'
 import { displayName, subtreeHealth } from '../utils/vdev'
 
-const props = withDefaults(
-  defineProps<{ vdevs: VdevNode[]; depth?: number }>(),
-  { depth: 0 },
-)
+const props = withDefaults(defineProps<{ vdevs: VdevNode[]; depth?: number }>(), { depth: 0 })
 
 // Track which interior nodes are collapsed. By default an interior
 // node is auto-expanded iff its subtree has anything unhealthy — so a
@@ -94,16 +91,16 @@ const rows = computed(() =>
           variant="subtle"
           size="xs"
           class="shrink-0 w-20 justify-center"
-        >{{ hasChildren ? health.worstState : v.state }}</UBadge>
+          >{{ hasChildren ? health.worstState : v.state }}</UBadge
+        >
 
         <!-- vdev kind -->
         <span class="text-xs text-gray-500 font-mono w-14 shrink-0">{{ v.vdev_type }}</span>
 
         <!-- name -->
-        <span
-          class="font-mono text-xs flex-1 truncate"
-          :title="v.path ?? v.name"
-        >{{ displayName(v.name) }}</span>
+        <span class="font-mono text-xs flex-1 truncate" :title="v.path ?? v.name">{{
+          displayName(v.name)
+        }}</span>
 
         <!-- capacity -->
         <span class="text-xs text-gray-500 shrink-0 tabular-nums">
@@ -119,13 +116,10 @@ const rows = computed(() =>
               ? 'Aggregate errors across this subtree'
               : 'Read / Write / Checksum errors on this vdev'
           "
-        >{{ hasChildren ? subtreeErrorsLabel(v) : leafErrorsLabel(v) }}</span>
+          >{{ hasChildren ? subtreeErrorsLabel(v) : leafErrorsLabel(v) }}</span
+        >
       </div>
-      <VdevTree
-        v-if="hasChildren && !isCollapsed(v)"
-        :vdevs="v.children"
-        :depth="depth + 1"
-      />
+      <VdevTree v-if="hasChildren && !isCollapsed(v)" :vdevs="v.children" :depth="depth + 1" />
     </li>
   </ul>
 </template>

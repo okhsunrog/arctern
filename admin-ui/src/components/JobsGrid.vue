@@ -20,10 +20,9 @@ function statusBadge(j: JobStatus): { label: string; color: 'success' | 'error' 
       <template #header>
         <div class="flex items-center justify-between">
           <div>
-            <RouterLink
-              :to="`/jobs/${j.name}`"
-              class="font-semibold hover:underline"
-            >{{ j.name }}</RouterLink>
+            <RouterLink :to="`/jobs/${j.name}`" class="font-semibold hover:underline">{{
+              j.name
+            }}</RouterLink>
             <span class="ml-2 text-sm text-gray-500">{{ j.kind }}</span>
           </div>
           <UBadge :color="statusBadge(j).color" variant="subtle">{{ statusBadge(j).label }}</UBadge>
@@ -43,12 +42,9 @@ function statusBadge(j: JobStatus): { label: string; color: 'success' | 'error' 
         </div>
       </dl>
       <template #footer>
-        <UButton
-          size="xs"
-          variant="soft"
-          icon="i-lucide-zap"
-          @click="onWake?.(j.name)"
-        >Wakeup</UButton>
+        <UButton size="xs" variant="soft" icon="i-lucide-zap" @click="onWake?.(j.name)"
+          >Wakeup</UButton
+        >
       </template>
     </UCard>
   </div>

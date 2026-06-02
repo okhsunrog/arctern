@@ -27,9 +27,7 @@ export function poolUsedPercent(alloc: string, total: string): number {
   return t > 0 ? Math.round((a / t) * 100) : 0
 }
 
-export function poolStateColor(
-  state: string,
-): 'success' | 'warning' | 'error' | 'neutral' {
+export function poolStateColor(state: string): 'success' | 'warning' | 'error' | 'neutral' {
   switch (state) {
     case 'ONLINE':
       return 'success'

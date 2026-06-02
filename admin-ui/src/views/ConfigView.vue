@@ -44,7 +44,8 @@ async function copy() {
           size="xs"
           :disabled="!config"
           @click="copy"
-        >{{ copied ? 'Copied' : 'Copy' }}</UButton>
+          >{{ copied ? 'Copied' : 'Copy' }}</UButton
+        >
       </div>
     </div>
 
@@ -61,7 +62,8 @@ async function copy() {
       <div class="text-xs text-gray-500 font-mono">{{ config.path }}</div>
       <pre
         class="rounded-md border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 p-4 overflow-x-auto text-xs font-mono whitespace-pre"
-      >{{ config.content_toml }}</pre>
+        >{{ config.content_toml }}</pre
+      >
     </div>
     <div v-else-if="!error" class="text-gray-500">Loading…</div>
   </div>

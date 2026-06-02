@@ -2,11 +2,7 @@
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { usePool } from '../composables/usePools'
-import {
-  parseZpoolSize,
-  poolStateColor,
-  poolUsedPercent,
-} from '../utils/pool'
+import { parseZpoolSize, poolStateColor, poolUsedPercent } from '../utils/pool'
 import { formatRelative } from '../utils/format'
 import VdevTree from '../components/VdevTree.vue'
 
@@ -26,9 +22,7 @@ const totals = computed(() => {
   return { alloc, total, percent: total > 0 ? Math.round((alloc / total) * 100) : 0 }
 })
 
-const scrubActive = computed(
-  () => pool.value?.scan?.state === 'SCANNING',
-)
+const scrubActive = computed(() => pool.value?.scan?.state === 'SCANNING')
 
 function scrubProgressPercent(): number {
   const s = pool.value?.scan
@@ -41,9 +35,7 @@ function scrubProgressPercent(): number {
 
 <template>
   <div class="max-w-6xl mx-auto px-4 py-6 space-y-6">
-    <RouterLink to="/pools" class="text-sm text-primary-500 hover:underline">
-      ← Pools
-    </RouterLink>
+    <RouterLink to="/pools" class="text-sm text-primary-500 hover:underline"> ← Pools </RouterLink>
     <UAlert v-if="error" color="error" :title="error" />
 
     <div v-if="!pool" class="text-gray-500">Loading…</div>
@@ -51,7 +43,9 @@ function scrubProgressPercent(): number {
       <div class="flex items-center justify-between">
         <div>
           <h1 class="text-2xl font-semibold">{{ pool.name }}</h1>
-          <p class="text-xs text-gray-500 font-mono">guid {{ pool.pool_guid }} · txg {{ pool.txg }}</p>
+          <p class="text-xs text-gray-500 font-mono">
+            guid {{ pool.pool_guid }} · txg {{ pool.txg }}
+          </p>
         </div>
         <UBadge :color="poolStateColor(pool.state)" variant="subtle">{{ pool.state }}</UBadge>
       </div>
@@ -69,8 +63,8 @@ function scrubProgressPercent(): number {
         />
         <div class="text-xs text-gray-500 mt-2">
           <span>
-            {{ (totals.alloc / 1024 ** 3).toFixed(1) }} GiB allocated
-            of {{ (totals.total / 1024 ** 3).toFixed(1) }} GiB total
+            {{ (totals.alloc / 1024 ** 3).toFixed(1) }} GiB allocated of
+            {{ (totals.total / 1024 ** 3).toFixed(1) }} GiB total
           </span>
         </div>
       </UCard>
@@ -80,26 +74,21 @@ function scrubProgressPercent(): number {
           <div class="flex items-center justify-between">
             <div class="font-semibold">Scrub</div>
             <div class="flex gap-2">
-              <UButton
-                v-if="!scrubActive"
-                size="xs"
-                icon="i-lucide-play"
-                @click="scrub('start')"
-              >Start</UButton>
+              <UButton v-if="!scrubActive" size="xs" icon="i-lucide-play" @click="scrub('start')"
+                >Start</UButton
+              >
               <template v-else>
-                <UButton
-                  size="xs"
-                  icon="i-lucide-pause"
-                  variant="soft"
-                  @click="scrub('pause')"
-                >Pause</UButton>
+                <UButton size="xs" icon="i-lucide-pause" variant="soft" @click="scrub('pause')"
+                  >Pause</UButton
+                >
                 <UButton
                   size="xs"
                   icon="i-lucide-square"
                   variant="soft"
                   color="error"
                   @click="scrub('stop')"
-                >Stop</UButton>
+                  >Stop</UButton
+                >
               </template>
             </div>
           </div>
@@ -118,15 +107,16 @@ function scrubProgressPercent(): number {
             <dd v-if="pool.scan.end_time">{{ pool.scan.end_time }}</dd>
             <dt v-if="pool.scan.examined" class="text-gray-500">Examined</dt>
             <dd v-if="pool.scan.examined">
-              {{ pool.scan.examined }}<template v-if="pool.scan.to_examine">
-                of {{ pool.scan.to_examine }}
-              </template>
+              {{ pool.scan.examined
+              }}<template v-if="pool.scan.to_examine"> of {{ pool.scan.to_examine }} </template>
             </dd>
             <dt v-if="pool.scan.errors" class="text-gray-500">Errors</dt>
             <dd
               v-if="pool.scan.errors"
               :class="pool.scan.errors !== '0' ? 'text-error-600 font-semibold' : ''"
-            >{{ pool.scan.errors }}</dd>
+            >
+              {{ pool.scan.errors }}
+            </dd>
             <dt v-if="pool.scan.pass_start" class="text-gray-500">Pass started</dt>
             <dd v-if="pool.scan.pass_start">
               {{ formatRelative(new Date(Number(pool.scan.pass_start) * 1000).toISOString()) }}
@@ -134,9 +124,7 @@ function scrubProgressPercent(): number {
           </dl>
           <div v-if="scrubActive" class="mt-3">
             <UProgress :model-value="scrubProgressPercent()" />
-            <div class="text-xs text-gray-500 mt-1">
-              {{ scrubProgressPercent() }}% scanned
-            </div>
+            <div class="text-xs text-gray-500 mt-1">{{ scrubProgressPercent() }}% scanned</div>
           </div>
         </template>
       </UCard>
@@ -145,10 +133,9 @@ function scrubProgressPercent(): number {
         <template #header>
           <div class="flex items-center justify-between">
             <div class="font-semibold">Vdev tree</div>
-            <UBadge
-              :color="pool.error_count !== '0' ? 'error' : 'success'"
-              variant="subtle"
-            >{{ pool.error_count }} aggregate errors</UBadge>
+            <UBadge :color="pool.error_count !== '0' ? 'error' : 'success'" variant="subtle"
+              >{{ pool.error_count }} aggregate errors</UBadge
+            >
           </div>
         </template>
         <VdevTree :vdevs="pool.vdevs" />

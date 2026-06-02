@@ -10,10 +10,11 @@ export function useJobRuns(name: string, refreshMs = 10_000, limit = 100) {
   async function refresh() {
     const r = await listRuns({ path: { name }, query: { limit } })
     if (r.error) {
+      const e: unknown = r.error
       error.value =
-        r.error && typeof r.error === 'object' && 'message' in r.error
-          ? String((r.error as { message: unknown }).message)
-          : String(r.error)
+        e && typeof e === 'object' && 'message' in e && typeof e.message === 'string'
+          ? e.message
+          : JSON.stringify(e)
     } else {
       runs.value = r.data ?? []
       error.value = null

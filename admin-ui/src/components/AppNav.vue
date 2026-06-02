@@ -16,18 +16,14 @@ const links = [
     <div class="max-w-6xl mx-auto px-4 py-3 flex items-center gap-6">
       <RouterLink to="/" class="font-bold text-lg">arctern</RouterLink>
       <nav class="flex gap-1">
-        <RouterLink
-          v-for="l in links"
-          :key="l.to"
-          :to="l.to"
-          v-slot="{ isActive }"
-        >
+        <RouterLink v-for="l in links" :key="l.to" :to="l.to" v-slot="{ isActive }">
           <UButton
             :color="isActive ? 'primary' : 'neutral'"
             :variant="isActive ? 'soft' : 'ghost'"
             :icon="l.icon"
             size="sm"
-          >{{ l.label }}</UButton>
+            >{{ l.label }}</UButton
+          >
         </RouterLink>
       </nav>
     </div>

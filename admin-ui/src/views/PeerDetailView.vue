@@ -1,11 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import {
-  listPeerJobs,
-  listPeerSnapshots,
-  wakeupPeerJob,
-} from '../client'
+import { listPeerJobs, listPeerSnapshots, wakeupPeerJob } from '../client'
 import type { JobStatus, PeerSnapshotEntry } from '../client'
 import { formatRelative } from '../utils/format'
 import { useEvents } from '../composables/useEvents'
@@ -89,16 +85,15 @@ const tail = computed(() => events.value.slice(-30))
 
     <template v-if="tab === 'jobs'">
       <div v-if="loading && jobs.length === 0" class="text-gray-500">Loading…</div>
-      <div v-else-if="jobs.length === 0" class="text-gray-500">
-        Peer reports no jobs.
-      </div>
+      <div v-else-if="jobs.length === 0" class="text-gray-500">Peer reports no jobs.</div>
       <div v-else class="space-y-2">
         <UCard v-for="j in jobs" :key="j.name">
           <div class="flex items-center justify-between">
             <div>
               <div class="font-semibold">{{ j.name }}</div>
               <div class="text-xs text-gray-500">
-                {{ j.kind }} · last {{ formatRelative(j.last_run) }} · next {{ formatRelative(j.next_run) }}
+                {{ j.kind }} · last {{ formatRelative(j.last_run) }} · next
+                {{ formatRelative(j.next_run) }}
               </div>
               <div v-if="j.last_error" class="text-error-600 text-xs mt-1">
                 {{ j.last_error }}
@@ -125,9 +120,7 @@ const tail = computed(() => events.value.slice(-30))
       <div v-if="!datasetInput" class="text-gray-500">
         Enter a dataset path on the peer to list its snapshots.
       </div>
-      <div v-else-if="snapshots.length === 0" class="text-gray-500">
-        No snapshots match.
-      </div>
+      <div v-else-if="snapshots.length === 0" class="text-gray-500">No snapshots match.</div>
       <UTable
         v-else
         :data="snapshots"

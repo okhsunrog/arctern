@@ -64,9 +64,7 @@ const tableColumns = computed(() => [
 
 <template>
   <div class="max-w-6xl mx-auto px-4 py-6 space-y-6">
-    <RouterLink to="/jobs" class="text-sm text-primary-500 hover:underline">
-      ← Jobs
-    </RouterLink>
+    <RouterLink to="/jobs" class="text-sm text-primary-500 hover:underline"> ← Jobs </RouterLink>
     <UAlert v-if="jobsError" color="error" :title="jobsError" />
     <div v-if="!job" class="text-gray-500">Job not found.</div>
     <template v-else>

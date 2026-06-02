@@ -109,8 +109,7 @@ const sizeOpts = {
     y: {
       beginAtZero: true,
       ticks: {
-        callback: (v: string | number) =>
-          formatBytes(typeof v === 'number' ? v : Number(v)),
+        callback: (v: string | number) => formatBytes(typeof v === 'number' ? v : Number(v)),
       },
     },
   },
@@ -120,7 +119,9 @@ const rateOpts = {
   responsive: true,
   maintainAspectRatio: false,
   plugins: { legend: { display: false } },
-  scales: { y: { beginAtZero: true, max: 100, ticks: { callback: (v: string | number) => `${v}%` } } },
+  scales: {
+    y: { beginAtZero: true, max: 100, ticks: { callback: (v: string | number) => `${v}%` } },
+  },
 }
 </script>
 
@@ -160,21 +161,36 @@ const rateOpts = {
       <template #header><div class="font-semibold">Breakdown</div></template>
       <dl class="grid grid-cols-2 md:grid-cols-4 gap-y-2 text-sm">
         <dt class="text-gray-500">Demand data</dt>
-        <dd>{{ arc.demand_data_hits.toLocaleString() }} / {{ arc.demand_data_misses.toLocaleString() }}</dd>
+        <dd>
+          {{ arc.demand_data_hits.toLocaleString() }} /
+          {{ arc.demand_data_misses.toLocaleString() }}
+        </dd>
         <dt class="text-gray-500">Demand metadata</dt>
-        <dd>{{ arc.demand_metadata_hits.toLocaleString() }} / {{ arc.demand_metadata_misses.toLocaleString() }}</dd>
+        <dd>
+          {{ arc.demand_metadata_hits.toLocaleString() }} /
+          {{ arc.demand_metadata_misses.toLocaleString() }}
+        </dd>
         <dt class="text-gray-500">Prefetch data</dt>
-        <dd>{{ arc.prefetch_data_hits.toLocaleString() }} / {{ arc.prefetch_data_misses.toLocaleString() }}</dd>
+        <dd>
+          {{ arc.prefetch_data_hits.toLocaleString() }} /
+          {{ arc.prefetch_data_misses.toLocaleString() }}
+        </dd>
         <dt class="text-gray-500">Prefetch metadata</dt>
-        <dd>{{ arc.prefetch_metadata_hits.toLocaleString() }} / {{ arc.prefetch_metadata_misses.toLocaleString() }}</dd>
+        <dd>
+          {{ arc.prefetch_metadata_hits.toLocaleString() }} /
+          {{ arc.prefetch_metadata_misses.toLocaleString() }}
+        </dd>
         <dt class="text-gray-500">MRU / MFU</dt>
         <dd>{{ arc.mru_hits.toLocaleString() }} / {{ arc.mfu_hits.toLocaleString() }}</dd>
         <dt class="text-gray-500">Ghost MRU / MFU</dt>
-        <dd>{{ arc.mru_ghost_hits.toLocaleString() }} / {{ arc.mfu_ghost_hits.toLocaleString() }}</dd>
+        <dd>
+          {{ arc.mru_ghost_hits.toLocaleString() }} / {{ arc.mfu_ghost_hits.toLocaleString() }}
+        </dd>
         <dt class="text-gray-500">Compression</dt>
         <dd v-if="arc.compressed_size > 0">
-          {{ formatBytes(arc.uncompressed_size) }} → {{ formatBytes(arc.compressed_size) }}
-          ({{ (arc.uncompressed_size / arc.compressed_size).toFixed(2) }}×)
+          {{ formatBytes(arc.uncompressed_size) }} → {{ formatBytes(arc.compressed_size) }} ({{
+            (arc.uncompressed_size / arc.compressed_size).toFixed(2)
+          }}×)
         </dd>
         <dd v-else>—</dd>
         <dt class="text-gray-500">L2ARC</dt>

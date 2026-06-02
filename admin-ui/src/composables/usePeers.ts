@@ -10,10 +10,11 @@ export function usePeers(refreshMs = 5000) {
   async function refresh() {
     const r = await listPeers()
     if (r.error) {
+      const e: unknown = r.error
       error.value =
-        r.error && typeof r.error === 'object' && 'message' in r.error
-          ? String((r.error as { message: unknown }).message)
-          : String(r.error)
+        e && typeof e === 'object' && 'message' in e && typeof e.message === 'string'
+          ? e.message
+          : JSON.stringify(e)
     } else {
       peers.value = r.data ?? []
       error.value = null

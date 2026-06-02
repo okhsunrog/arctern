@@ -8,17 +8,8 @@ import type { DatasetSummary } from '../client'
 
 const route = useRoute()
 const router = useRouter()
-const {
-  dataset,
-  prefix,
-  snapshots,
-  error,
-  loading,
-  refresh,
-  destroy,
-  loadHolds,
-  holdsCache,
-} = useSnapshots()
+const { dataset, prefix, snapshots, error, loading, refresh, destroy, loadHolds, holdsCache } =
+  useSnapshots()
 
 onMounted(() => {
   const q = route.query.dataset
@@ -169,12 +160,7 @@ const focusedHoldsList = computed(() => {
       <template #header>
         <div class="flex items-center justify-between">
           <div class="font-semibold font-mono text-sm">{{ focusedHolds }}</div>
-          <UButton
-            icon="i-lucide-x"
-            variant="ghost"
-            size="xs"
-            @click="focusedHolds = null"
-          />
+          <UButton icon="i-lucide-x" variant="ghost" size="xs" @click="focusedHolds = null" />
         </div>
       </template>
       <div v-if="focusedHoldsList == null" class="text-gray-500 text-sm">Loading…</div>
@@ -193,17 +179,11 @@ const focusedHoldsList = computed(() => {
               held since {{ formatTimestamp(new Date(Number(h.timestamp) * 1000).toISOString()) }}
             </span>
           </div>
-          <code class="text-xs text-gray-500">
-            zfs release {{ h.tag }} {{ focusedHolds }}
-          </code>
+          <code class="text-xs text-gray-500"> zfs release {{ h.tag }} {{ focusedHolds }} </code>
         </li>
       </ul>
     </UCard>
 
-    <DestroySnapshotModal
-      v-model:open="modalOpen"
-      :snapshot-name="pending"
-      @confirm="onConfirm"
-    />
+    <DestroySnapshotModal v-model:open="modalOpen" :snapshot-name="pending" @confirm="onConfirm" />
   </div>
 </template>

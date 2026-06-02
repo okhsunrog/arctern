@@ -47,9 +47,7 @@ function go() {
           <span class="text-gray-500">Target:</span>
           <code class="ml-1 font-mono text-error-600 break-all">{{ snapshotName }}</code>
         </div>
-        <div>
-          Type the full snapshot name to enable the Destroy button.
-        </div>
+        <div>Type the full snapshot name to enable the Destroy button.</div>
         <UInput
           v-model="typed"
           :placeholder="snapshotName ?? ''"

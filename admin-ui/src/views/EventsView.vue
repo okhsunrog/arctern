@@ -29,7 +29,8 @@ const jobOptions = computed(() => {
           variant="soft"
           size="xs"
           @click="togglePause"
-        >{{ paused ? 'Resume' : 'Pause' }}</UButton>
+          >{{ paused ? 'Resume' : 'Pause' }}</UButton
+        >
         <UButton icon="i-lucide-trash-2" variant="soft" size="xs" @click="clear">Clear</UButton>
       </div>
     </div>

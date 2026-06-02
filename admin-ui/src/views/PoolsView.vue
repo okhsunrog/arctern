@@ -48,11 +48,10 @@ const { pools, error, loading } = usePools()
             <dt class="text-gray-500">Last {{ p.scan.function.toLowerCase() }}</dt>
             <dd>
               {{ p.scan.state }}
-              <template v-if="p.scan.end_time">
-                · {{ p.scan.end_time }}
-              </template>
+              <template v-if="p.scan.end_time"> · {{ p.scan.end_time }} </template>
               <template v-else-if="p.scan.pass_start">
-                · started {{ formatRelative(new Date(Number(p.scan.pass_start) * 1000).toISOString()) }}
+                · started
+                {{ formatRelative(new Date(Number(p.scan.pass_start) * 1000).toISOString()) }}
               </template>
             </dd>
           </template>

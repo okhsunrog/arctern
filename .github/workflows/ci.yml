@@ -37,7 +37,10 @@ jobs:
       # and need real ZFS/SSH, so they stay off here).
       - run: mkdir -p admin-ui/dist
         working-directory: arctern
-      - run: cargo fmt --all --check
+      # Scope fmt to arctern's own packages: `--all` also pulls in the
+      # palimpsest path dependency, which has its own repo and CI and must not
+      # gate arctern. clippy/test below use `--workspace` (members only).
+      - run: cargo fmt --check -p arctern-api -p arctern-client -p arctern-config -p arctern-transport -p arctern-daemon
         working-directory: arctern
       - run: cargo clippy --workspace -- -D warnings
         working-directory: arctern

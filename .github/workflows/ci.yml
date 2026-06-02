@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: arctern
+
+      # arctern depends on palimpsest via a sibling path (../palimpsest).
+      - uses: actions/checkout@v6
+        with:
+          repository: okhsunrog/palimpsest
+          path: palimpsest
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: arctern
+
+      # build.rs embeds admin-ui/dist via memory_serve; an empty dir is enough
+      # to compile (integration tests are gated behind the `integration` feature
+      # and need real ZFS/SSH, so they stay off here).
+      - run: mkdir -p admin-ui/dist
+        working-directory: arctern
+      - run: cargo fmt --all --check
+        working-directory: arctern
+      - run: cargo clippy --workspace -- -D warnings
+        working-directory: arctern
+      - run: cargo test --workspace
+        working-directory: arctern
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: voidzero-dev/setup-vp@v1
+        with:
+          cache: true
+          working-directory: admin-ui
+
+      - run: vp check
+        working-directory: admin-ui

@@ -9,6 +9,7 @@
 //! explode it).
 
 use std::path::Path;
+use std::sync::Arc;
 
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
@@ -102,6 +103,40 @@ async fn migrate(pool: &SqlitePool) -> Result<(), StateError> {
     .await
     .map_err(StateError::Migrate)?;
     Ok(())
+}
+
+/// Background task that enforces the retention policy from
+/// `ARCHITECTURE.md` ("State storage"): every 6 hours, drop `job_runs`
+/// older than 30 days and `log_events` older than 24 hours. Without this
+/// the observability tables grow without bound — the INFO+ filter caps
+/// the rate, not the total. Errors are logged and do not abort the loop.
+pub fn spawn_trim_sweeper(
+    pool: Arc<SqlitePool>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    use std::time::Duration;
+    const SWEEP_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+    const JOB_RUNS_RETENTION_SECONDS: i64 = 30 * 24 * 60 * 60;
+    const LOG_EVENTS_RETENTION_SECONDS: i64 = 24 * 60 * 60;
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(SWEEP_INTERVAL);
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = tick.tick() => {}
+            }
+            let now = time::OffsetDateTime::now_utc().unix_timestamp();
+            if let Err(e) = job_runs::trim_older_than(&pool, now - JOB_RUNS_RETENTION_SECONDS).await
+            {
+                tracing::warn!(error = %e, "job_runs trim failed");
+            }
+            if let Err(e) =
+                log_events::trim_older_than(&pool, now - LOG_EVENTS_RETENTION_SECONDS).await
+            {
+                tracing::warn!(error = %e, "log_events trim failed");
+            }
+        }
+    })
 }
 
 #[cfg(test)]

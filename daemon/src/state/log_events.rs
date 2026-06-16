@@ -1,10 +1,16 @@
 //! `log_events` table queries + the `tracing-subscriber` Layer that
 //! writes INFO+ events into it.
 //!
-//! Filtering is enforced at the layer (via `enabled()`), NOT at the
-//! global `EnvFilter` — the daemon still wants DEBUG/TRACE on its
-//! stderr/journald formatter for live debugging. Routing kHz-rate
-//! debug events into SQLite would explode the DB.
+//! Filtering MUST be applied as a per-layer filter on this layer alone
+//! (`SqliteLogLayer::filter()` / `with_filter`), NOT via `Layer::enabled`.
+//! `enabled` is AND-combined and short-circuiting across the whole
+//! `Layered` stack, so gating DEBUG/TRACE there would also suppress them
+//! on the stderr/journald fmt layer — breaking `RUST_LOG=debug`. The
+//! per-layer filter affects only this layer, keeping verbose events on
+//! stderr while still keeping them out of SQLite (kHz-rate debug events
+//! from tokio internals would otherwise explode the DB). The same filter
+//! drops the `sqlx` target so a slow/failed insert can't recursively
+//! generate more inserts.
 
 // Query helpers below are wired into the SSE bridge in step 11 and the
 // scheduler trim sweep in step 9.
@@ -160,17 +166,22 @@ impl SqliteLogLayer {
     pub fn new(pool: Arc<SqlitePool>) -> Self {
         Self { pool }
     }
+
+    /// Per-layer filter that gates this layer alone: INFO and above, and
+    /// never the `sqlx` target (whose slow/failed-statement WARN/ERROR
+    /// events would otherwise feed back into the insert path). Apply via
+    /// `layer.with_filter(SqliteLogLayer::filter())`.
+    pub fn filter() -> tracing_subscriber::filter::FilterFn {
+        tracing_subscriber::filter::filter_fn(|metadata: &Metadata<'_>| {
+            *metadata.level() <= Level::INFO && !metadata.target().starts_with("sqlx")
+        })
+    }
 }
 
 impl<S> Layer<S> for SqliteLogLayer
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
-    fn enabled(&self, metadata: &Metadata<'_>, _ctx: Context<'_, S>) -> bool {
-        // INFO and above. WARN/ERROR also pass; DEBUG/TRACE drop.
-        *metadata.level() <= Level::INFO
-    }
-
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         let mut visitor = MessageVisitor::default();
         event.record(&mut visitor);
@@ -259,8 +270,9 @@ mod tests {
 
     #[tokio::test]
     async fn layer_writes_info_events_and_skips_debug() {
+        use tracing_subscriber::Layer as _;
         let pool = Arc::new(open_in_memory().await.unwrap());
-        let layer = SqliteLogLayer::new(pool.clone());
+        let layer = SqliteLogLayer::new(pool.clone()).with_filter(SqliteLogLayer::filter());
         let subscriber = Registry::default().with(layer);
         let _guard = subscriber.set_default();
 

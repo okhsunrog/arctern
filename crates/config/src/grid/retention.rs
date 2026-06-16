@@ -54,7 +54,14 @@ impl GridSpec {
         let mut prev_younger = now;
         for iv in intervals {
             let older_than_or_eq = prev_younger;
-            let younger_than = older_than_or_eq - iv.length;
+            // Saturate instead of panicking: an absurdly long grid would
+            // otherwise overflow OffsetDateTime's representable range. The
+            // floored bucket still covers everything older, so no entry is
+            // mis-bucketed into the destroy set.
+            let younger_than = time::Duration::try_from(iv.length)
+                .ok()
+                .and_then(|d| older_than_or_eq.checked_sub(d))
+                .unwrap_or_else(|| time::PrimitiveDateTime::MIN.assume_utc());
             buckets.push(Bucket {
                 keep_count: iv.keep_count,
                 younger_than,

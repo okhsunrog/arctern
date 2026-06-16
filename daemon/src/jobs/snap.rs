@@ -2,9 +2,10 @@
 //! filesystem, then prunes per the configured `KeepRule` chain.
 //!
 //! Algorithm matches zrepl's snap-job behaviour:
-//! - On startup, take an "immediate" snapshot if the youngest matching
-//!   snapshot is older than `interval` (so a daemon restart doesn't
-//!   miss its window).
+//! - On startup, run one cycle immediately (rather than waiting a full
+//!   `interval`) so a daemon restart doesn't skip its window. A snapshot
+//!   taken within the same second as an existing one is an idempotent
+//!   no-op (SnapshotExists).
 //! - Each cycle: list datasets (recursive), resolve filters, for each
 //!   matched dataset: snapshot (idempotent on SnapshotExists); list
 //!   snapshots with `creation`; build SnapshotEntry vec; evaluate
@@ -85,8 +86,8 @@ impl Job for SnapJob {
         Box::pin(
             async move {
                 let interval = self.interval();
-                // Startup-immediate: if no recent matching snapshot, run a
-                // cycle now instead of waiting `interval`.
+                // Startup-immediate: run a cycle now instead of waiting a
+                // full `interval` after a restart.
                 run_and_record(&self, &ctx, &job_name, interval).await;
                 loop {
                     tokio::select! {

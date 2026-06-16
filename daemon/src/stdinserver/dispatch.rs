@@ -126,7 +126,14 @@ pub fn decide(
     let acl = lookup_identity(config, identity)
         .ok_or_else(|| DispatchError::UnknownIdentity(identity.to_string()))?;
     verify_fingerprint(identity, acl, auth_info)?;
-    if !acl.jobs.iter().any(|j| j == job) {
+    // The control channel is per-peer, not per-job: one long-lived channel
+    // carries RPC for every job the peer serves, and individual control
+    // operations are gated separately (the `operations` list here, plus
+    // fine-grained `control:*` checks in the control handler). Only
+    // replication ops (recv) are bound to a specific `<job>`, so the
+    // job-membership check applies to those alone. The active side passes
+    // the literal `control` as `<job>` when opening the control channel.
+    if op != "control" && !acl.jobs.iter().any(|j| j == job) {
         return Err(DispatchError::JobNotAllowed {
             identity: identity.to_string(),
             job: job.to_string(),
@@ -402,15 +409,37 @@ mod tests {
 
     #[test]
     fn job_not_in_acl_rejected() {
-        let c = cfg("laptop_nova", &["backup"], &["control"]);
+        // Job membership is enforced for replication ops (recv), not for
+        // the per-peer control channel.
+        let c = cfg("laptop_nova", &["backup"], &["control", "recv"]);
         let err = decide(
             "laptop_nova",
-            "arctern stdinserver other_job control",
+            "arctern stdinserver other_job recv",
             None,
             &c,
         )
         .unwrap_err();
         assert!(matches!(err, DispatchError::JobNotAllowed { .. }));
+    }
+
+    #[test]
+    fn control_channel_is_not_job_scoped() {
+        // The active side opens the control channel as `<job> = control`,
+        // which need not appear in the identity's configured jobs.
+        let c = cfg("laptop_nova", &["backup"], &["control"]);
+        let a = decide(
+            "laptop_nova",
+            "arctern stdinserver control control",
+            None,
+            &c,
+        )
+        .unwrap();
+        assert_eq!(
+            a,
+            DispatchAction::Control {
+                job: "control".into()
+            }
+        );
     }
 
     #[test]

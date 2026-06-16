@@ -95,6 +95,7 @@ async fn run_stdinserver_dispatch(identity: String, config: PathBuf) -> eyre::Re
     // The SQLite layer mirrors INFO+ events into the per-host state.db
     // so the receiver-side SubscribeEvents handler can stream them back.
     use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::Layer as _;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
@@ -120,7 +121,8 @@ async fn run_stdinserver_dispatch(identity: String, config: PathBuf) -> eyre::Re
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let fmt_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
     if let Some(p) = pool.clone() {
-        let sqlite_layer = state::log_events::SqliteLogLayer::new(p);
+        let sqlite_layer = state::log_events::SqliteLogLayer::new(p)
+            .with_filter(state::log_events::SqliteLogLayer::filter());
         tracing_subscriber::registry()
             .with(filter)
             .with(fmt_layer)
@@ -202,13 +204,16 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
 
     // Tracing fan-out: stderr fmt for live debugging, SQLite layer for
     // INFO+ persistence. The fmt layer keeps DEBUG/TRACE; the SQLite
-    // layer filters those out at `enabled()` so they never reach the DB.
+    // layer carries a per-layer filter (INFO+, minus the sqlx target) so
+    // it alone drops those events without affecting the fmt layer.
     use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::Layer as _;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let fmt_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
-    let sqlite_layer = state::log_events::SqliteLogLayer::new(pool.clone());
+    let sqlite_layer = state::log_events::SqliteLogLayer::new(pool.clone())
+        .with_filter(state::log_events::SqliteLogLayer::filter());
     tracing_subscriber::registry()
         .with(env_filter)
         .with(fmt_layer)
@@ -259,6 +264,10 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
     // dashboard chart reads from there.
     let arc_cancel = tokio_util::sync::CancellationToken::new();
     let arc_sweeper = state::arcstats::spawn_sweeper(pool.clone(), arc_cancel.clone());
+
+    // Retention sweep for the observability tables (job_runs, log_events).
+    let trim_cancel = tokio_util::sync::CancellationToken::new();
+    let trim_sweeper = state::spawn_trim_sweeper(pool.clone(), trim_cancel.clone());
 
     // Local SSE broadcast: a poller drains new log_events rows every
     // 500ms and fans them out to subscribed handlers.
@@ -325,6 +334,8 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
     let _ = events_poller.await;
     arc_cancel.cancel();
     let _ = arc_sweeper.await;
+    trim_cancel.cancel();
+    let _ = trim_sweeper.await;
     let _ = std::fs::remove_file(&cleanup_path);
     result?;
     Ok(())

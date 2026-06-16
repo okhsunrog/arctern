@@ -37,6 +37,9 @@ pub async fn run_for_peer(
         if cancel.is_cancelled() {
             return;
         }
+        // The control channel is per-peer, not per-job, so the `<job>`
+        // token is the literal `control`; the dispatcher does not require
+        // it to be a configured job (see stdinserver::dispatch::decide).
         match PeerLink::connect(peer_name.clone(), &ssh_target, "control").await {
             Ok(link) => {
                 let link = Arc::new(link);
@@ -60,15 +63,23 @@ pub async fn run_for_peer(
                 // refinement could expose the JoinHandle from
                 // ControlClient::spawn through PeerLink instead.
                 let probe_interval = Duration::from_secs(15);
+                // Bound the probe itself: on a half-open connection the RPC
+                // would otherwise hang until TCP keepalive (~2h), defeating
+                // reconnect entirely. `rpc` also enforces its own ceiling,
+                // but a tighter bound here speeds up dead-peer detection.
+                let probe_timeout = Duration::from_secs(20);
                 loop {
                     tokio::select! {
                         biased;
                         _ = cancel.cancelled() => return,
                         _ = tokio::time::sleep(probe_interval) => {
-                            if let Err(e) = link
-                                .rpc(arctern_transport::Request::ListJobs)
-                                .await
-                            {
+                            let probe = tokio::time::timeout(
+                                probe_timeout,
+                                link.rpc(arctern_transport::Request::ListJobs),
+                            )
+                            .await
+                            .unwrap_or(Err(super::RpcError::Timeout));
+                            if let Err(e) = probe {
                                 tracing::warn!(
                                     peer = %peer_name,
                                     error = %e,

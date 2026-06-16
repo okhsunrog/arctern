@@ -529,6 +529,15 @@ async fn run_one_filesystem(
 
     if let Some(snap) = &to_snap_name {
         let cursor = cursor_bookmark_name(sender_dataset, job_name, peer_name);
+        // Advance the cursor to the new `to`. The bookmark name is fixed
+        // per (job, peer), so it must be destroyed before re-creation —
+        // `bookmark::create` is idempotent on "exists" and would otherwise
+        // leave the cursor pinned to the first snapshot forever. Destroy
+        // failure is expected on the first cycle (no prior cursor) and is
+        // non-fatal.
+        if let Err(e) = palimpsest::bookmark::destroy(runner, &cursor).await {
+            tracing::debug!(bookmark = %cursor, error = %e, "no prior cursor bookmark to destroy");
+        }
         if let Err(e) = palimpsest::bookmark::create(runner, snap, &cursor).await {
             warn!(snapshot = %snap, bookmark = %cursor, error = %e, "create cursor bookmark");
         }

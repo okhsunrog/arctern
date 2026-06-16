@@ -349,8 +349,7 @@ pub async fn stream_peer_events(
     use axum::response::Sse;
     use axum::response::sse::{Event, KeepAlive};
     use std::time::Duration;
-    use tokio_stream::StreamExt;
-    use tokio_stream::wrappers::BroadcastStream;
+    use tokio::sync::broadcast::error::RecvError;
 
     let link = require_link(&state, &peer).await?;
     // Subscribe before sending the SubscribeEvents request so we don't
@@ -363,19 +362,30 @@ pub async fn stream_peer_events(
     if let Response::Error { code, message } = resp {
         return Err(map_response_error(code, message));
     }
-    let stream = BroadcastStream::new(rx).filter_map(|r| match r {
-        Ok(ev) => {
-            let api_ev = LogEvent {
-                id: ev.id,
-                timestamp: ev.timestamp,
-                level: ev.level,
-                job_name: ev.job_name,
-                message: ev.message,
-            };
-            let payload = serde_json::to_string(&api_ev).unwrap_or_else(|_| "{}".into());
-            Some(Ok(Event::default().id(api_ev.id.to_string()).data(payload)))
+    // End the stream when the broadcast closes — which happens when the
+    // peer link is torn down on reconnect. Ending it (rather than
+    // swallowing the error and stalling) lets the browser's EventSource
+    // auto-reconnect and re-subscribe against the new link. Lagged frames
+    // are skipped so a slow consumer doesn't kill the stream.
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        loop {
+            match rx.recv().await {
+                Ok(ev) => {
+                    let api_ev = LogEvent {
+                        id: ev.id,
+                        timestamp: ev.timestamp,
+                        level: ev.level,
+                        job_name: ev.job_name,
+                        message: ev.message,
+                    };
+                    let payload = serde_json::to_string(&api_ev).unwrap_or_else(|_| "{}".into());
+                    let event = Event::default().id(api_ev.id.to_string()).data(payload);
+                    return Some((Ok(event), rx));
+                }
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => return None,
+            }
         }
-        Err(_) => None,
     });
     Ok(Sse::new(stream).keep_alive(
         KeepAlive::new()

@@ -34,11 +34,20 @@ const EVENT_BROADCAST_CAPACITY: usize = 256;
 pub enum RpcError {
     #[error("control channel closed")]
     ChannelClosed,
+    #[error("control request timed out")]
+    Timeout,
     #[error("server returned error: {0}")]
     Server(String),
     #[error("transport: {0}")]
     Transport(#[from] arctern_transport::ProtocolError),
 }
+
+/// Per-request ceiling. The control channel carries only small RPC
+/// frames (bulk transfer goes over recv channels), so any request that
+/// outlives this has hit a dead or half-open session — surface it as an
+/// error rather than letting the caller (or the reconnect probe) hang
+/// forever on a connection the kernel hasn't yet torn down.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 #[derive(Clone)]
 pub struct ControlClient {
@@ -94,9 +103,12 @@ impl ControlClient {
             })
             .await
             .map_err(|_| RpcError::ChannelClosed)?;
-        match reply_rx.await {
-            Ok(res) => res,
-            Err(_) => Err(RpcError::ChannelClosed),
+        match tokio::time::timeout(REQUEST_TIMEOUT, reply_rx).await {
+            Ok(Ok(res)) => res,
+            Ok(Err(_)) => Err(RpcError::ChannelClosed),
+            // The pending-map entry stays until a late response arrives or
+            // the channel drains on teardown; both paths drop it harmlessly.
+            Err(_elapsed) => Err(RpcError::Timeout),
         }
     }
 

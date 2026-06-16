@@ -203,6 +203,17 @@ fn validate_allowed_client(idx: usize, client: &AllowedClient) -> Result<(), Str
             "allowed_clients[{idx}].operations: must not be empty"
         ));
     }
+    // Catch typos early: a misspelled privileged op (e.g. "recieve") would
+    // otherwise silently grant nothing and skip the root_fs requirement.
+    // Recognised: "recv", "control", and fine-grained "control:*" ops.
+    for op in &client.operations {
+        let known = op == "recv" || op == "control" || op.starts_with("control:");
+        if !known {
+            return Err(format!(
+                "allowed_clients[{idx}].operations: unknown operation {op:?} (expected \"recv\", \"control\", or \"control:*\")"
+            ));
+        }
+    }
 
     let needs_root_fs = client
         .operations

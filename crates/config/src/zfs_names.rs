@@ -61,6 +61,17 @@ fn validate_component(component: &str) -> Result<(), String> {
     if component.is_empty() {
         return Err("component must not be empty".into());
     }
+    // ZFS requires names to begin with an alphanumeric. Enforcing it also
+    // closes argument injection: zfs/zpool take names as bare positionals
+    // with no `--` terminator, so a leading `-` (e.g. "-F", "-R") would be
+    // parsed as a flag.
+    if !component
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
+    {
+        return Err("component must begin with an alphanumeric character".into());
+    }
     if component.chars().any(char::is_whitespace) {
         return Err("component must not contain whitespace".into());
     }
@@ -95,9 +106,19 @@ mod tests {
             "tank/data@s1",
             "tank/data#b1",
             "tank/data with spaces",
+            // Leading-dash components would be parsed as zfs flags.
+            "-tank/data",
+            "tank/-data",
+            "-F",
         ] {
             assert!(validate_dataset_name(name).is_err(), "accepted {name:?}");
         }
+    }
+
+    #[test]
+    fn snapshot_leaf_rejects_leading_dash() {
+        assert!(validate_snapshot_leaf("-nv").is_err());
+        assert!(parse_snapshot_target("tank/data@-R").is_err());
     }
 
     #[test]

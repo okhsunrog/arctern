@@ -283,9 +283,8 @@ fn enforce_control_acl(
 }
 
 /// Reject `dataset` if the ACL has a `root_fs` set and `dataset` is not
-/// equal to or a descendant of it. Returns Ok((root_fs, dataset)) on
-/// success — the second element is just `dataset` borrowed back so the
-/// caller doesn't have to repeat the path.
+/// equal to or a descendant of it. No root_fs configured means no
+/// restriction.
 fn enforce_root_fs<'a>(acl: &'a AllowedClient, dataset: &'a str) -> Result<(), Response> {
     let Some(root) = acl.root_fs.as_deref() else {
         return Ok(());

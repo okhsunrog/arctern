@@ -347,22 +347,33 @@ async fn plan_one_filesystem(
         return Ok(SnapshotPlan::Nothing);
     }
     let resp = peer
-        .rpc(Request::ListSnapshots {
+        .rpc(Request::ListReceiverGuids {
             dataset: target_dataset.to_string(),
             prefix_regex: filter.wire_regex().map(String::from),
         })
         .await
-        .map_err(|e| format!("ListSnapshots: {e}"))?;
-    let (receiver, token) = match resp {
-        Response::ListSnapshotsOk {
-            snapshots,
+        .map_err(|e| format!("ListReceiverGuids: {e}"))?;
+    let (guids, token) = match resp {
+        Response::ListReceiverGuidsOk {
+            guids,
             receive_resume_token,
-        } => (snapshots, receive_resume_token),
+        } => (guids, receive_resume_token),
         Response::Error { message, .. } => {
-            return Err(format!("ListSnapshots receiver error: {message}"));
+            return Err(format!("ListReceiverGuids receiver error: {message}"));
         }
-        other => return Err(format!("unexpected ListSnapshots response: {other:?}")),
+        other => return Err(format!("unexpected ListReceiverGuids response: {other:?}")),
     };
+    // The planner intersects on GUID only (see pick_plan); the receiver's
+    // snapshot names and createtxg are unused, so carry each GUID in an
+    // otherwise-empty SnapshotEntry to keep the pure planner signature.
+    let receiver: Vec<SnapshotEntry> = guids
+        .into_iter()
+        .map(|guid| SnapshotEntry {
+            name: String::new(),
+            guid,
+            createtxg: 0,
+        })
+        .collect();
     let decoded = match token.as_deref() {
         Some(t) => match palimpsest::resume_token::decode(runner, t).await {
             Ok(d) => Some(d),

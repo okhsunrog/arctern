@@ -197,6 +197,15 @@ async fn dispatch(
             }
             handle_list_snapshots(runner, acl, &dataset, prefix_regex.as_deref()).await
         }
+        Request::ListReceiverGuids {
+            dataset,
+            prefix_regex,
+        } => {
+            if let Err(r) = enforce_control_acl(acl, "control:list_snapshots", true) {
+                return r;
+            }
+            handle_list_receiver_guids(runner, acl, &dataset, prefix_regex.as_deref()).await
+        }
         Request::GetReceiveResumeToken { dataset } => {
             if let Err(r) = enforce_control_acl(acl, "control:get_resume_token", true) {
                 return r;
@@ -308,22 +317,58 @@ async fn handle_list_snapshots(
     dataset: &str,
     prefix_regex: Option<&str>,
 ) -> Response {
+    match collect_receiver_snapshots(runner, acl, dataset, prefix_regex).await {
+        Ok((snapshots, receive_resume_token)) => Response::ListSnapshotsOk {
+            snapshots,
+            receive_resume_token,
+        },
+        Err(r) => r,
+    }
+}
+
+/// Lean variant for the planner: returns only the receiver GUIDs (plus
+/// the resume token), so the response stays small for datasets with many
+/// thousands of snapshots. The planner intersects on GUID alone.
+async fn handle_list_receiver_guids(
+    runner: &dyn CommandRunner,
+    acl: &AllowedClient,
+    dataset: &str,
+    prefix_regex: Option<&str>,
+) -> Response {
+    match collect_receiver_snapshots(runner, acl, dataset, prefix_regex).await {
+        Ok((snapshots, receive_resume_token)) => Response::ListReceiverGuidsOk {
+            guids: snapshots.into_iter().map(|s| s.guid).collect(),
+            receive_resume_token,
+        },
+        Err(r) => r,
+    }
+}
+
+/// Shared core for the snapshot-inventory requests. Validates the
+/// dataset, enforces `root_fs`, lists matching snapshots and reads the
+/// receive resume token. A missing dataset (first replication) is the
+/// non-error empty case. Returns the entries + token on success, or a
+/// ready-to-send `Response::Error` on failure.
+async fn collect_receiver_snapshots(
+    runner: &dyn CommandRunner,
+    acl: &AllowedClient,
+    dataset: &str,
+    prefix_regex: Option<&str>,
+) -> Result<(Vec<SnapshotEntry>, Option<String>), Response> {
     if let Err(e) = validate_dataset_name(dataset) {
-        return Response::Error {
+        return Err(Response::Error {
             code: ErrorCode::BadRequest,
             message: format!("invalid dataset {dataset:?}: {e}"),
-        };
+        });
     }
-    if let Err(r) = enforce_root_fs(acl, dataset) {
-        return r;
-    }
+    enforce_root_fs(acl, dataset)?;
     let regex = match compile_prefix_regex(prefix_regex) {
         Ok(opt) => opt,
         Err(e) => {
-            return Response::Error {
+            return Err(Response::Error {
                 code: ErrorCode::BadRequest,
                 message: format!("compile prefix_regex {:?}: {e}", prefix_regex.unwrap_or("")),
-            };
+            });
         }
     };
     let opts = ListOptions {
@@ -335,18 +380,13 @@ async fn handle_list_snapshots(
     };
     let entries = match palimpsest::dataset::list(runner, &opts).await {
         Ok(v) => v,
-        Err(ZfsError::DatasetNotFound { .. }) => {
-            // First-replication shape: receiver dataset doesn't exist yet.
-            return Response::ListSnapshotsOk {
-                snapshots: vec![],
-                receive_resume_token: None,
-            };
-        }
+        // First-replication shape: receiver dataset doesn't exist yet.
+        Err(ZfsError::DatasetNotFound { .. }) => return Ok((vec![], None)),
         Err(e) => {
-            return Response::Error {
+            return Err(Response::Error {
                 code: zfs_error_code(&e),
                 message: format!("list {dataset}: {e}"),
-            };
+            });
         }
     };
     let snapshots: Vec<SnapshotEntry> = entries
@@ -378,10 +418,7 @@ async fn handle_list_snapshots(
             None
         }
     };
-    Response::ListSnapshotsOk {
-        snapshots,
-        receive_resume_token,
-    }
+    Ok((snapshots, receive_resume_token))
 }
 
 async fn handle_get_receive_resume_token(
@@ -566,6 +603,62 @@ mod tests {
                 assert_eq!(receive_resume_token, None);
             }
             other => panic!("unexpected response {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_receiver_guids_returns_empty_on_dataset_not_found() {
+        let runner = Arc::new(RecordingRunner::new().record(
+            Cmd::new("zfs").args([
+                "list",
+                "-j",
+                "-p",
+                "-t",
+                "snapshot",
+                "-o",
+                "guid",
+                "tank/missing",
+            ]),
+            Vec::new(),
+            b"cannot open 'tank/missing': dataset does not exist".to_vec(),
+            1,
+        ));
+        let r = rpc(
+            runner,
+            acl(None),
+            Request::ListReceiverGuids {
+                dataset: "tank/missing".into(),
+                prefix_regex: None,
+            },
+        )
+        .await;
+        match r {
+            Response::ListReceiverGuidsOk {
+                guids,
+                receive_resume_token,
+            } => {
+                assert!(guids.is_empty());
+                assert_eq!(receive_resume_token, None);
+            }
+            other => panic!("unexpected response {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_receiver_guids_enforces_root_fs() {
+        let runner = Arc::new(RecordingRunner::new());
+        let r = rpc(
+            runner,
+            acl(Some("tank/backups/laptop")),
+            Request::ListReceiverGuids {
+                dataset: "tank/other".into(),
+                prefix_regex: None,
+            },
+        )
+        .await;
+        match r {
+            Response::Error { code, .. } => assert_eq!(code, ErrorCode::Unauthorized),
+            other => panic!("expected Error, got {other:?}"),
         }
     }
 

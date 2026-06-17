@@ -30,10 +30,13 @@ use tokio_util::codec::LengthDelimitedCodec;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
-/// 1 MiB cap on any single JSON frame. Real frames are typically a few
-/// hundred bytes; this is well above any benign expansion and keeps an
-/// adversarial peer from exhausting memory before validation.
-pub const MAX_FRAME_LEN: usize = 1 << 20;
+/// 8 MiB cap on any single JSON frame. Real control frames are typically
+/// a few hundred bytes; the headroom covers large snapshot inventories
+/// (`ListSnapshotsOk` over datasets with many thousands of snapshots)
+/// while still bounding what a mutually-authenticated peer can make the
+/// reader allocate before validation. The planner uses the leaner
+/// `ListReceiverGuids` so the critical path stays far below this.
+pub const MAX_FRAME_LEN: usize = 8 << 20;
 
 // Backwards-compatibility alias for code paths that still talk about
 // the header limit specifically. Same value as MAX_FRAME_LEN; kept for
@@ -86,6 +89,16 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prefix_regex: Option<String>,
     },
+    /// Planner-only variant of `ListSnapshots`: returns just the receiver
+    /// GUIDs (the only field the GUID-intersection planner consumes),
+    /// keeping the response ~4x smaller than full `SnapshotEntry` rows so
+    /// it stays well under `MAX_FRAME_LEN` for datasets with many tens of
+    /// thousands of snapshots. The UI keeps using `ListSnapshots`.
+    ListReceiverGuids {
+        dataset: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefix_regex: Option<String>,
+    },
     GetReceiveResumeToken {
         dataset: String,
     },
@@ -122,6 +135,11 @@ pub enum Request {
 pub enum Response {
     ListSnapshotsOk {
         snapshots: Vec<SnapshotEntry>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receive_resume_token: Option<String>,
+    },
+    ListReceiverGuidsOk {
+        guids: Vec<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         receive_resume_token: Option<String>,
     },
@@ -466,6 +484,18 @@ mod tests {
     }
 
     #[test]
+    fn request_list_receiver_guids_roundtrip() {
+        check_request_roundtrip(Request::ListReceiverGuids {
+            dataset: "tank/backups/laptop/data".into(),
+            prefix_regex: Some("^zrepl_".into()),
+        });
+        check_request_roundtrip(Request::ListReceiverGuids {
+            dataset: "tank/data".into(),
+            prefix_regex: None,
+        });
+    }
+
+    #[test]
     fn request_get_receive_resume_token_roundtrip() {
         check_request_roundtrip(Request::GetReceiveResumeToken {
             dataset: "tank/backups/laptop/data".into(),
@@ -541,6 +571,14 @@ mod tests {
                 createtxg: 8,
             }],
             receive_resume_token: Some("1-deadbeef".into()),
+        });
+        check_response_roundtrip(Response::ListReceiverGuidsOk {
+            guids: vec![11587258101628135412, 1711743136468914064],
+            receive_resume_token: Some("1-deadbeef".into()),
+        });
+        check_response_roundtrip(Response::ListReceiverGuidsOk {
+            guids: vec![],
+            receive_resume_token: None,
         });
         check_response_roundtrip(Response::ListSnapshotsOk {
             snapshots: vec![],

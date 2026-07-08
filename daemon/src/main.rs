@@ -119,7 +119,13 @@ async fn run_stdinserver_dispatch(identity: String, config: PathBuf) -> eyre::Re
     };
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let fmt_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
+    // stderr here is an SSH pipe read by the peer's stderr drain (or
+    // journald); ANSI colour codes would travel into the peer's event
+    // log as garbage.
+    use std::io::IsTerminal as _;
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal());
     if let Some(p) = pool.clone() {
         let sqlite_layer = state::log_events::SqliteLogLayer::new(p)
             .with_filter(state::log_events::SqliteLogLayer::filter());
@@ -211,7 +217,11 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let fmt_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
+    // Under systemd stderr is a pipe to journald — no ANSI there either.
+    use std::io::IsTerminal as _;
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal());
     let sqlite_layer = state::log_events::SqliteLogLayer::new(pool.clone())
         .with_filter(state::log_events::SqliteLogLayer::filter());
     tracing_subscriber::registry()
@@ -248,7 +258,7 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
                 manager.spawn(job, ctx.clone());
             }
             arctern_config::JobConfig::Push(s) => {
-                let job = jobs::push::PushJob::new(s, Some(peers_state.clone()))
+                let job = jobs::push::PushJob::new(s, Some(peers_state.clone()), &config.peers)
                     .map_err(|e| eyre::eyre!("push job filter regex: {e}"))?;
                 manager.spawn(Arc::new(job), ctx.clone());
             }
@@ -275,6 +285,7 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
     let events_cancel = tokio_util::sync::CancellationToken::new();
     let events_poller =
         state::log_events::spawn_poller(pool.clone(), events_tx.clone(), events_cancel.clone());
+    let shutdown_token = tokio_util::sync::CancellationToken::new();
     let app_state = app_state::AppState {
         manager: manager.clone(),
         peers: peers_state.clone(),
@@ -284,6 +295,7 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
         config_path: config_path
             .canonicalize()
             .unwrap_or_else(|_| config_path.clone()),
+        shutdown: shutdown_token.clone(),
     };
     let app = router::build_router(app_state.clone());
     let loopback_app = router::build_loopback_router(app_state);
@@ -304,7 +316,6 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
     let cleanup_path = socket_path.clone();
-    let shutdown_token = tokio_util::sync::CancellationToken::new();
     let shutdown_token_uds = shutdown_token.clone();
     let shutdown_token_tcp = shutdown_token.clone();
     tokio::spawn(async move {
@@ -314,6 +325,21 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
         }
         shutdown_token.cancel();
     });
+    // Watchdog: if orderly teardown (connection drain, job joins, ssh
+    // session closes) hasn't finished shortly after the signal, exit
+    // anyway — better a clean forced exit than systemd's SIGKILL after
+    // TimeoutStopSec with the unit landing in `failed`.
+    {
+        let watchdog_token = shutdown_token_uds.clone();
+        let watchdog_socket = socket_path.clone();
+        tokio::spawn(async move {
+            watchdog_token.cancelled().await;
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            tracing::warn!("shutdown watchdog fired; forcing exit");
+            let _ = std::fs::remove_file(&watchdog_socket);
+            std::process::exit(0);
+        });
+    }
 
     let uds_serve = axum::serve(
         listener,

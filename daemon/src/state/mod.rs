@@ -18,6 +18,7 @@ use thiserror::Error;
 pub mod arcstats;
 pub mod job_runs;
 pub mod log_events;
+pub mod push_syncs;
 
 #[derive(Debug, Error)]
 pub enum StateError {
@@ -90,6 +91,19 @@ async fn migrate(pool: &SqlitePool) -> Result<(), StateError> {
         .execute(pool)
         .await
         .map_err(StateError::Migrate)?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS push_syncs (
+            job_name    TEXT NOT NULL,
+            peer        TEXT NOT NULL,
+            finished_at INTEGER NOT NULL,
+            status      TEXT NOT NULL,
+            error       TEXT,
+            PRIMARY KEY (job_name, peer)
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(StateError::Migrate)?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS arcstats_history (
             timestamp INTEGER PRIMARY KEY,

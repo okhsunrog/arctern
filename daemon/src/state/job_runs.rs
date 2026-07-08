@@ -102,7 +102,6 @@ pub async fn list_recent(
 
 /// Trim rows older than `cutoff_unix_seconds` (typically `now - 30d`).
 /// Returns the number of rows removed.
-#[allow(dead_code)]
 pub async fn trim_older_than(
     pool: &SqlitePool,
     cutoff_unix_seconds: i64,

@@ -1,8 +1,9 @@
 //! Server-side control-channel handler. Reads RequestFrames off stdin,
-//! dispatches each to the matching `handle_*` function, writes
-//! ResponseFrames to stdout. Stays single-task per channel (sshd
-//! spawns one process per session) — concurrency on the receiver side
-//! comes from sshd accepting parallel sessions, not from this loop.
+//! dispatches each to the matching `handle_*` function on its own task
+//! (so one slow `ListSnapshots` over a huge dataset cannot head-of-line
+//! block the UI proxy's other queries — responses correlate by
+//! `request_id`, not arrival order), writes ResponseFrames to stdout
+//! through a shared mutex-serialised writer.
 //!
 //! Per-Request handlers translate `palimpsest::ZfsError` and friends
 //! into `Response::Error { code, message }` rather than letting them
@@ -13,8 +14,8 @@ use std::sync::Arc;
 use arctern_config::zfs_names::{parse_snapshot_target, validate_dataset_name};
 use arctern_config::{AllowedClient, Config};
 use arctern_transport::{
-    ErrorCode, EventWire, JobStatusWire, Request, RequestFrame, Response, ResponseFrame,
-    SnapshotEntry, compile_prefix_regex, read_request, write_response,
+    ErrorCode, EventWire, Request, RequestFrame, Response, ResponseFrame, SnapshotEntry,
+    compile_prefix_regex, read_request, write_response,
 };
 use palimpsest::ZfsError;
 use palimpsest::dataset::ListOptions;
@@ -40,11 +41,15 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    // Stdout is shared between the main request/response loop and any
+    // Stdout is shared between the concurrent request tasks and any
     // background SubscribeEvents pusher; serialise writes through one
     // mutex so frames never interleave on the wire.
     let writer = Arc::new(Mutex::new(BufWriter::new(writer)));
-    let mut event_pushers: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    // At most one pusher per control channel: the client sends
+    // SubscribeEvents once per link, and a duplicate (e.g. a client
+    // predating that dedup) must not double every Event frame.
+    let mut event_pusher: Option<tokio::task::JoinHandle<()>> = None;
+    let mut inflight = tokio::task::JoinSet::new();
     let result = loop {
         let frame: RequestFrame = match read_request(&mut reader).await {
             Ok(f) => f,
@@ -61,6 +66,9 @@ where
         };
         let RequestFrame { id, body } = frame;
         if matches!(body, Request::Shutdown) {
+            // Let in-flight requests finish (and write their responses)
+            // before acknowledging shutdown, so the ack is the last frame.
+            while inflight.join_next().await.is_some() {}
             let resp = ResponseFrame {
                 request_id: Some(id),
                 body: Response::Ok,
@@ -75,6 +83,7 @@ where
         // frames into the shared writer.
         if let Request::SubscribeEvents { since } = &body {
             let since = since.unwrap_or(0);
+            let already_running = event_pusher.as_ref().is_some_and(|h| !h.is_finished());
             match pool.clone() {
                 Some(p) => {
                     if let Err(r) = enforce_control_acl(&acl, "control:subscribe_events", true) {
@@ -96,10 +105,12 @@ where
                         let _ = write_response(&mut *w, &resp).await;
                         let _ = w.flush().await;
                     }
-                    let writer_for_task = writer.clone();
-                    event_pushers.push(tokio::spawn(async move {
-                        push_events(p, since, writer_for_task).await;
-                    }));
+                    if !already_running {
+                        let writer_for_task = writer.clone();
+                        event_pusher = Some(tokio::spawn(async move {
+                            push_events(p, since, writer_for_task).await;
+                        }));
+                    }
                     continue;
                 }
                 None => {
@@ -117,22 +128,30 @@ where
                 }
             }
         }
-        let resp_body = dispatch(runner.as_ref(), &config, &acl, pool.as_deref(), body).await;
-        let resp = ResponseFrame {
-            request_id: Some(id),
-            body: resp_body,
-        };
-        let mut w = writer.lock().await;
-        if let Err(e) = write_response(&mut *w, &resp).await {
-            tracing::warn!(error = %e, "control: write_response failed; closing");
-            break Ok(());
-        }
-        if let Err(e) = w.flush().await {
-            tracing::warn!(error = %e, "control: flush failed; closing");
-            break Ok(());
-        }
+        let runner = runner.clone();
+        let config = config.clone();
+        let acl = acl.clone();
+        let pool = pool.clone();
+        let writer = writer.clone();
+        inflight.spawn(async move {
+            let resp_body = dispatch(runner.as_ref(), &config, &acl, pool.as_deref(), body).await;
+            let resp = ResponseFrame {
+                request_id: Some(id),
+                body: resp_body,
+            };
+            let mut w = writer.lock().await;
+            if let Err(e) = write_response(&mut *w, &resp).await {
+                tracing::warn!(error = %e, "control: write_response failed");
+                return;
+            }
+            if let Err(e) = w.flush().await {
+                tracing::warn!(error = %e, "control: flush failed");
+            }
+        });
     };
-    for h in event_pushers {
+    // EOF path: let in-flight tasks finish writing before tearing down.
+    while inflight.join_next().await.is_some() {}
+    if let Some(h) = event_pusher {
         h.abort();
     }
     result
@@ -268,6 +287,9 @@ async fn dispatch(
     }
 }
 
+// Err carries a ready-to-send Response (>128 bytes); fine for a
+// per-request cold path, not worth boxing at every call site.
+#[allow(clippy::result_large_err)]
 fn enforce_control_acl(
     acl: &AllowedClient,
     op: &'static str,
@@ -294,6 +316,7 @@ fn enforce_control_acl(
 /// Reject `dataset` if the ACL has a `root_fs` set and `dataset` is not
 /// equal to or a descendant of it. No root_fs configured means no
 /// restriction.
+#[allow(clippy::result_large_err)] // Err is a ready-to-send Response; cold path.
 fn enforce_root_fs<'a>(acl: &'a AllowedClient, dataset: &'a str) -> Result<(), Response> {
     let Some(root) = acl.root_fs.as_deref() else {
         return Ok(());
@@ -499,19 +522,6 @@ fn zfs_error_code(e: &ZfsError) -> ErrorCode {
     match e {
         ZfsError::DatasetNotFound { .. } => ErrorCode::NotFound,
         _ => ErrorCode::Zfs,
-    }
-}
-
-// Small helper kept here (rather than as a free fn next to JobStatusWire)
-// because it's not used outside the daemon.
-#[allow(dead_code)]
-fn job_status_wire(name: String, kind: String) -> JobStatusWire {
-    JobStatusWire {
-        name,
-        kind,
-        last_run: None,
-        next_run: None,
-        last_error: None,
     }
 }
 

@@ -23,10 +23,20 @@ pub struct JobStatusInner {
     pub last_run: Option<OffsetDateTime>,
     pub next_run: Option<OffsetDateTime>,
     pub last_error: Option<String>,
+    /// True while a cycle is executing. Long-running cycles (a full
+    /// send) would otherwise be indistinguishable from idle-with-stale-
+    /// status in the UI.
+    pub running: bool,
+    /// True while the job is paused (current transfer aborted resumably,
+    /// scheduled cycles suspended).
+    pub paused: bool,
+    /// In-flight transfer progress (push jobs only).
+    pub transfer: Option<arctern_api::TransferInfo>,
+    /// Per-target replication policy + last outcome (push jobs only).
+    pub targets: Vec<arctern_api::TargetStatus>,
 }
 
 #[derive(Clone)]
-#[allow(dead_code)] // `state` is consumed by the push job in step 9.
 pub struct JobContext {
     pub runner: Arc<dyn CommandRunner>,
     /// Per-daemon SQLite pool. None inside test-only `JobManager` setups
@@ -50,15 +60,97 @@ pub trait Job: Send + Sync + 'static {
     /// don't have a cycle (sink — event-driven) absorb the call
     /// harmlessly. Snap and push override.
     fn wakeup(&self) {}
+    /// Abort the in-flight transfer (resumable via `recv -s` partial
+    /// state). Returns false when the job kind has nothing to cancel.
+    fn cancel_current(&self) -> bool {
+        false
+    }
+    /// Pause: abort the in-flight transfer AND suspend scheduled cycles
+    /// until `resume`. Returns false when unsupported.
+    fn pause(&self) -> bool {
+        false
+    }
+    /// Clear the paused flag and wake the cycle loop (a paused transfer
+    /// continues from its resume token). Returns false when unsupported.
+    fn resume(&self) -> bool {
+        false
+    }
+    /// Queue a manual replication to `peer` and wake the cycle loop.
+    /// Push jobs validate the peer against their targets.
+    fn request_push(&self, _peer: &str) -> Result<(), String> {
+        Err("job kind does not support manual push".into())
+    }
 }
 
-#[allow(dead_code)]
 struct JobHandle {
     name: String,
     kind: &'static str,
     cancel: CancellationToken,
     task: JoinHandle<()>,
     job: Arc<dyn Job>,
+}
+
+/// One prune pass over a single dataset: list snapshots with
+/// `creation`, evaluate the keep-rule chain against the bare tags,
+/// destroy the victims. Shared by the snap job (post-snapshot prune)
+/// and the standalone prune job. Held snapshots are skipped, not fatal.
+pub(crate) async fn prune_dataset(
+    runner: &dyn CommandRunner,
+    keep: &[arctern_config::KeepRule],
+    dataset: &str,
+) -> Result<(), String> {
+    use palimpsest::dataset::{DestroyOptions, ListOptions};
+    use palimpsest::models::DatasetType;
+
+    let opts = ListOptions {
+        recursive: false,
+        types: vec![DatasetType::Snapshot],
+        roots: vec![dataset.to_string()],
+        properties: vec!["creation".into()],
+        ..ListOptions::default()
+    };
+    let snaps = palimpsest::dataset::list(runner, &opts)
+        .await
+        .map_err(|e| format!("list snapshots: {e}"))?;
+    let mut entries: Vec<arctern_config::SnapshotEntry> = Vec::with_capacity(snaps.len());
+    // Parallel vector of full ZFS names (`pool/ds@tag`); the prune
+    // algorithm matches on the bare tag (so a user's `^zrepl_.*`
+    // regex does not have to embed the dataset name), but destroy
+    // needs the fully-qualified target.
+    let mut full_names: Vec<String> = Vec::with_capacity(snaps.len());
+    for s in &snaps {
+        let creation = s
+            .properties
+            .get("creation")
+            .and_then(|p| p.value.parse::<i64>().ok())
+            .and_then(|t| OffsetDateTime::from_unix_timestamp(t).ok());
+        let Some(creation) = creation else {
+            tracing::warn!(snapshot = %s.name, "snapshot has no parseable creation property; skipping");
+            continue;
+        };
+        let tag = s.name.split_once('@').map(|(_, t)| t).unwrap_or(&s.name);
+        entries.push(arctern_config::SnapshotEntry {
+            name: tag.to_string(),
+            creation,
+        });
+        full_names.push(s.name.clone());
+    }
+    let destroy_idx = arctern_config::evaluate_keep_rules(keep, &entries)
+        .map_err(|e| format!("keep-rule evaluation: {e}"))?;
+    for i in destroy_idx {
+        let target = &full_names[i];
+        tracing::info!(snapshot = %target, "destroying snapshot");
+        match palimpsest::dataset::destroy(runner, target, &DestroyOptions::new()).await {
+            Ok(()) => {}
+            Err(palimpsest::ZfsError::SnapshotHeld { .. }) => {
+                tracing::warn!(snapshot = %target, "snapshot is held; skipping");
+            }
+            Err(e) => {
+                return Err(format!("destroy {target}: {e}"));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Owned by the daemon's `AppState`; cloned (via `Arc`) into the HTTP
@@ -121,6 +213,40 @@ impl JobManager {
         } else {
             false
         }
+    }
+
+    /// `None` = no such job; `Some(supported)` otherwise.
+    pub fn cancel_by_name(&self, name: &str) -> Option<bool> {
+        let handles = self.handles.lock().unwrap();
+        handles
+            .iter()
+            .find(|h| h.name == name)
+            .map(|h| h.job.cancel_current())
+    }
+
+    pub fn pause_by_name(&self, name: &str) -> Option<bool> {
+        let handles = self.handles.lock().unwrap();
+        handles
+            .iter()
+            .find(|h| h.name == name)
+            .map(|h| h.job.pause())
+    }
+
+    pub fn resume_by_name(&self, name: &str) -> Option<bool> {
+        let handles = self.handles.lock().unwrap();
+        handles
+            .iter()
+            .find(|h| h.name == name)
+            .map(|h| h.job.resume())
+    }
+
+    /// `None` = no such job; `Some(result)` otherwise.
+    pub fn request_push_by_name(&self, name: &str, peer: &str) -> Option<Result<(), String>> {
+        let handles = self.handles.lock().unwrap();
+        handles
+            .iter()
+            .find(|h| h.name == name)
+            .map(|h| h.job.request_push(peer))
     }
 
     /// Trigger every cancellation token, then wait up to `deadline`

@@ -32,4 +32,9 @@ pub struct AppState {
     /// surfaced by `GET /api/v1/config` so the UI can show "you're
     /// editing the file at …".
     pub config_path: PathBuf,
+    /// Fired on SIGTERM/SIGINT. Long-lived response streams (SSE) must
+    /// end when this fires — axum's graceful shutdown waits for every
+    /// connection to drain, and an open EventSource would otherwise
+    /// stall it until systemd's SIGKILL.
+    pub shutdown: tokio_util::sync::CancellationToken,
 }

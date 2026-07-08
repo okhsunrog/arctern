@@ -29,7 +29,9 @@ use crate::schema::FilesystemFilter;
 ///    Keys ending in `/` mean "include this subtree" (recursive=true).
 ///    Bare keys mean "include this exact dataset" (recursive=false).
 ///    `false` values are excludes for whichever `true` subtree they sit
-///    under. An exclude with no matching parent is a config error.
+///    under, with the same suffix rule: a bare key excludes exactly that
+///    dataset (its children stay included), a trailing `/` excludes the
+///    whole subtree. An exclude with no matching parent is a config error.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 enum FilesystemsInput {
@@ -65,9 +67,9 @@ fn map_to_filters(m: BTreeMap<String, bool>) -> Result<Vec<FilesystemFilter>, St
                 trues.push((k, false));
             }
         } else {
-            // Trailing slash on a false is harmless; strip for matching.
-            let trimmed = k.trim_end_matches('/').to_string();
-            falses.push(trimmed);
+            // Keep the trailing `/` — `excluded()` reads it as
+            // "exclude the subtree" vs the bare "exclude exactly this".
+            falses.push(k);
         }
     }
 
@@ -77,7 +79,8 @@ fn map_to_filters(m: BTreeMap<String, bool>) -> Result<Vec<FilesystemFilter>, St
         let mut exclude: Vec<String> = Vec::new();
         if *recursive {
             for f in &falses {
-                if f == path || f.starts_with(&format!("{path}/")) {
+                let name = f.trim_end_matches('/');
+                if name == path || name.starts_with(&format!("{path}/")) {
                     exclude.push(f.clone());
                     used.insert(f.clone());
                 }
@@ -142,22 +145,18 @@ fn is_under(candidate: &str, root: &str, recursive: bool) -> bool {
     candidate.starts_with(&prefix)
 }
 
-fn excluded(candidate: &str, excludes: &[String], root: &str) -> bool {
+/// Exclude-entry semantics mirror the include keys: a bare name drops
+/// exactly that dataset (children stay included), a trailing `/` drops
+/// the whole subtree. This is what lets a config say "everything under
+/// arch0 except the two container datasets themselves" without also
+/// losing the containers' children.
+fn excluded(candidate: &str, excludes: &[String], _root: &str) -> bool {
     for e in excludes {
-        // Special case from FR-019: excluding `path` itself means
-        // "snapshot only descendants" — drop the root, keep its
-        // children.
-        if e == root {
-            if candidate == root {
+        if let Some(name) = e.strip_suffix('/') {
+            if candidate == name || candidate.starts_with(&format!("{name}/")) {
                 return true;
             }
-            continue;
-        }
-        if candidate == e {
-            return true;
-        }
-        let prefix = format!("{e}/");
-        if candidate.starts_with(&prefix) {
+        } else if candidate == e.as_str() {
             return true;
         }
     }
@@ -198,20 +197,27 @@ mod tests {
     }
 
     #[test]
-    fn recursive_excludes_subtree() {
-        let f = f("tank", true, &["tank/data"]);
+    fn recursive_excludes_subtree_with_trailing_slash() {
+        let f = f("tank", true, &["tank/data/"]);
         let cands = vec!["tank", "tank/data", "tank/data/home", "tank/var"];
         assert_eq!(f.resolve(&cands), vec!["tank", "tank/var"]);
     }
 
     #[test]
-    fn zrepl_tree_pattern_with_excludes_translates() {
-        // zrepl yaml: { "novafs/arch0<": true, "novafs/arch0": false,
-        //              "novafs/arch0/data": false }
-        // arctern toml: path="novafs/arch0", recursive=true,
-        //               exclude=["novafs/arch0", "novafs/arch0/data"]
-        // Net effect: every descendant of novafs/arch0 except the
-        // root itself and the data subtree.
+    fn bare_exclude_drops_only_that_dataset() {
+        let f = f("tank", true, &["tank/data"]);
+        let cands = vec!["tank", "tank/data", "tank/data/home", "tank/var"];
+        assert_eq!(
+            f.resolve(&cands),
+            vec!["tank", "tank/data/home", "tank/var"]
+        );
+    }
+
+    #[test]
+    fn container_excludes_keep_their_children() {
+        // The laptop idiom: snapshot everything under novafs/arch0
+        // except the two container datasets themselves — their children
+        // (data/home, data/root) stay in.
         let f = f("novafs/arch0", true, &["novafs/arch0", "novafs/arch0/data"]);
         let cands = vec![
             "novafs",
@@ -226,6 +232,8 @@ mod tests {
         assert_eq!(
             f.resolve(&cands),
             vec![
+                "novafs/arch0/data/home",
+                "novafs/arch0/data/root",
                 "novafs/arch0/root",
                 "novafs/arch0/vm",
                 "novafs/arch0/docker",

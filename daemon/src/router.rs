@@ -21,6 +21,8 @@ use crate::{auth, handlers};
         arctern_api::ApiErrorBody,
         arctern_api::CreateSnapshotRequest,
         arctern_api::JobStatus,
+        arctern_api::TransferInfo,
+        arctern_api::TargetStatus,
         arctern_api::JobRun,
         arctern_api::PeerSummary,
         arctern_api::PeerReachability,
@@ -48,6 +50,10 @@ fn openapi_router() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::snapshots::list_holds))
         .routes(routes!(handlers::jobs::list_jobs))
         .routes(routes!(handlers::jobs::wakeup))
+        .routes(routes!(handlers::jobs::cancel))
+        .routes(routes!(handlers::jobs::pause))
+        .routes(routes!(handlers::jobs::resume))
+        .routes(routes!(handlers::jobs::push_to_peer))
         .routes(routes!(handlers::jobs::list_runs))
         .routes(routes!(handlers::peers::list_peers))
         .routes(routes!(handlers::peers::list_peer_jobs))
@@ -108,14 +114,18 @@ pub fn build_loopback_router(state: AppState) -> Router {
     // router paths (/jobs/foo, /events, ...) fall through to spa_fallback
     // which serves the embedded index.html so vue-router can render them.
     //
-    // CSRF guard layered on the whole stack: GETs to /index.html and
-    // /assets are unaffected (the middleware only acts on mutating
-    // methods); mutating /api/v1/* requests must originate same-origin
-    // (or carry no Sec-Fetch-Site, i.e. be a non-browser CLI client).
+    // Two guards layered on the whole stack:
+    // - Host check (all methods): rejects DNS-rebound origins, which
+    //   would otherwise count as same-origin for Sec-Fetch-Site.
+    // - CSRF guard: GETs to /index.html and /assets are unaffected (it
+    //   only acts on mutating methods); mutating /api/v1/* requests
+    //   must originate same-origin (or carry no Sec-Fetch-Site, i.e.
+    //   be a non-browser CLI client).
     build_api_router(state)
         .merge(static_routes)
         .fallback(spa_fallback)
         .layer(middleware::from_fn(auth::enforce_csrf))
+        .layer(middleware::from_fn(auth::enforce_loopback_host))
 }
 
 #[cfg(test)]
@@ -140,6 +150,7 @@ mod tests {
             state: pool,
             runner: Arc::new(palimpsest::runner::RealRunner),
             config_path: std::path::PathBuf::from("/dev/null"),
+            shutdown: tokio_util::sync::CancellationToken::new(),
         }
     }
 
@@ -220,5 +231,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    fn req_with_host(method: Method, uri: &str, host: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("host", host)
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn rebound_host_is_blocked_even_for_get() {
+        // DNS rebinding: attacker.com resolving to 127.0.0.1 makes the
+        // request same-origin for Sec-Fetch-Site purposes; the Host
+        // check is what stops it — including plain reads.
+        let app = build_loopback_router(test_state().await);
+        let resp = app
+            .oneshot(req_with_host(
+                Method::GET,
+                "/api/v1/jobs",
+                "attacker.example:7878",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn loopback_hosts_are_allowed() {
+        for host in [
+            "127.0.0.1:7878",
+            "127.0.0.1",
+            "localhost:7878",
+            "localhost",
+            "[::1]:7878",
+        ] {
+            let app = build_loopback_router(test_state().await);
+            let resp = app
+                .oneshot(req_with_host(Method::GET, "/api/v1/jobs", host))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "host {host}");
+        }
     }
 }

@@ -3,30 +3,39 @@
 //! channel what it has, intersect by GUID, then open a recv channel and
 //! pipe `zfs send`'s stdout into it.
 //!
-//! The planner (`pick_plan`, `pick_plan_with_token`, `build_send_header`,
-//! `build_send_args`, `CompiledFilter`) is pure and unchanged from the
-//! QUIC days. Only the executor is rebuilt on top of `peer::PeerLink`.
+//! The planner (`pick_plan`, `pick_plan_with_token`,
+//! `apply_bookmark_fallback`, `build_send_header`, `build_send_args`,
+//! `CompiledFilter`) is pure; the executor drives it over
+//! `peer::PeerLink`.
 //!
 //! Holds and cursor bookmarks (ARCHITECTURE.md "Holds and replication
 //! cursor"):
 //!
-//!   - Step hold tag `arctern_step_J_<jobname>` is placed on the `to`
-//!     snapshot before the send begins. Released on success; left in
-//!     place on failure so a retry can find the snapshot regardless of
+//!   - Step hold tag `arctern_step_J_<jobname>_P_<peer>` is placed on
+//!     the `to` snapshot before the send begins. On success the tag is
+//!     swept from every filtered snapshot of the dataset (the current
+//!     `to` plus stale holds left by earlier failed cycles); on failure
+//!     it stays so a retry can find the snapshot regardless of
 //!     intervening prune.
-//!   - Cursor bookmark `<dataset>#arctern_cursor_J_<jobname>` is created
-//!     from the new `to` snapshot on success; the previous cursor (same
-//!     name, GUID-anchored) is destroyed after the new one lands so the
-//!     transition is crash-safe.
+//!   - Cursor bookmark `<dataset>#arctern_cursor_G_<guid>_J_<job>_P_<peer>`
+//!     is created from the new `to` snapshot on success; previous
+//!     cursors (same job/peer suffix, different GUID) are destroyed
+//!     after the new one lands, so the transition is crash-safe.
+//!     When sender and receiver share no common snapshot, the planner
+//!     falls back to an incremental send based on any bookmark whose
+//!     GUID the receiver still has (see `apply_bookmark_fallback`).
 
+use std::collections::{BTreeSet, HashMap};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 
-use arctern_config::{PushJobConfig, SendFlagsConfig, SnapshotFilterConfig};
+use arctern_api::{TargetStatus, TransferInfo};
+use arctern_config::{PeerConfig, PeerMode, PushJobConfig, SendFlagsConfig, SnapshotFilterConfig};
 use arctern_transport::{
-    PROTOCOL_VERSION, ProtocolError, RecvHeader, Request, Response, SendFlagsWire, SendHeader,
-    SendKind, SnapshotEntry, SnapshotRef, compile_prefix_regex, regex,
+    PROTOCOL_VERSION, RecvHeader, Request, Response, SendFlagsWire, SendHeader, SendKind,
+    SnapshotEntry, SnapshotRef, compile_prefix_regex, regex,
 };
 use palimpsest::dataset::ListOptions;
 use palimpsest::models::DatasetType;
@@ -55,10 +64,33 @@ pub enum SnapshotPlan {
         to: SnapshotRef,
         discard_partial_recv: bool,
     },
+    /// `zfs send -i <dataset>#<bookmark> <dataset>@<to>` — incremental
+    /// whose base is a bookmark instead of a snapshot. Picked when the
+    /// receiver and sender share no common *snapshot* (the sender's
+    /// copy was pruned) but a sender bookmark's GUID is still present
+    /// on the receiver. This is what makes cursor bookmarks (arctern's
+    /// own, or zrepl's `#zrepl_CURSOR_*` during migration) load-bearing:
+    /// an offline gap longer than the sender's retention window resyncs
+    /// incrementally instead of forcing a full resend.
+    /// `from.name` carries the bookmark leaf (part after `#`).
+    IncrementalFromBookmark {
+        from: SnapshotRef,
+        to: SnapshotRef,
+        discard_partial_recv: bool,
+    },
     Resume {
         token: String,
         decoded: palimpsest::resume_token::ResumeToken,
     },
+}
+
+/// One sender-side bookmark, as listed for the fallback planner.
+/// `leaf` is the part after `#`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BookmarkRef {
+    pub leaf: String,
+    pub guid: u64,
+    pub createtxg: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -81,14 +113,12 @@ impl CompiledFilter {
         }
     }
 
-    #[allow(dead_code)]
     pub fn wire_regex(&self) -> Option<&str> {
         self.wire.as_deref()
     }
 }
 
 #[derive(Debug, Error)]
-#[allow(dead_code)]
 pub enum PlanError {
     #[error("list sender snapshots on {dataset}: {source}")]
     SenderList {
@@ -96,12 +126,6 @@ pub enum PlanError {
         #[source]
         source: palimpsest::ZfsError,
     },
-    #[error("wire: {0}")]
-    Wire(#[from] ProtocolError),
-    #[error("LIST receiver error: {message}")]
-    Receiver { message: String },
-    #[error("decode resume token: {0}")]
-    ResumeTokenDecode(#[from] palimpsest::resume_token::ResumeTokenError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,6 +223,91 @@ fn pick_plan_with_discard(
     }
 }
 
+/// Fallback for the "no common snapshot" case: if the base plan is a
+/// Full send but some sender bookmark's GUID is present on the
+/// receiver, downgrade to an incremental from that bookmark (the
+/// youngest matching one). Any bookmark qualifies — arctern's own
+/// cursors, zrepl's `#zrepl_CURSOR_*` left over from a migration, or a
+/// hand-made `zfs bookmark`. Plans other than Full pass through.
+pub fn apply_bookmark_fallback(
+    plan: SnapshotPlan,
+    receiver: &[SnapshotEntry],
+    bookmarks: &[BookmarkRef],
+) -> SnapshotPlan {
+    let SnapshotPlan::Full {
+        to,
+        discard_partial_recv,
+    } = plan
+    else {
+        return plan;
+    };
+    if receiver.is_empty() {
+        // First replication — Full is correct, not a degraded case.
+        return SnapshotPlan::Full {
+            to,
+            discard_partial_recv,
+        };
+    }
+    use std::collections::BTreeSet;
+    let recv_guids: BTreeSet<u64> = receiver.iter().map(|s| s.guid).collect();
+    let base = bookmarks
+        .iter()
+        .filter(|b| recv_guids.contains(&b.guid))
+        .max_by_key(|b| b.createtxg);
+    match base {
+        Some(b) => SnapshotPlan::IncrementalFromBookmark {
+            from: SnapshotRef {
+                name: b.leaf.clone(),
+                guid: b.guid,
+            },
+            to,
+            discard_partial_recv,
+        },
+        None => SnapshotPlan::Full {
+            to,
+            discard_partial_recv,
+        },
+    }
+}
+
+/// List every bookmark of `sender_dataset` with its GUID. Unfiltered by
+/// name on purpose — the fallback matches by GUID, and foreign bookmarks
+/// (zrepl cursors) are exactly the migration case.
+pub async fn list_sender_bookmarks(
+    runner: &dyn CommandRunner,
+    sender_dataset: &str,
+) -> Result<Vec<BookmarkRef>, PlanError> {
+    let opts = ListOptions {
+        recursive: false,
+        types: vec![DatasetType::Bookmark],
+        roots: vec![sender_dataset.to_string()],
+        properties: vec!["guid".into()],
+        ..ListOptions::default()
+    };
+    let entries = palimpsest::dataset::list(runner, &opts)
+        .await
+        .map_err(|source| PlanError::SenderList {
+            dataset: sender_dataset.to_string(),
+            source,
+        })?;
+    Ok(entries
+        .into_iter()
+        .filter_map(|e| {
+            let leaf = e.name.split_once('#').map(|(_, l)| l.to_string())?;
+            let guid = e
+                .properties
+                .get("guid")
+                .and_then(|p| p.value.parse::<u64>().ok())?;
+            let createtxg = e.createtxg.parse::<u64>().ok()?;
+            Some(BookmarkRef {
+                leaf,
+                guid,
+                createtxg,
+            })
+        })
+        .collect())
+}
+
 pub fn pick_plan_with_token(
     sender: &[SnapshotRef],
     receiver: &[SnapshotEntry],
@@ -242,6 +351,14 @@ pub fn build_send_header(plan: &SnapshotPlan, flags: &SendFlagsConfig) -> Option
             from,
             to,
             discard_partial_recv,
+        }
+        // On the wire a bookmark base is indistinguishable from a
+        // snapshot base: the receiver only logs `from_snap` — the
+        // stream itself carries the real base identity.
+        | SnapshotPlan::IncrementalFromBookmark {
+            from,
+            to,
+            discard_partial_recv,
         } => (
             SendKind::Incremental,
             Some(from.clone()),
@@ -252,7 +369,16 @@ pub fn build_send_header(plan: &SnapshotPlan, flags: &SendFlagsConfig) -> Option
             SendKind::Resume,
             None,
             SnapshotRef {
-                name: decoded.to_name.clone(),
+                // The token's toname is the full sender-side
+                // `dataset@snap`; the wire carries only the leaf — the
+                // receiver validates it as a snapshot leaf (no `/` or
+                // `@`) and names its own `target_dataset@<leaf>` with it.
+                name: decoded
+                    .to_name
+                    .split_once('@')
+                    .map(|(_, leaf)| leaf)
+                    .unwrap_or(&decoded.to_name)
+                    .to_string(),
                 guid: decoded.to_guid,
             },
             // Resume MUST NOT discard the partial — that IS the partial
@@ -296,8 +422,11 @@ pub fn build_send_args(
     }
     let to_full = match plan {
         SnapshotPlan::Nothing => return None,
-        SnapshotPlan::Full { to, .. } => format!("{sender_dataset}@{}", to.name),
-        SnapshotPlan::Incremental { to, .. } => format!("{sender_dataset}@{}", to.name),
+        SnapshotPlan::Full { to, .. }
+        | SnapshotPlan::Incremental { to, .. }
+        | SnapshotPlan::IncrementalFromBookmark { to, .. } => {
+            format!("{sender_dataset}@{}", to.name)
+        }
         SnapshotPlan::Resume { .. } => unreachable!("handled above"),
     };
     let mut args = SendArgs::new(to_full);
@@ -313,8 +442,14 @@ pub fn build_send_args(
     if flags.large_blocks {
         args = args.large_blocks();
     }
-    if let SnapshotPlan::Incremental { from, .. } = plan {
-        args = args.incremental(format!("{sender_dataset}@{}", from.name));
+    match plan {
+        SnapshotPlan::Incremental { from, .. } => {
+            args = args.incremental(format!("{sender_dataset}@{}", from.name));
+        }
+        SnapshotPlan::IncrementalFromBookmark { from, .. } => {
+            args = args.incremental(format!("{sender_dataset}#{}", from.name));
+        }
+        _ => {}
     }
     Some(args)
 }
@@ -327,24 +462,34 @@ fn step_hold_tag(job_name: &str, peer: &str) -> String {
     format!("arctern_step_J_{job_name}_P_{peer}")
 }
 
-fn cursor_bookmark_name(dataset: &str, job_name: &str, peer: &str) -> String {
-    format!("{dataset}#arctern_cursor_J_{job_name}_P_{peer}")
+/// GUID-suffixed cursor name (zrepl's scheme): a new cursor is created
+/// under a fresh name *before* stale ones are destroyed, so a crash in
+/// between leaves at least one cursor alive.
+fn cursor_bookmark_name(dataset: &str, job_name: &str, peer: &str, guid: u64) -> String {
+    format!("{dataset}#arctern_cursor_G_{guid:x}_J_{job_name}_P_{peer}")
+}
+
+/// Matches any cursor bookmark leaf for this (job, peer), regardless of
+/// GUID. Used to find stale cursors after advancing.
+fn is_cursor_bookmark_leaf(leaf: &str, job_name: &str, peer: &str) -> bool {
+    leaf.starts_with("arctern_cursor_G_") && leaf.ends_with(&format!("_J_{job_name}_P_{peer}"))
 }
 
 /// Plan one filesystem cycle against the receiver. Pure planner glue
-/// over palimpsest + the control channel.
+/// over palimpsest + the control channel. Returns the plan plus the
+/// filtered sender snapshot list (the executor's hold sweep reuses it).
 async fn plan_one_filesystem(
     runner: &dyn CommandRunner,
     peer: &PeerLink,
     sender_dataset: &str,
     target_dataset: &str,
     filter: &CompiledFilter,
-) -> Result<SnapshotPlan, String> {
+) -> Result<(SnapshotPlan, Vec<SnapshotRef>), String> {
     let sender = list_sender_snaps(runner, sender_dataset, filter)
         .await
         .map_err(|e| format!("{e}"))?;
     if sender.is_empty() {
-        return Ok(SnapshotPlan::Nothing);
+        return Ok((SnapshotPlan::Nothing, sender));
     }
     let resp = peer
         .rpc(Request::ListReceiverGuids {
@@ -383,17 +528,48 @@ async fn plan_one_filesystem(
                     error = %e,
                     "push: receiver token failed to decode, treating as stale"
                 );
-                return Ok(pick_plan_with_discard(&sender, &receiver, true));
+                let plan = pick_plan_with_discard(&sender, &receiver, true);
+                let plan = maybe_bookmark_fallback(runner, sender_dataset, plan, &receiver).await;
+                return Ok((plan, sender));
             }
         },
         None => None,
     };
-    Ok(pick_plan_with_token(
-        &sender,
-        &receiver,
-        token.as_deref(),
-        decoded.as_ref(),
-    ))
+    let plan = pick_plan_with_token(&sender, &receiver, token.as_deref(), decoded.as_ref());
+    let plan = maybe_bookmark_fallback(runner, sender_dataset, plan, &receiver).await;
+    Ok((plan, sender))
+}
+
+/// Wrap `apply_bookmark_fallback` with the bookmark listing, skipping
+/// the extra `zfs list` entirely when the plan can't benefit. A listing
+/// failure degrades to the original Full plan with a warning — a full
+/// resend is correct, just expensive.
+async fn maybe_bookmark_fallback(
+    runner: &dyn CommandRunner,
+    sender_dataset: &str,
+    plan: SnapshotPlan,
+    receiver: &[SnapshotEntry],
+) -> SnapshotPlan {
+    if !matches!(plan, SnapshotPlan::Full { .. }) || receiver.is_empty() {
+        return plan;
+    }
+    match list_sender_bookmarks(runner, sender_dataset).await {
+        Ok(bookmarks) => {
+            let plan = apply_bookmark_fallback(plan, receiver, &bookmarks);
+            if let SnapshotPlan::IncrementalFromBookmark { from, .. } = &plan {
+                tracing::info!(
+                    dataset = %sender_dataset,
+                    bookmark = %from.name,
+                    "push: no common snapshot; falling back to incremental from bookmark"
+                );
+            }
+            plan
+        }
+        Err(e) => {
+            warn!(dataset = %sender_dataset, error = %e, "push: bookmark listing failed; keeping full-send plan");
+            plan
+        }
+    }
 }
 
 /// Open a recv channel for one plan, spawn `zfs send` locally, copy
@@ -411,6 +587,7 @@ async fn execute_one_plan(
     sender_dataset: &str,
     flags: &SendFlagsConfig,
     cancel: &CancellationToken,
+    transfer: &Mutex<Option<TransferInfo>>,
 ) -> Result<(), String> {
     let Some(send_header) = build_send_header(plan, flags) else {
         return Err("build_send_header returned None for non-Nothing plan".into());
@@ -450,18 +627,55 @@ async fn execute_one_plan(
         .stdin
         .take()
         .ok_or_else(|| "no stdin on recv channel".to_string())?;
-    let copy_res = tokio::select! {
-        biased;
-        _ = cancel.cancelled() => {
-            // Drop both halves: the recv channel's stdin closes the SSH
-            // child's stdin, propagating SIGPIPE to the remote zfs recv;
-            // start_kill on the local send child terminates it.
-            let _ = channel_stdin.shutdown().await;
-            let _ = child.start_kill();
+    // Manual copy loop instead of tokio::io::copy: publishes progress
+    // into `transfer` (the UI derives speed from poll deltas) and races
+    // the job/cycle CancellationToken. On cancel the recv channel's
+    // stdin closes (SIGPIPE to the remote zfs recv, which keeps its
+    // resumable partial state) and the local send child is killed.
+    let copy_res: std::io::Result<u64> = async {
+        let mut buf = vec![0u8; 256 * 1024];
+        let mut copied: u64 = 0;
+        let mut last_published: u64 = 0;
+        loop {
+            let step = async {
+                let n = child_stdout.read(&mut buf).await?;
+                if n > 0 {
+                    channel_stdin.write_all(&buf[..n]).await?;
+                }
+                std::io::Result::Ok(n)
+            };
+            let n = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    return Err(std::io::Error::other("cancelled"));
+                }
+                r = step => r?,
+            };
+            if n == 0 {
+                break;
+            }
+            copied += n as u64;
+            if copied - last_published >= 8 * 1024 * 1024 {
+                last_published = copied;
+                if let Some(t) = transfer.lock().unwrap().as_mut() {
+                    t.bytes_sent = copied;
+                }
+            }
+        }
+        if let Some(t) = transfer.lock().unwrap().as_mut() {
+            t.bytes_sent = copied;
+        }
+        Ok(copied)
+    }
+    .await;
+    if copy_res.is_err() {
+        let _ = channel_stdin.shutdown().await;
+        let _ = child.start_kill();
+        if cancel.is_cancelled() {
+            let _ = child.wait().await;
             return Err("cancelled".into());
         }
-        r = tokio::io::copy(&mut child_stdout, &mut channel_stdin) => r,
-    };
+    }
     let _ = channel_stdin.shutdown().await;
     drop(channel_stdin);
     let stderr_bytes = stderr_drain.await.unwrap_or_default();
@@ -492,10 +706,11 @@ async fn execute_one_plan(
 
 /// Step hold + cursor bookmark choreography around a successful execute.
 /// Holds are placed BEFORE the send so a concurrent prune cannot kill
-/// the snapshot mid-stream; released only on success. Cursor bookmark
-/// is created from the new `to` snapshot after the receiver has
-/// acknowledged; the previous cursor (same name, GUID-anchored) is
-/// destroyed afterwards so the transition is crash-safe.
+/// the snapshot mid-stream. On success the step-hold tag is swept from
+/// every filtered snapshot (current `to` plus stale holds from earlier
+/// failed cycles); on failure holds stay so a retry can find the
+/// snapshot. The cursor bookmark is GUID-named: the new one is created
+/// first, stale same-(job, peer) cursors destroyed after — crash-safe.
 #[allow(clippy::too_many_arguments)]
 async fn run_one_filesystem(
     runner: &dyn CommandRunner,
@@ -505,18 +720,35 @@ async fn run_one_filesystem(
     sender_dataset: &str,
     target_dataset: &str,
     plan: &SnapshotPlan,
+    sender_snaps: &[SnapshotRef],
     flags: &SendFlagsConfig,
     cancel: &CancellationToken,
+    transfer: &Mutex<Option<TransferInfo>>,
 ) -> Result<(), String> {
-    let to_snap_name: Option<String> = match plan {
-        SnapshotPlan::Full { to, .. } | SnapshotPlan::Incremental { to, .. } => {
-            Some(format!("{sender_dataset}@{}", to.name))
+    let to_hold_target: Option<(String, u64)> = match plan {
+        SnapshotPlan::Full { to, .. }
+        | SnapshotPlan::Incremental { to, .. }
+        | SnapshotPlan::IncrementalFromBookmark { to, .. } => {
+            Some((format!("{sender_dataset}@{}", to.name), to.guid))
         }
-        SnapshotPlan::Resume { decoded, .. } => Some(decoded.to_name.clone()),
+        // The token's toname is the full sender-side dataset@snap.
+        SnapshotPlan::Resume { decoded, .. } => Some((decoded.to_name.clone(), decoded.to_guid)),
         SnapshotPlan::Nothing => None,
     };
+    // The `from` base needs the same protection for the duration of the
+    // step (zrepl holds both ends): losing it mid-send or between a
+    // failed step and its retry breaks incrementality / resumability.
+    // Bookmark bases can't be held — snapshot prune can't destroy a
+    // bookmark, so they're safe without one.
+    let from_hold_target: Option<String> = match plan {
+        SnapshotPlan::Incremental { from, .. } => Some(format!("{sender_dataset}@{}", from.name)),
+        _ => None,
+    };
     let tag = step_hold_tag(job_name, peer_name);
-    if let Some(snap) = &to_snap_name {
+    for snap in from_hold_target
+        .iter()
+        .chain(to_hold_target.iter().map(|(s, _)| s))
+    {
         // hold is idempotent at the palimpsest layer (no-op when the
         // tag already exists for that snapshot).
         if let Err(e) = palimpsest::hold::hold(runner, snap, &tag).await {
@@ -535,34 +767,104 @@ async fn run_one_filesystem(
         sender_dataset,
         flags,
         cancel,
+        transfer,
     )
     .await?;
 
-    if let Some(snap) = &to_snap_name {
-        let cursor = cursor_bookmark_name(sender_dataset, job_name, peer_name);
-        // Advance the cursor to the new `to`. The bookmark name is fixed
-        // per (job, peer), so it must be destroyed before re-creation —
-        // `bookmark::create` is idempotent on "exists" and would otherwise
-        // leave the cursor pinned to the first snapshot forever. Destroy
-        // failure is expected on the first cycle (no prior cursor) and is
-        // non-fatal.
-        if let Err(e) = palimpsest::bookmark::destroy(runner, &cursor).await {
-            tracing::debug!(bookmark = %cursor, error = %e, "no prior cursor bookmark to destroy");
-        }
-        if let Err(e) = palimpsest::bookmark::create(runner, snap, &cursor).await {
-            warn!(snapshot = %snap, bookmark = %cursor, error = %e, "create cursor bookmark");
-        }
-        if let Err(e) = palimpsest::hold::release(runner, snap, &tag).await {
-            warn!(snapshot = %snap, tag = %tag, error = %e, "release step hold");
-        }
+    if let Some((snap, guid)) = &to_hold_target {
+        advance_cursor(runner, sender_dataset, job_name, peer_name, snap, *guid).await;
+        sweep_step_holds(runner, sender_dataset, sender_snaps, snap, &tag).await;
     }
     Ok(())
 }
 
+/// Create the new GUID-named cursor bookmark, then destroy stale
+/// cursors for the same (job, peer). Failures degrade to warnings —
+/// the send already succeeded and the receiver has the data.
+async fn advance_cursor(
+    runner: &dyn CommandRunner,
+    sender_dataset: &str,
+    job_name: &str,
+    peer_name: &str,
+    to_snap: &str,
+    to_guid: u64,
+) {
+    let cursor = cursor_bookmark_name(sender_dataset, job_name, peer_name, to_guid);
+    if let Err(e) = palimpsest::bookmark::create(runner, to_snap, &cursor).await {
+        warn!(snapshot = %to_snap, bookmark = %cursor, error = %e, "create cursor bookmark");
+        // Keep the old cursor rather than risk destroying the only one.
+        return;
+    }
+    let opts = ListOptions {
+        recursive: false,
+        types: vec![DatasetType::Bookmark],
+        roots: vec![sender_dataset.to_string()],
+        ..ListOptions::default()
+    };
+    let bookmarks = match palimpsest::dataset::list(runner, &opts).await {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(dataset = %sender_dataset, error = %e, "list bookmarks for cursor sweep");
+            return;
+        }
+    };
+    for b in &bookmarks {
+        let Some((_, leaf)) = b.name.split_once('#') else {
+            continue;
+        };
+        if b.name != cursor
+            && is_cursor_bookmark_leaf(leaf, job_name, peer_name)
+            && let Err(e) = palimpsest::bookmark::destroy(runner, &b.name).await
+        {
+            warn!(bookmark = %b.name, error = %e, "destroy stale cursor bookmark");
+        }
+    }
+}
+
+/// Release this (job, peer)'s step-hold tag from every filtered sender
+/// snapshot — the current `to` plus any stale holds left by earlier
+/// failed cycles (a failed cycle keeps its hold; the next cycle usually
+/// targets a newer snapshot, so without the sweep the old hold would
+/// pin its snapshot against prune forever). One `zfs holds` invocation
+/// for the whole set, then one release per actual holder.
+async fn sweep_step_holds(
+    runner: &dyn CommandRunner,
+    sender_dataset: &str,
+    sender_snaps: &[SnapshotRef],
+    to_snap_full: &str,
+    tag: &str,
+) {
+    let mut names: Vec<String> = sender_snaps
+        .iter()
+        .map(|s| format!("{sender_dataset}@{}", s.name))
+        .collect();
+    if !names.iter().any(|n| n == to_snap_full) {
+        names.push(to_snap_full.to_string());
+    }
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let holds = match palimpsest::hold::list_holds_many(runner, &refs).await {
+        Ok(h) => h,
+        Err(e) => {
+            warn!(dataset = %sender_dataset, error = %e, "step-hold sweep holds query failed");
+            return;
+        }
+    };
+    for h in holds.iter().filter(|h| h.tag == tag) {
+        if let Err(e) = palimpsest::hold::release(runner, &h.dataset, tag).await {
+            warn!(snapshot = %h.dataset, tag = %tag, error = %e, "release step hold");
+        }
+    }
+}
+
 pub const KIND: &str = arctern_api::JOB_KIND_PUSH;
+
+/// Per-peer last outcome: (last successful sync unix seconds, last error).
+type PeerOutcomes = HashMap<String, (Option<i64>, Option<String>)>;
 
 pub struct PushJob {
     config: PushJobConfig,
+    /// `[[peers]]` entries for this job's targets (mode, auto_interval).
+    peer_configs: Vec<PeerConfig>,
     filter: CompiledFilter,
     status: Mutex<JobStatusInner>,
     wakeup: Arc<tokio::sync::Notify>,
@@ -570,34 +872,83 @@ pub struct PushJob {
     /// here so that a reconnect performed by the background task takes
     /// effect on the next cycle without restarting the job.
     peers: Option<PeersState>,
+    /// In-flight transfer progress, mirrored into `status()`.
+    transfer: Arc<Mutex<Option<TransferInfo>>>,
+    /// Pause = abort the current transfer (resumable) + suspend
+    /// scheduled cycles until `resume`.
+    paused: AtomicBool,
+    /// Peers queued for a one-shot manual replication.
+    manual_requests: Mutex<BTreeSet<String>>,
+    /// Cancellation token of the currently running cycle (child of the
+    /// job's own token), so cancel/pause can abort mid-transfer.
+    cycle_cancel: Mutex<Option<CancellationToken>>,
+    /// Last known per-peer outcome: (last_success unix, last_error).
+    /// Seeded from SQLite on the first cycle, updated after every sync.
+    peer_outcomes: Mutex<PeerOutcomes>,
+    outcomes_loaded: AtomicBool,
 }
 
 impl PushJob {
-    pub fn new(config: PushJobConfig, peers: Option<PeersState>) -> Result<Self, regex::Error> {
+    pub fn new(
+        config: PushJobConfig,
+        peers: Option<PeersState>,
+        all_peer_configs: &[PeerConfig],
+    ) -> Result<Self, regex::Error> {
         let filter = CompiledFilter::from_config(config.snapshot_filter())?;
+        let peer_configs = all_peer_configs
+            .iter()
+            .filter(|p| config.targets.contains(&p.name))
+            .cloned()
+            .collect();
         Ok(Self {
             config,
+            peer_configs,
             filter,
             status: Mutex::new(JobStatusInner::default()),
             wakeup: Arc::new(tokio::sync::Notify::new()),
             peers,
+            transfer: Arc::new(Mutex::new(None)),
+            paused: AtomicBool::new(false),
+            manual_requests: Mutex::new(BTreeSet::new()),
+            cycle_cancel: Mutex::new(None),
+            peer_outcomes: Mutex::new(HashMap::new()),
+            outcomes_loaded: AtomicBool::new(false),
         })
     }
 
-    /// Walk `config.targets` in order, return the first peer whose
-    /// reachability state has produced a live `PeerLink`. None of them
-    /// connected ⇒ `None` and the cycle errors out.
-    async fn current_link(&self) -> Option<(String, Arc<PeerLink>)> {
+    fn peer_mode(&self, name: &str) -> PeerMode {
+        self.peer_configs
+            .iter()
+            .find(|p| p.name == name)
+            .map(|p| p.mode)
+            .unwrap_or_default()
+    }
+
+    fn peer_auto_interval(&self, name: &str) -> Option<StdDuration> {
+        self.peer_configs
+            .iter()
+            .find(|p| p.name == name)
+            .and_then(|p| p.auto_interval)
+    }
+
+    /// Live link for one named target, if connected.
+    async fn link_for(&self, name: &str) -> Option<Arc<PeerLink>> {
         let peers = self.peers.as_ref()?;
         let g = peers.read().await;
-        for name in &self.config.targets {
-            if let Some(entry) = g.get(name)
-                && let Some(link) = entry.link.clone()
-            {
-                return Some((name.clone(), link));
-            }
-        }
-        None
+        g.get(name).and_then(|entry| entry.link.clone())
+    }
+
+    /// True while any target is connected — used only for the startup
+    /// grace wait.
+    async fn any_link(&self) -> bool {
+        let Some(peers) = self.peers.as_ref() else {
+            return false;
+        };
+        let g = peers.read().await;
+        self.config
+            .targets
+            .iter()
+            .any(|name| g.get(name).is_some_and(|e| e.link.is_some()))
     }
 
     fn record_cycle(&self, last_error: Option<String>, interval: StdDuration) {
@@ -606,6 +957,11 @@ impl PushJob {
         s.last_run = Some(now);
         s.next_run = Some(now + time::Duration::try_from(interval).unwrap_or(time::Duration::ZERO));
         s.last_error = last_error;
+        s.running = false;
+    }
+
+    fn mark_running(&self) {
+        self.status.lock().unwrap().running = true;
     }
 
     async fn expand_filesystems(&self, runner: &dyn CommandRunner) -> Result<Vec<String>, String> {
@@ -632,17 +988,162 @@ impl PushJob {
         )
     }
 
-    async fn run_cycle(&self, ctx: &JobContext, cancel: &CancellationToken) -> Result<(), String> {
-        let Some((peer_name, peer)) = self.current_link().await else {
-            return Err(format!(
-                "push job {:?}: none of targets {:?} currently connected",
-                self.config.name, self.config.targets
-            ));
+    /// Seed the per-peer outcome cache from SQLite once per process.
+    async fn ensure_outcomes_loaded(&self, ctx: &JobContext) {
+        if self.outcomes_loaded.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let Some(pool) = ctx.state.as_ref() else {
+            return;
         };
-        tracing::info!(peer = %peer_name, "push: cycle using target");
-        let runner = ctx.runner.as_ref();
+        if let Ok(rows) = crate::state::push_syncs::for_job(pool, &self.config.name).await {
+            let mut o = self.peer_outcomes.lock().unwrap();
+            for r in rows {
+                let ok = r.status == "ok";
+                o.insert(
+                    r.peer,
+                    (ok.then_some(r.finished_at), if ok { None } else { r.error }),
+                );
+            }
+        }
+    }
+
+    /// Decide which targets this cycle replicates to.
+    /// - manual requests: always (error if the peer is unreachable);
+    /// - auto peers: when connected AND `auto_interval` has elapsed
+    ///   since the last success. An unreachable auto peer is skipped
+    ///   silently — its reachability IS the locality policy (a LAN-only
+    ///   peer is "am I home?") — unless the last success is more than
+    ///   3x the expected cadence old, which becomes a visible error.
+    async fn select_targets(
+        &self,
+        errors: &mut Vec<String>,
+    ) -> Vec<(String, Arc<PeerLink>, &'static str)> {
+        let manual: BTreeSet<String> = std::mem::take(&mut *self.manual_requests.lock().unwrap());
+        let mut selected = Vec::new();
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        for name in &self.config.targets {
+            let link = self.link_for(name).await;
+            if manual.contains(name) {
+                match link {
+                    Some(l) => selected.push((name.clone(), l, "manual")),
+                    None => errors.push(format!("manual push to {name:?}: peer not connected")),
+                }
+                continue;
+            }
+            if self.peer_mode(name) != PeerMode::Auto {
+                continue;
+            }
+            let last_success = self
+                .peer_outcomes
+                .lock()
+                .unwrap()
+                .get(name)
+                .and_then(|o| o.0);
+            let cadence = self
+                .peer_auto_interval(name)
+                .unwrap_or(self.config.interval)
+                .as_secs() as i64;
+            match link {
+                Some(l) => {
+                    let due = match (self.peer_auto_interval(name), last_success) {
+                        (None, _) => true,
+                        (Some(_), None) => true,
+                        (Some(iv), Some(ts)) => now - ts >= iv.as_secs() as i64,
+                    };
+                    if due {
+                        selected.push((name.clone(), l, "auto"));
+                    }
+                }
+                None => {
+                    if let Some(ts) = last_success
+                        && now - ts > cadence.saturating_mul(3)
+                    {
+                        errors.push(format!(
+                            "auto target {name:?} unreachable and last successful sync is {}h old",
+                            (now - ts) / 3600
+                        ));
+                    }
+                }
+            }
+        }
+        selected
+    }
+
+    async fn run_cycle(
+        &self,
+        ctx: &JobContext,
+        cancel: &CancellationToken,
+    ) -> (u64, Result<(), String>) {
+        self.ensure_outcomes_loaded(ctx).await;
         let mut errors: Vec<String> = Vec::new();
-        let sender_paths = self.expand_filesystems(runner).await?;
+        let selected = self.select_targets(&mut errors).await;
+        let mut total_bytes: u64 = 0;
+        for (peer_name, link, reason) in selected {
+            if cancel.is_cancelled() {
+                break;
+            }
+            tracing::info!(peer = %peer_name, reason, "push: replicating to target");
+            let mut peer_errors: Vec<String> = Vec::new();
+            let bytes = self
+                .run_for_peer(ctx, cancel, &peer_name, &link, &mut peer_errors)
+                .await;
+            total_bytes += bytes;
+            let finished = OffsetDateTime::now_utc().unix_timestamp();
+            let (status, err_text) = if peer_errors.is_empty() {
+                ("ok", None)
+            } else {
+                ("error", Some(peer_errors.join("; ")))
+            };
+            if let Some(pool) = ctx.state.as_ref() {
+                let _ = crate::state::push_syncs::record(
+                    pool,
+                    &self.config.name,
+                    &peer_name,
+                    finished,
+                    status,
+                    err_text.as_deref(),
+                )
+                .await;
+            }
+            {
+                let mut o = self.peer_outcomes.lock().unwrap();
+                let entry = o.entry(peer_name.clone()).or_insert((None, None));
+                if peer_errors.is_empty() {
+                    *entry = (Some(finished), None);
+                } else {
+                    entry.1 = err_text.clone();
+                }
+            }
+            errors.extend(peer_errors);
+        }
+        let result = if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        };
+        (total_bytes, result)
+    }
+
+    /// Replicate every configured filesystem to one peer. Returns bytes
+    /// streamed; errors accumulate into `errors`.
+    async fn run_for_peer(
+        &self,
+        ctx: &JobContext,
+        cancel: &CancellationToken,
+        peer_name: &str,
+        peer: &Arc<PeerLink>,
+        errors: &mut Vec<String>,
+    ) -> u64 {
+        let runner = ctx.runner.as_ref();
+        let mut cycle_bytes: u64 = 0;
+        let sender_paths = match self.expand_filesystems(runner).await {
+            Ok(p) => p,
+            Err(e) => {
+                errors.push(e);
+                return 0;
+            }
+        };
         for sender_path in &sender_paths {
             if cancel.is_cancelled() {
                 break;
@@ -650,7 +1151,7 @@ impl PushJob {
             // FR-005: literal concat — target = root_fs/sender_path.
             let target = format!("{}/{}", self.config.target.root_fs, sender_path);
             tracing::info!(sender = %sender_path, target = %target, "push: planning");
-            let plan = match plan_one_filesystem(
+            let (plan, sender_snaps) = match plan_one_filesystem(
                 runner,
                 peer.as_ref(),
                 sender_path,
@@ -676,6 +1177,9 @@ impl PushJob {
                     discard_partial_recv: true,
                     ..
                 } | SnapshotPlan::Incremental {
+                    discard_partial_recv: true,
+                    ..
+                } | SnapshotPlan::IncrementalFromBookmark {
                     discard_partial_recv: true,
                     ..
                 }
@@ -706,6 +1210,12 @@ impl PushJob {
                         "push: incremental send"
                     );
                 }
+                SnapshotPlan::IncrementalFromBookmark { from, to, .. } => {
+                    tracing::info!(
+                        sender = %sender_path, from_bookmark = %from.name, to = %to.name,
+                        "push: incremental send from bookmark"
+                    );
+                }
                 SnapshotPlan::Resume { decoded, .. } => {
                     tracing::info!(
                         sender = %sender_path,
@@ -719,29 +1229,55 @@ impl PushJob {
                 tracing::info!(sender = %sender_path, target = %target, "push: dry-run skipping execution");
                 continue;
             }
-            if let Err(e) = run_one_filesystem(
+            // Publish transfer info for the UI. Total is a dry-run
+            // estimate; resume streams have no cheap estimate.
+            let kind = match &plan {
+                SnapshotPlan::Full { .. } => "full",
+                SnapshotPlan::Incremental { .. } | SnapshotPlan::IncrementalFromBookmark { .. } => {
+                    "incremental"
+                }
+                SnapshotPlan::Resume { .. } => "resume",
+                SnapshotPlan::Nothing => unreachable!("filtered above"),
+            };
+            let total = match build_send_args(&plan, sender_path, &self.config.send) {
+                Some(args) if kind != "resume" => palimpsest::send::dry_run(runner, &args)
+                    .await
+                    .ok()
+                    .map(|d| d.total_bytes),
+                _ => None,
+            };
+            *self.transfer.lock().unwrap() = Some(TransferInfo {
+                dataset: sender_path.clone(),
+                peer: peer_name.to_string(),
+                kind: kind.to_string(),
+                bytes_sent: 0,
+                total_bytes: total,
+                started_at: OffsetDateTime::now_utc().unix_timestamp(),
+            });
+            let res = run_one_filesystem(
                 runner,
                 peer.as_ref(),
                 &self.config.name,
-                &peer_name,
+                peer_name,
                 sender_path,
                 &target,
                 &plan,
+                &sender_snaps,
                 &self.config.send,
                 cancel,
+                &self.transfer,
             )
-            .await
-            {
+            .await;
+            if let Some(t) = self.transfer.lock().unwrap().take() {
+                cycle_bytes += t.bytes_sent;
+            }
+            if let Err(e) = res {
                 let msg = format!("execute {sender_path}: {e}");
                 warn!(error = %msg);
                 errors.push(msg);
             }
         }
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors.join("; "))
-        }
+        cycle_bytes
     }
 }
 
@@ -753,10 +1289,78 @@ impl Job for PushJob {
         KIND
     }
     fn status(&self) -> JobStatusInner {
-        self.status.lock().unwrap().clone()
+        let mut s = self.status.lock().unwrap().clone();
+        s.paused = self.paused.load(Ordering::Relaxed);
+        s.transfer = self.transfer.lock().unwrap().clone();
+        // Best-effort `connected` via try_read: status() is sync and the
+        // peers map is an async RwLock; a missed read shows the peer as
+        // disconnected for one 5s poll — harmless.
+        let connected: HashMap<String, bool> = match self.peers.as_ref() {
+            Some(p) => match p.try_read() {
+                Ok(g) => g
+                    .iter()
+                    .map(|(name, e)| (name.clone(), e.link.is_some()))
+                    .collect(),
+                Err(_) => HashMap::new(),
+            },
+            None => HashMap::new(),
+        };
+        let outcomes = self.peer_outcomes.lock().unwrap();
+        s.targets = self
+            .config
+            .targets
+            .iter()
+            .map(|name| {
+                let (last_success, last_error) =
+                    outcomes.get(name).cloned().unwrap_or((None, None));
+                TargetStatus {
+                    peer: name.clone(),
+                    mode: match self.peer_mode(name) {
+                        PeerMode::Auto => "auto".into(),
+                        PeerMode::Manual => "manual".into(),
+                    },
+                    connected: connected.get(name).copied().unwrap_or(false),
+                    last_success,
+                    last_error,
+                }
+            })
+            .collect();
+        s
     }
     fn wakeup(&self) {
         self.wakeup.notify_one();
+    }
+    fn cancel_current(&self) -> bool {
+        if let Some(tok) = self.cycle_cancel.lock().unwrap().as_ref() {
+            tok.cancel();
+        }
+        true
+    }
+    fn pause(&self) -> bool {
+        self.paused.store(true, Ordering::Relaxed);
+        if let Some(tok) = self.cycle_cancel.lock().unwrap().as_ref() {
+            tok.cancel();
+        }
+        true
+    }
+    fn resume(&self) -> bool {
+        self.paused.store(false, Ordering::Relaxed);
+        self.wakeup.notify_one();
+        true
+    }
+    fn request_push(&self, peer: &str) -> Result<(), String> {
+        if !self.config.targets.iter().any(|t| t == peer) {
+            return Err(format!(
+                "peer {peer:?} is not a target of job {:?}",
+                self.config.name
+            ));
+        }
+        self.manual_requests
+            .lock()
+            .unwrap()
+            .insert(peer.to_string());
+        self.wakeup.notify_one();
+        Ok(())
     }
     fn run(
         self: Arc<Self>,
@@ -767,41 +1371,86 @@ impl Job for PushJob {
         Box::pin(
             async move {
                 let interval = self.config.interval;
-                let job_name = self.config.name.clone();
+                // Startup-immediate like the snap job, but a push cycle
+                // needs a connected peer: give the eager-reconnect tasks
+                // a short grace to establish the first link so a daemon
+                // restart doesn't immediately record a "none of targets
+                // connected" error run. If nothing connects within the
+                // grace, run anyway — the error is accurate and visible.
+                const CONNECT_GRACE: StdDuration = StdDuration::from_secs(30);
+                let deadline = tokio::time::Instant::now() + CONNECT_GRACE;
+                while !self.any_link().await && tokio::time::Instant::now() < deadline {
+                    tokio::select! {
+                        _ = cancel.cancelled() => return,
+                        _ = sleep(StdDuration::from_secs(1)) => {}
+                    }
+                }
+                self.run_and_record(&ctx, &cancel, interval).await;
                 loop {
                     tokio::select! {
                         _ = cancel.cancelled() => break,
                         _ = sleep(interval) => {}
                         _ = self.wakeup.notified() => {}
                     }
-                    let started_at = OffsetDateTime::now_utc().unix_timestamp();
-                    if let Some(pool) = ctx.state.as_ref() {
-                        let _ =
-                            crate::state::job_runs::record_start(pool, &job_name, started_at).await;
-                    }
-                    let outcome = self.run_cycle(&ctx, &cancel).await;
-                    let finished_at = OffsetDateTime::now_utc().unix_timestamp();
-                    let (status, err_msg) = match &outcome {
-                        Ok(()) => (crate::state::job_runs::STATUS_OK, None),
-                        Err(e) => (crate::state::job_runs::STATUS_ERROR, Some(e.as_str())),
-                    };
-                    if let Some(pool) = ctx.state.as_ref() {
-                        let _ = crate::state::job_runs::record_finish(
-                            pool,
-                            &job_name,
-                            started_at,
-                            finished_at,
-                            status,
-                            err_msg,
-                            None,
-                        )
-                        .await;
-                    }
-                    self.record_cycle(outcome.err(), interval);
+                    self.run_and_record(&ctx, &cancel, interval).await;
                 }
             }
             .instrument(span),
         )
+    }
+}
+
+impl PushJob {
+    async fn run_and_record(
+        &self,
+        ctx: &JobContext,
+        cancel: &CancellationToken,
+        interval: StdDuration,
+    ) {
+        // While paused, scheduled ticks are no-ops — but queued manual
+        // requests still run (an explicit "send now" outranks pause).
+        if self.paused.load(Ordering::Relaxed) && self.manual_requests.lock().unwrap().is_empty() {
+            return;
+        }
+        let job_name = &self.config.name;
+        self.mark_running();
+        // Child token: cancel/pause abort just this cycle, daemon
+        // shutdown (the parent) still cancels everything.
+        let cycle_token = cancel.child_token();
+        *self.cycle_cancel.lock().unwrap() = Some(cycle_token.clone());
+        let started_at = OffsetDateTime::now_utc().unix_timestamp();
+        if let Some(pool) = ctx.state.as_ref() {
+            let _ = crate::state::job_runs::record_start(pool, job_name, started_at).await;
+        }
+        let (bytes, outcome) = self.run_cycle(ctx, &cycle_token).await;
+        *self.cycle_cancel.lock().unwrap() = None;
+        let finished_at = OffsetDateTime::now_utc().unix_timestamp();
+        let (status, err_msg) = match &outcome {
+            Ok(()) => (crate::state::job_runs::STATUS_OK, None),
+            Err(_) if cycle_token.is_cancelled() && !cancel.is_cancelled() => {
+                (crate::state::job_runs::STATUS_CANCELLED, Some("cancelled"))
+            }
+            Err(e) => (crate::state::job_runs::STATUS_ERROR, Some(e.as_str())),
+        };
+        if let Some(pool) = ctx.state.as_ref() {
+            let _ = crate::state::job_runs::record_finish(
+                pool,
+                job_name,
+                started_at,
+                finished_at,
+                status,
+                err_msg,
+                Some(bytes as i64),
+            )
+            .await;
+        }
+        self.record_cycle(
+            match status {
+                "error" => outcome.err(),
+                _ => None,
+            },
+            interval,
+        );
     }
 }
 
@@ -930,15 +1579,174 @@ mod tests {
     }
 
     #[test]
-    fn cursor_bookmark_name_includes_peer_for_multi_target_isolation() {
+    fn cursor_bookmark_name_includes_guid_job_and_peer() {
+        let name = cursor_bookmark_name("tank/data", "backup", "home", 0x2a);
+        assert_eq!(name, "tank/data#arctern_cursor_G_2a_J_backup_P_home");
+        let leaf = name.split_once('#').unwrap().1;
+        assert!(is_cursor_bookmark_leaf(leaf, "backup", "home"));
+        assert!(!is_cursor_bookmark_leaf(leaf, "backup", "other"));
+        assert!(!is_cursor_bookmark_leaf(leaf, "other", "home"));
+    }
+
+    #[test]
+    fn bookmark_fallback_downgrades_full_to_incremental() {
+        // Mirrors the zrepl-migration shape: receiver's newest snapshot
+        // was pruned on the sender, but the cursor bookmark survives.
+        let plan = SnapshotPlan::Full {
+            to: s("zrepl_new", 42),
+            discard_partial_recv: false,
+        };
+        let receiver = vec![e("zrepl_old", 13681249742552200977, 100)];
+        let bookmarks = vec![
+            BookmarkRef {
+                leaf: "zrepl_CURSOR_G_bddd90278c3a7711_J_push_to_local".into(),
+                guid: 13681249742552200977,
+                createtxg: 100,
+            },
+            BookmarkRef {
+                leaf: "unrelated".into(),
+                guid: 7,
+                createtxg: 999,
+            },
+        ];
+        let got = apply_bookmark_fallback(plan, &receiver, &bookmarks);
         assert_eq!(
-            cursor_bookmark_name("tank/data", "backup", "home"),
-            "tank/data#arctern_cursor_J_backup_P_home"
+            got,
+            SnapshotPlan::IncrementalFromBookmark {
+                from: SnapshotRef {
+                    name: "zrepl_CURSOR_G_bddd90278c3a7711_J_push_to_local".into(),
+                    guid: 13681249742552200977,
+                },
+                to: s("zrepl_new", 42),
+                discard_partial_recv: false,
+            }
         );
     }
 
     #[test]
-    fn build_send_header_resume_does_not_set_discard() {
+    fn bookmark_fallback_picks_youngest_matching_base() {
+        let plan = SnapshotPlan::Full {
+            to: s("new", 42),
+            discard_partial_recv: true,
+        };
+        let receiver = vec![e("a", 1, 10), e("b", 2, 20)];
+        let bookmarks = vec![
+            BookmarkRef {
+                leaf: "old_cursor".into(),
+                guid: 1,
+                createtxg: 10,
+            },
+            BookmarkRef {
+                leaf: "newer_cursor".into(),
+                guid: 2,
+                createtxg: 20,
+            },
+        ];
+        let got = apply_bookmark_fallback(plan, &receiver, &bookmarks);
+        let SnapshotPlan::IncrementalFromBookmark {
+            from,
+            discard_partial_recv,
+            ..
+        } = got
+        else {
+            panic!("expected IncrementalFromBookmark, got {got:?}");
+        };
+        assert_eq!(from.name, "newer_cursor");
+        assert_eq!(from.guid, 2);
+        // The discard directive survives the downgrade.
+        assert!(discard_partial_recv);
+    }
+
+    #[test]
+    fn bookmark_fallback_keeps_full_when_no_guid_matches() {
+        let plan = SnapshotPlan::Full {
+            to: s("new", 42),
+            discard_partial_recv: false,
+        };
+        let receiver = vec![e("a", 1, 10)];
+        let bookmarks = vec![BookmarkRef {
+            leaf: "cursor".into(),
+            guid: 999,
+            createtxg: 10,
+        }];
+        let got = apply_bookmark_fallback(plan.clone(), &receiver, &bookmarks);
+        assert_eq!(got, plan);
+    }
+
+    #[test]
+    fn bookmark_fallback_ignores_first_replication_and_non_full_plans() {
+        // Empty receiver: Full is the correct first-replication plan.
+        let full = SnapshotPlan::Full {
+            to: s("new", 42),
+            discard_partial_recv: false,
+        };
+        let bookmarks = vec![BookmarkRef {
+            leaf: "cursor".into(),
+            guid: 42,
+            createtxg: 10,
+        }];
+        assert_eq!(apply_bookmark_fallback(full.clone(), &[], &bookmarks), full);
+        // Non-Full plans pass through untouched.
+        let incr = SnapshotPlan::Incremental {
+            from: s("a", 1),
+            to: s("b", 2),
+            discard_partial_recv: false,
+        };
+        let receiver = vec![e("a", 1, 10)];
+        assert_eq!(
+            apply_bookmark_fallback(incr.clone(), &receiver, &bookmarks),
+            incr
+        );
+    }
+
+    #[test]
+    fn build_send_args_incremental_from_bookmark_uses_hash_base() {
+        let plan = SnapshotPlan::IncrementalFromBookmark {
+            from: SnapshotRef {
+                name: "zrepl_CURSOR_G_bddd_J_push".into(),
+                guid: 1,
+            },
+            to: s("zrepl_new", 2),
+            discard_partial_recv: false,
+        };
+        let args = build_send_args(&plan, "tank/data", &SendFlagsConfig::default()).unwrap();
+        let v = args.build_args(false).unwrap();
+        assert_eq!(
+            v,
+            vec![
+                "send",
+                "-w",
+                "-c",
+                "-L",
+                "-e",
+                "-i",
+                "tank/data#zrepl_CURSOR_G_bddd_J_push",
+                "tank/data@zrepl_new"
+            ]
+        );
+    }
+
+    #[test]
+    fn build_send_header_incremental_from_bookmark_is_wire_incremental() {
+        let plan = SnapshotPlan::IncrementalFromBookmark {
+            from: SnapshotRef {
+                name: "zrepl_CURSOR_G_bddd_J_push".into(),
+                guid: 1,
+            },
+            to: s("zrepl_new", 2),
+            discard_partial_recv: false,
+        };
+        let h = build_send_header(&plan, &SendFlagsConfig::default()).unwrap();
+        assert_eq!(h.send_kind, SendKind::Incremental);
+        assert_eq!(
+            h.from_snap.as_ref().map(|f| f.name.as_str()),
+            Some("zrepl_CURSOR_G_bddd_J_push")
+        );
+        assert_eq!(h.to_snap.name, "zrepl_new");
+    }
+
+    #[test]
+    fn build_send_header_resume_does_not_set_discard_and_uses_leaf_name() {
         let decoded = palimpsest::resume_token::ResumeToken {
             token: "1-abc".into(),
             to_name: "tank/data@snap1".into(),
@@ -953,5 +1761,10 @@ mod tests {
         let h = build_send_header(&plan, &SendFlagsConfig::default()).unwrap();
         assert_eq!(h.send_kind, SendKind::Resume);
         assert!(!h.discard_partial_recv);
+        // The receiver validates to_snap.name as a snapshot leaf (no
+        // '/' or '@') and uses it to name target_dataset@<leaf> — the
+        // full sender-side toname would be rejected.
+        assert_eq!(h.to_snap.name, "snap1");
+        assert_eq!(h.to_snap.guid, 42);
     }
 }

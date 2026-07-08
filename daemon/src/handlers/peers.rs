@@ -12,7 +12,6 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode},
-    response::IntoResponse,
 };
 use serde::Deserialize;
 use time::format_description::well_known::Rfc3339;
@@ -151,6 +150,10 @@ pub async fn list_peer_jobs(
                     last_run: j.last_run,
                     next_run: j.next_run,
                     last_error: j.last_error,
+                    running: j.running,
+                    paused: false,
+                    transfer: None,
+                    targets: Vec::new(),
                 })
                 .collect(),
         )),
@@ -192,6 +195,10 @@ pub async fn get_peer_job(
             last_run: job.last_run,
             next_run: job.next_run,
             last_error: job.last_error,
+            running: job.running,
+            paused: false,
+            transfer: None,
+            targets: Vec::new(),
         })),
         Response::Error { code, message } => Err(map_response_error(code, message)),
         other => Err(map_response_error(
@@ -352,16 +359,13 @@ pub async fn stream_peer_events(
     use tokio::sync::broadcast::error::RecvError;
 
     let link = require_link(&state, &peer).await?;
-    // Subscribe before sending the SubscribeEvents request so we don't
-    // miss frames pushed between the request landing and our subscribe.
-    let rx = link.subscribe_events();
-    let resp = link
-        .rpc(Request::SubscribeEvents { since: None })
+    // PeerLink sends the SubscribeEvents RPC once per link (first
+    // subscriber) and fans frames out via its broadcast — additional
+    // SSE clients reuse the same server-side pusher.
+    let rx = link
+        .subscribe_events()
         .await
         .map_err(|e| rpc_error_to_http(format!("{e}")))?;
-    if let Response::Error { code, message } = resp {
-        return Err(map_response_error(code, message));
-    }
     // End the stream when the broadcast closes — which happens when the
     // peer link is torn down on reconnect. Ending it (rather than
     // swallowing the error and stalling) lets the browser's EventSource
@@ -387,18 +391,12 @@ pub async fn stream_peer_events(
             }
         }
     });
+    // End on daemon shutdown so graceful drain can complete.
+    let stream =
+        futures_util::StreamExt::take_until(stream, state.shutdown.clone().cancelled_owned());
     Ok(Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keep-alive"),
     ))
 }
-
-// Unused-import suppressors keep IntoResponse + PeerLink available
-// for ergonomic re-use in subsequent handlers.
-#[allow(dead_code)]
-fn _into_response_marker(r: impl IntoResponse) -> axum::response::Response {
-    r.into_response()
-}
-#[allow(dead_code)]
-fn _peer_link_marker(_: Arc<PeerLink>) {}

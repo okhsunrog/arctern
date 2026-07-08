@@ -20,7 +20,7 @@ pub mod zfs_names;
 pub use grid::{GridParseError, GridSpec, KeepCount, RetentionInterval, SnapshotEntry};
 pub use prune::{PruneError, evaluate as evaluate_keep_rules};
 pub use schema::{
-    AllowedClient, Config, Defaults, FilesystemFilter, JobConfig, KeepRule, PeerConfig,
+    AllowedClient, Config, Defaults, FilesystemFilter, JobConfig, KeepRule, PeerConfig, PeerMode,
     PruneJobConfig, PruningConfig, PruningDefaults, PushJobConfig, PushTarget, RecvConfig,
     SendFlagsConfig, SnapJobConfig, SnapshotFilterConfig, SnapshottingConfig, SnapshottingDefaults,
 };
@@ -171,6 +171,18 @@ pub fn resolve_defaults(cfg: &mut Config) -> Result<(), String> {
 /// the field path on failure (`jobs[N].pruning.keep[M].grid` shape).
 pub fn validate(cfg: &Config) -> Result<(), String> {
     use std::collections::BTreeSet;
+    let mut peer_names: BTreeSet<&str> = BTreeSet::new();
+    for (i, peer) in cfg.peers.iter().enumerate() {
+        if peer.name.is_empty() {
+            return Err(format!("peers[{i}].name: must not be empty"));
+        }
+        if peer.ssh_target.is_empty() {
+            return Err(format!("peers[{i}].ssh_target: must not be empty"));
+        }
+        if !peer_names.insert(peer.name.as_str()) {
+            return Err(format!("peers[{i}]: duplicate name {:?}", peer.name));
+        }
+    }
     let mut seen_names: BTreeSet<&str> = BTreeSet::new();
     for (i, job) in cfg.jobs.iter().enumerate() {
         let name = job.name();
@@ -179,7 +191,7 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
         }
         match job {
             JobConfig::Snap(s) => validate_snap(i, s)?,
-            JobConfig::Push(s) => validate_push(i, s)?,
+            JobConfig::Push(s) => validate_push(i, s, &peer_names)?,
             JobConfig::Prune(s) => validate_prune(i, s)?,
         }
     }
@@ -252,13 +264,16 @@ fn validate_filesystem_filter(idx: usize, fi: usize, f: &FilesystemFilter) -> Re
     }
     if f.recursive {
         for (ei, e) in f.exclude.iter().enumerate() {
-            if let Err(err) = validate_dataset_name(e) {
+            // A trailing `/` marks a subtree exclude (mirrors the
+            // include-key syntax); the dataset name is what precedes it.
+            let name = e.trim_end_matches('/');
+            if let Err(err) = validate_dataset_name(name) {
                 return Err(format!(
                     "jobs[{idx}].filesystems[{fi}].exclude[{ei}]: invalid dataset name {e:?}: {err}"
                 ));
             }
-            let same = e == &f.path;
-            let descendant = e.starts_with(&format!("{}/", f.path));
+            let same = name == f.path;
+            let descendant = name.starts_with(&format!("{}/", f.path));
             if !(same || descendant) {
                 return Err(format!(
                     "jobs[{idx}].filesystems[{fi}].exclude[{ei}]: {e:?} is not a descendant of {:?}",
@@ -291,7 +306,11 @@ fn validate_prune(idx: usize, s: &PruneJobConfig) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_push(idx: usize, s: &PushJobConfig) -> Result<(), String> {
+fn validate_push(
+    idx: usize,
+    s: &PushJobConfig,
+    peer_names: &std::collections::BTreeSet<&str>,
+) -> Result<(), String> {
     if s.name.is_empty() {
         return Err(format!("jobs[{idx}].name: must not be empty"));
     }
@@ -329,6 +348,15 @@ fn validate_push(idx: usize, s: &PushJobConfig) -> Result<(), String> {
             }
         }
         (Some(_), None) => {}
+    }
+    // A typo'd target would otherwise surface only as a perpetual
+    // "none of targets connected" at runtime.
+    for (ti, t) in s.targets.iter().enumerate() {
+        if !peer_names.contains(t.as_str()) {
+            return Err(format!(
+                "jobs[{idx}].targets[{ti}]: {t:?} does not match any [[peers]] entry"
+            ));
+        }
     }
     Ok(())
 }
@@ -531,6 +559,10 @@ regex = "("
     }
 
     const PUSH_OK: &str = r#"
+[[peers]]
+name = "home"
+ssh_target = "user@host"
+
 [[jobs]]
 type = "push"
 name = "push_to_server"
@@ -612,6 +644,10 @@ root_fs = "tank/backups/laptop"
     #[test]
     fn push_dry_run_can_be_enabled() {
         let s = r#"
+[[peers]]
+name = "home"
+ssh_target = "user@host"
+
 [[jobs]]
 type = "push"
 name = "p"
@@ -661,6 +697,10 @@ root_fs = "/tank/backups/laptop"
     #[test]
     fn push_send_flags_can_be_overridden() {
         let s = r#"
+[[peers]]
+name = "p"
+ssh_target = "user@host"
+
 [[jobs]]
 type = "push"
 name = "p"
@@ -863,6 +903,57 @@ root_fs = "okdata/backups/laptop"
             panic!()
         };
         assert_eq!(p.targets, vec!["home".to_string(), "remote".to_string()]);
+    }
+
+    #[test]
+    fn push_target_referencing_unknown_peer_rejected() {
+        let s = r#"
+[defaults]
+prefix = "zrepl_"
+
+[[peers]]
+name = "home"
+ssh_target = "u@h1"
+
+[[jobs]]
+type = "push"
+name = "p"
+targets = ["hoem"]
+interval = "5m"
+filesystems = { "tank/data" = true }
+[jobs.target]
+root_fs = "okdata/backups/laptop"
+"#;
+        let err = parse(s).unwrap_err();
+        assert!(
+            err.to_string().contains("does not match any [[peers]]"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn duplicate_peer_names_rejected() {
+        let s = r#"
+[[peers]]
+name = "home"
+ssh_target = "u@h1"
+[[peers]]
+name = "home"
+ssh_target = "u@h2"
+"#;
+        let err = parse(s).unwrap_err();
+        assert!(err.to_string().contains("duplicate"), "got: {err}");
+    }
+
+    #[test]
+    fn peer_with_empty_ssh_target_rejected() {
+        let s = r#"
+[[peers]]
+name = "home"
+ssh_target = ""
+"#;
+        let err = parse(s).unwrap_err();
+        assert!(err.to_string().contains("ssh_target"), "got: {err}");
     }
 
     #[test]

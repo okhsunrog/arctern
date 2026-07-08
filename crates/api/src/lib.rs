@@ -65,6 +65,51 @@ pub struct JobStatus {
     pub last_run: Option<String>,
     pub next_run: Option<String>,
     pub last_error: Option<String>,
+    /// True while a cycle is currently executing (e.g. a multi-hour
+    /// full send). `last_*` fields describe the previous cycle.
+    #[serde(default)]
+    pub running: bool,
+    /// True while the job is paused: the current transfer was aborted
+    /// (resumably) and scheduled cycles are suspended until resumed.
+    #[serde(default)]
+    pub paused: bool,
+    /// The in-flight transfer, when one is running. UI derives speed
+    /// from `bytes_sent` deltas between polls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer: Option<TransferInfo>,
+    /// Push jobs: per-target replication policy + last outcome.
+    /// Empty for snap/prune jobs.
+    #[serde(default)]
+    pub targets: Vec<TargetStatus>,
+}
+
+/// Progress of an in-flight `zfs send` stream.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct TransferInfo {
+    pub dataset: String,
+    pub peer: String,
+    /// `"full" | "incremental" | "resume"`.
+    pub kind: String,
+    pub bytes_sent: u64,
+    /// Dry-run estimate. None for resume sends (no estimate available).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_bytes: Option<u64>,
+    /// Unix seconds.
+    pub started_at: i64,
+}
+
+/// One replication target of a push job.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct TargetStatus {
+    pub peer: String,
+    /// `"auto" | "manual"`.
+    pub mode: String,
+    pub connected: bool,
+    /// Unix seconds of the last successful sync to this peer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_success: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 /// One pool's slot in `GET /api/v1/pools`. Numeric fields are

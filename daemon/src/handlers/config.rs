@@ -22,10 +22,7 @@ pub async fn get_config(State(state): State<AppState>) -> Result<Json<ConfigView
     let content_toml = tokio::fs::read_to_string(&state.config_path)
         .await
         .map_err(|e| {
-            ApiError(palimpsest::ZfsError::Other {
-                exit_code: None,
-                stderr: format!("read config {}: {e}", state.config_path.display()),
-            })
+            ApiError::internal(format!("read config {}: {e}", state.config_path.display()))
         })?;
     Ok(Json(ConfigView {
         path: state.config_path.display().to_string(),

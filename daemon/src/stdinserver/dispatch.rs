@@ -6,7 +6,6 @@
 //! to the `control` or `recv` stdinserver handler.
 
 use std::fs;
-use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
@@ -48,15 +47,6 @@ pub enum DispatchError {
     MissingAuthInfo { identity: String },
 }
 
-/// Top-level entry. Loads config, parses argv + env, validates ACL,
-/// dispatches. Test/legacy callers without a SQLite pool use this entry.
-#[allow(dead_code)]
-pub async fn run(identity: &str, config_path: &Path) -> eyre::Result<()> {
-    let config =
-        arctern_config::load_from_path(config_path).map_err(|e| eyre::eyre!("config load: {e}"))?;
-    run_with(identity, config, None).await
-}
-
 /// Entry used by main.rs once it has resolved config + opened the
 /// optional SQLite pool. Splitting this out keeps the subscriber setup
 /// (which needs the pool) and the dispatch logic in one process tree.
@@ -93,7 +83,7 @@ pub async fn run_with(
             tracing::info!(identity, job, "stdinserver recv: opening channel");
             let stdin = tokio::io::stdin();
             let stdout = tokio::io::stdout();
-            super::recv::run(runner, acl, stdin, stdout)
+            super::recv::run(runner, acl, &job, stdin, stdout)
                 .await
                 .map_err(|e| eyre::eyre!("recv channel: {e}"))?;
             Ok(())

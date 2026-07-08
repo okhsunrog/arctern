@@ -22,12 +22,8 @@ use crate::error::ApiError;
     ),
 )]
 pub async fn get_arc() -> Result<Json<ArcStats>, ApiError> {
-    let s = palimpsest::system::arc_stats().map_err(|e| {
-        ApiError(palimpsest::ZfsError::Other {
-            exit_code: None,
-            stderr: format!("arcstats read: {e}"),
-        })
-    })?;
+    let s = palimpsest::system::arc_stats()
+        .map_err(|e| ApiError::internal(format!("arcstats read: {e}")))?;
     Ok(Json(ArcStats::from(s)))
 }
 
@@ -56,11 +52,6 @@ pub async fn get_arc_history(
     let limit = q.limit.unwrap_or(1440).clamp(1, 10_000);
     let rows = crate::state::arcstats::list_recent(&state.state, q.since, limit)
         .await
-        .map_err(|e| {
-            ApiError(palimpsest::ZfsError::Other {
-                exit_code: None,
-                stderr: format!("arcstats history query: {e}"),
-            })
-        })?;
+        .map_err(|e| ApiError::internal(format!("arcstats history query: {e}")))?;
     Ok(Json(rows))
 }

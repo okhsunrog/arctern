@@ -91,6 +91,30 @@ pub struct PeerConfig {
     /// an alias from `~/.ssh/config`). The daemon does NOT parse this;
     /// it hands it verbatim to openssh.
     pub ssh_target: String,
+    /// Replication policy for push jobs targeting this peer.
+    #[serde(default)]
+    pub mode: PeerMode,
+    /// For `mode = "auto"`: don't auto-replicate to this peer more
+    /// often than this (measured from the last successful sync).
+    /// Unset = every push cycle. The reachability of the peer itself
+    /// is the locality signal — a LAN-only peer is only reachable at
+    /// home, so "auto at home, never on the road" needs no
+    /// network-detection config at all.
+    #[serde(default, with = "humantime_serde::option")]
+    pub auto_interval: Option<Duration>,
+}
+
+/// When a push job replicates to a peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerMode {
+    /// Replicate whenever the peer is reachable and `auto_interval`
+    /// (if set) has elapsed since the last successful sync.
+    #[default]
+    Auto,
+    /// Replicate only on an explicit trigger (UI "Send now" /
+    /// `POST /api/v1/jobs/{name}/push/{peer}`).
+    Manual,
 }
 
 /// One inbound client entry. `identity` is the literal argv passed to

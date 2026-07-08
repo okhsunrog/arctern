@@ -144,10 +144,9 @@ pub async fn pool_scrub(
         "resume" => ScrubAction::Resume,
         "stop" => ScrubAction::Stop,
         other => {
-            return Err(ApiError(palimpsest::ZfsError::Other {
-                exit_code: None,
-                stderr: format!("unknown scrub action {other}; expected start|pause|resume|stop"),
-            }));
+            return Err(ApiError::bad_request(format!(
+                "unknown scrub action {other}; expected start|pause|resume|stop"
+            )));
         }
     };
     palimpsest::pool::scrub(state.runner.as_ref(), &name, action).await?;

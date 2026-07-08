@@ -196,29 +196,27 @@ For a push job firing on the laptop:
    - If plan is `Resume { decoded }`, validate the local-side prerequisites (the snapshots referenced by the token still exist on the sender). Adjust to fall through to `Full+discard` or `Incremental+discard` if invalid.
    - If plan is `Nothing`, skip.
    - Otherwise:
-     - Place a step hold on the `to` snapshot locally before sending. `palimpsest::hold::hold(runner, &full_to, "arctern_step_J_<job>")`.
+     - Place a step hold on the `to` snapshot locally before sending. `palimpsest::hold::hold(runner, &full_to, "arctern_step_J_<job>_P_<peer>")`.
      - If `discard_partial_recv`, send `Request::DiscardPartialRecv { dataset }` over control first.
      - Open a fresh recv channel: `session.command("arctern").arg("stdinserver").arg(job).arg("recv").spawn()`.
      - Write `RecvHeader` to the channel's stdin.
      - Spawn `zfs send` locally, pipe its stdout into the recv channel's stdin via `tokio::io::copy`, drain stderr on a separate task, wait for both.
      - Half-close stdin, read the recv channel's stdout for the single Response frame.
-     - On Ok: advance the cursor — `palimpsest::bookmark::create(runner, &full_to, &cursor_bookmark_name)`, then release the previous step hold.
+     - On Ok: advance the cursor — create the new GUID-named cursor bookmark, destroy stale same-(job, peer) cursors, then sweep the step-hold tag from the dataset's filtered snapshots.
      - On Error: log, leave step hold in place (so a retry can find the snapshot), record the error.
 3. After all filesystems processed, drop the recv channels (control stays open). ControlMaster keeps TCP alive.
 
-## Holds and replication cursor (must be added — currently missing)
+## Holds and replication cursor
 
-The hold/bookmark choreography I described in the survey is the protection against the snap-job's prune racing the push-job's send. palimpsest exposes `hold`, `release`, `list_holds`, `bookmark::create`, `bookmark::destroy` already. Wire them.
+The hold/bookmark choreography is the protection against the snap-job's prune racing the push-job's send. palimpsest exposes `hold`, `release`, `list_holds`, `list_holds_many`, `bookmark::create`, `bookmark::destroy`.
 
-Naming conventions, pinned for compatibility:
+Naming conventions, pinned for compatibility (peer-namespaced so a multi-target push job tracks each receiver independently):
 
-- Step hold: `arctern_step_J_<jobname>` on snapshots that are currently the `from` or `to` of an in-flight send.
-- Replication cursor bookmark: `<dataset>#arctern_cursor_J_<jobname>`. Single bookmark per (job, dataset). On success, create a bookmark from the new `to` snapshot, then destroy the previous cursor bookmark by name. ZFS bookmarks are GUID-anchored so the new one survives even if the underlying snapshot is later destroyed.
-- Last-received hold (on receiver side): `arctern_last_J_<jobname>` on the most recent successfully received snapshot. Set by stdinserver after recv exits cleanly. Released when the next recv on the same dataset succeeds.
+- Step hold: `arctern_step_J_<jobname>_P_<peer>` on the `to` snapshot of an in-flight send. Placed before the send; on success the tag is swept from every filtered snapshot of the dataset (one `zfs holds` invocation via `list_holds_many`, then a release per actual holder) — this also cleans stale holds left by earlier failed cycles, which would otherwise pin their snapshots against prune forever. On failure the hold stays so a retry can find the snapshot.
+- Replication cursor bookmark: `<dataset>#arctern_cursor_G_<guid>_J_<jobname>_P_<peer>`. GUID-suffixed (zrepl's scheme): on success the new cursor is created first, then stale cursors for the same (job, peer) are destroyed — a crash in between leaves at least one cursor alive. ZFS bookmarks are GUID-anchored so the cursor survives even if the underlying snapshot is later destroyed. When the planner finds no common *snapshot* between sender and receiver (offline gap longer than the sender's retention window), it falls back to `zfs send -i <bookmark>` from any sender bookmark whose GUID the receiver still has — matching is by GUID, not name, so zrepl's `#zrepl_CURSOR_*` bookmarks qualify too (this is the zrepl migration path).
+- Last-received hold (on receiver side): `arctern_last_J_<jobname>` on the most recent successfully received snapshot. Set by stdinserver after recv exits cleanly; the tag is then swept from the dataset's other snapshots. This keeps a receiver-side prune job from destroying the last common snapshot between syncs (which would force a full resend).
 
-The snap-job's pruner already skips snapshots that return `ZfsError::SnapshotHeld`. Verify this still holds for the new tag names.
-
-If a step or last-received hold is found at startup with no in-flight job (orphan), log a warning and leave it. Adding a recovery sweep is a later concern.
+The snap-job's pruner skips snapshots that return `ZfsError::SnapshotHeld`, so held snapshots survive prune on both sides.
 
 ## UI federation: peer-aware axum routes
 

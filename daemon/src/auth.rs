@@ -57,6 +57,42 @@ pub async fn enforce_same_uid(
     next.run(request).await
 }
 
+/// DNS-rebinding guard for the loopback TCP bind. `Sec-Fetch-Site`
+/// compares *names*, not addresses: if `attacker.com` resolves to
+/// 127.0.0.1, a fetch to `http://attacker.com:7878` is `same-origin`
+/// from the browser's point of view and sails past the CSRF guard —
+/// for reads as well as writes, so this check applies to every method.
+/// The daemon is only ever legitimately addressed by a loopback name;
+/// anything else in `Host` means a rebound origin.
+///
+/// A missing `Host` header is allowed: browsers always send Host (or
+/// `:authority`, which hyper maps into the URI), so its absence implies
+/// a non-browser client that carries no rebinding risk.
+pub async fn enforce_loopback_host(request: Request, next: Next) -> Response {
+    let host = request
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| request.uri().host().map(str::to_string));
+    if let Some(host) = host {
+        let name = if let Some(rest) = host.strip_prefix('[') {
+            // Bracketed IPv6 literal: `[::1]` or `[::1]:7878`.
+            rest.split_once(']').map(|(h, _)| h).unwrap_or(rest)
+        } else {
+            host.rsplit_once(':').map(|(h, _)| h).unwrap_or(&host)
+        };
+        if !matches!(name, "127.0.0.1" | "localhost" | "::1") {
+            let body = ApiErrorBody {
+                error: "bad_host".into(),
+                message: format!("host {host:?} is not a loopback name"),
+            };
+            return (StatusCode::FORBIDDEN, Json(body)).into_response();
+        }
+    }
+    next.run(request).await
+}
+
 /// CSRF guard for the loopback TCP bind. Mutating methods (POST / PUT /
 /// PATCH / DELETE) are blocked when the browser-supplied
 /// `Sec-Fetch-Site` header indicates a cross-origin request — that

@@ -25,27 +25,60 @@ use arctern_transport::{
 };
 use openssh::{KnownHosts, Session, SessionBuilder, Stdio};
 use thiserror::Error;
-use tokio::io::{AsyncWriteExt, BufReader};
+use tokio::io::BufReader;
 use tokio::sync::oneshot;
 
 pub use control::{ControlClient, RpcError};
+
+/// Strip ANSI escape sequences (CSI colour codes and friends) from a
+/// remote process's stderr line. The dispatcher disables colours when
+/// stderr is a pipe, but a foreign or older binary may not — and raw
+/// escapes would otherwise land verbatim in the event log and the UI.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        if chars.peek() == Some(&'[') {
+            chars.next();
+            // CSI: parameter/intermediate bytes end at a final byte in
+            // the 0x40..=0x7e range.
+            for c2 in chars.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&c2) {
+                    break;
+                }
+            }
+        }
+        // Bare ESC (or other escape kinds): drop the ESC itself.
+    }
+    out
+}
 
 /// Outbound link to one peer. Cheaply cloneable — handlers and the
 /// scheduler share the same Arc.
 #[derive(Clone)]
 pub struct PeerLink {
-    #[allow(dead_code)]
     pub(crate) name: String,
     pub(crate) session: Arc<openssh::Session>,
     pub(crate) control: ControlClient,
+    /// Keeps the remote control process alive for the lifetime of the
+    /// link: openssh's `Child` tears down the mux channel on drop (and
+    /// `disconnect()` does so immediately — the remote dispatcher sees
+    /// stdin EOF and exits). Holding it here means the channel dies
+    /// exactly when the last clone of this link is dropped, i.e. on
+    /// reconnect — no leak, no premature teardown.
+    _control_child: Arc<openssh::Child<Arc<Session>>>,
+    /// Guards the one-time `SubscribeEvents` RPC. The receiver spawns a
+    /// pusher task per SubscribeEvents it accepts; sending it once per
+    /// link keeps that at one pusher per control channel no matter how
+    /// many local SSE clients subscribe to the broadcast.
+    events_subscribed: Arc<tokio::sync::OnceCell<()>>,
 }
 
 impl PeerLink {
-    #[allow(dead_code)]
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
     /// Open a fresh SSH session to `ssh_target`, spawn the remote control
     /// channel, hand its stdio to a `ControlClient`, return the link.
     /// `identity` matches the receiver-side `[[allowed_clients]].identity`
@@ -79,19 +112,18 @@ impl PeerLink {
                 use tokio::io::AsyncBufReadExt;
                 let mut lines = BufReader::new(&mut stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
+                    let line = strip_ansi(&line);
                     tracing::warn!(peer = %peer_name, "stdinserver stderr: {line}");
                 }
             });
         }
-        // The control child's lifetime is tied to the openssh::Session
-        // (Arc'd into the link); leak the Child so its drop doesn't
-        // prematurely kill the channel — the session shutdown reaps it.
-        std::mem::forget(child);
         let (control, _task) = ControlClient::spawn(stdout, stdin);
         Ok(PeerLink {
             name,
             session,
             control,
+            _control_child: Arc::new(child),
+            events_subscribed: Arc::new(tokio::sync::OnceCell::new()),
         })
     }
 
@@ -105,12 +137,34 @@ impl PeerLink {
     }
 
     /// Subscribe to server-pushed Event frames on this peer's control
-    /// channel. New subscribers see events that arrive after they
-    /// subscribe; backlog replay is the SSE bridge's responsibility.
-    pub fn subscribe_events(
+    /// channel. The first subscriber triggers the one-time
+    /// `SubscribeEvents` RPC that makes the receiver start pushing;
+    /// later subscribers reuse the same server-side pusher via the
+    /// local broadcast. New subscribers see events that arrive after
+    /// they subscribe; backlog replay is the SSE bridge's
+    /// responsibility.
+    pub async fn subscribe_events(
         &self,
-    ) -> tokio::sync::broadcast::Receiver<arctern_transport::EventWire> {
-        self.control.subscribe_events()
+    ) -> Result<tokio::sync::broadcast::Receiver<arctern_transport::EventWire>, RpcError> {
+        // Grab the receiver before the RPC so frames pushed between the
+        // request landing and our return are not missed.
+        let rx = self.control.subscribe_events();
+        self.events_subscribed
+            .get_or_try_init(|| async {
+                match self
+                    .control
+                    .send(Request::SubscribeEvents { since: None })
+                    .await?
+                {
+                    Response::Ok => Ok(()),
+                    Response::Error { message, .. } => Err(RpcError::Server(message)),
+                    other => Err(RpcError::Server(format!(
+                        "unexpected SubscribeEvents response: {other:?}"
+                    ))),
+                }
+            })
+            .await?;
+        Ok(rx)
     }
 
     /// Open a fresh recv channel to the receiver, write the RecvHeader,
@@ -122,6 +176,7 @@ impl PeerLink {
         job: &str,
         header: &RecvHeader,
     ) -> Result<RecvChannel, PeerError> {
+        tracing::debug!(peer = %self.name, job, "opening recv channel");
         let mut cmd = Arc::clone(&self.session).arc_command("arctern");
         cmd.arg("stdinserver").arg(job).arg("recv");
         cmd.stdin(Stdio::piped());
@@ -149,14 +204,13 @@ impl PeerLink {
     }
 }
 
-/// One open recv channel. Caller writes the `zfs send` byte stream into
-/// `stdin`, calls `shutdown_stdin()` on completion, then `finish()` to
-/// drain stderr + read the final Response.
+/// One open recv channel. Caller takes `stdin`, writes the `zfs send`
+/// byte stream into it, shuts it down, then calls `finish()` to drain
+/// stderr + read the final Response.
 ///
 /// Wraps openssh's child + stdio handles. The Arc<Session> in the type
 /// parameter binds the channel's lifetime to the underlying SSH session
 /// so the Drop order is correct on early termination.
-#[allow(dead_code)]
 pub struct RecvChannel {
     child: openssh::Child<Arc<Session>>,
     pub stdin: Option<openssh::ChildStdin>,
@@ -164,18 +218,7 @@ pub struct RecvChannel {
     pub stderr: Option<openssh::ChildStderr>,
 }
 
-#[allow(dead_code)]
 impl RecvChannel {
-    /// Close the local stdin half so the remote `zfs recv` sees EOF and
-    /// finalises. Idempotent.
-    pub async fn shutdown_stdin(&mut self) -> std::io::Result<()> {
-        if let Some(mut s) = self.stdin.take() {
-            s.shutdown().await
-        } else {
-            Ok(())
-        }
-    }
-
     /// Read the receiver's final Response, drain stderr, wait on the
     /// child. The caller must have already shut down stdin (or be sure
     /// the bulk send is finished) before calling this.
@@ -190,7 +233,7 @@ impl RecvChannel {
             if !buf.is_empty() {
                 tracing::warn!(
                     "recv channel stderr: {}",
-                    String::from_utf8_lossy(&buf).trim()
+                    strip_ansi(String::from_utf8_lossy(&buf).trim())
                 );
             }
         }
@@ -200,7 +243,6 @@ impl RecvChannel {
 }
 
 #[derive(Debug, Error)]
-#[allow(dead_code)] // Constructed by handlers/peers (step 10) and push executor (step 9).
 pub enum PeerError {
     #[error("ssh session: {0}")]
     Session(#[from] openssh::Error),
@@ -213,3 +255,23 @@ pub enum PeerError {
 /// One in-flight RPC. The control task holds the `tx` half until the
 /// matching ResponseFrame arrives; the caller awaits `rx`.
 pub(crate) type Pending = oneshot::Sender<Result<Response, RpcError>>;
+
+#[cfg(test)]
+mod tests {
+    use super::strip_ansi;
+
+    #[test]
+    fn strip_ansi_removes_colour_codes() {
+        let colored = "\u{1b}[2m2026-07-07T20:38:17Z\u{1b}[0m \u{1b}[32m INFO\u{1b}[0m opening channel \u{1b}[3midentity\u{1b}[0m\u{1b}[2m=\u{1b}[0m\"laptop_nova\"";
+        assert_eq!(
+            strip_ansi(colored),
+            "2026-07-07T20:38:17Z  INFO opening channel identity=\"laptop_nova\""
+        );
+    }
+
+    #[test]
+    fn strip_ansi_passes_plain_text_through() {
+        let plain = "zsh:1: permission denied: /usr/local/bin/arctern";
+        assert_eq!(strip_ansi(plain), plain);
+    }
+}

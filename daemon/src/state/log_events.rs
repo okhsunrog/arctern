@@ -12,10 +12,6 @@
 //! drops the `sqlx` target so a slow/failed insert can't recursively
 //! generate more inserts.
 
-// Query helpers below are wired into the SSE bridge in step 11 and the
-// scheduler trim sweep in step 9.
-#![allow(dead_code)]
-
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -67,6 +63,31 @@ pub async fn since(
     .bind(limit)
     .fetch_all(pool)
     .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, timestamp, level, job_name, message)| LogRow {
+            id,
+            timestamp,
+            level,
+            job_name,
+            message,
+        })
+        .collect())
+}
+
+/// The most recent `limit` events, oldest first. Used by the SSE
+/// handler to replay backlog before switching to the live broadcast.
+pub async fn recent(pool: &SqlitePool, limit: i64) -> Result<Vec<LogRow>, StateError> {
+    let mut rows: Vec<(i64, i64, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT id, timestamp, level, job_name, message
+           FROM log_events
+          ORDER BY id DESC
+          LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    rows.reverse();
     Ok(rows
         .into_iter()
         .map(|(id, timestamp, level, job_name, message)| LogRow {
@@ -197,7 +218,14 @@ where
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let pool = self.pool.clone();
-        tokio::spawn(async move {
+        // tracing events can fire from non-runtime threads; `spawn`
+        // there would panic inside the subscriber. Drop the row instead
+        // — stderr still carries it via the fmt layer.
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            eprintln!("SqliteLogLayer: no tokio runtime; dropping log event: {message}");
+            return;
+        };
+        handle.spawn(async move {
             if let Err(e) = insert(
                 pool.as_ref(),
                 timestamp,

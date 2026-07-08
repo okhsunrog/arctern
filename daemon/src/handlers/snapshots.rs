@@ -1,6 +1,7 @@
 //! `/api/v1/datasets/{name}/snapshots` — list + create + destroy.
 
 use arctern_api::{ApiErrorBody, CreateSnapshotRequest, DatasetSummary, SnapshotHold};
+use arctern_config::zfs_names::{validate_dataset_name, validate_snapshot_leaf};
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -12,6 +13,20 @@ use serde::Deserialize;
 
 use crate::app_state::AppState;
 use crate::error::ApiError;
+
+/// The UDS/loopback perimeter already limits callers to the local
+/// user, but names still become bare `zfs` positionals — reject the
+/// shapes (leading `-`, `..`, embedded `@`/`#`) that would parse as
+/// flags or escape the dataset, mirroring the stdinserver handlers.
+fn check_dataset(name: &str) -> Result<(), ApiError> {
+    validate_dataset_name(name)
+        .map_err(|e| ApiError::bad_request(format!("invalid dataset {name:?}: {e}")))
+}
+
+fn check_snapshot_leaf(tag: &str) -> Result<(), ApiError> {
+    validate_snapshot_leaf(tag)
+        .map_err(|e| ApiError::bad_request(format!("invalid snapshot name {tag:?}: {e}")))
+}
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct ListSnapshotsQuery {
@@ -43,6 +58,7 @@ pub async fn list_snapshots(
     Path(name): Path<String>,
     Query(q): Query<ListSnapshotsQuery>,
 ) -> Result<Json<Vec<DatasetSummary>>, ApiError> {
+    check_dataset(&name)?;
     let opts = ListOptions {
         recursive: false,
         types: vec![DatasetType::Snapshot],
@@ -82,6 +98,8 @@ pub async fn create_snapshot(
     Path(name): Path<String>,
     Json(req): Json<CreateSnapshotRequest>,
 ) -> Result<(StatusCode, Json<DatasetSummary>), ApiError> {
+    check_dataset(&name)?;
+    check_snapshot_leaf(&req.snapshot_name)?;
     let runner = state.runner.as_ref();
     let full = format!("{name}@{}", req.snapshot_name);
 
@@ -101,10 +119,9 @@ pub async fn create_snapshot(
     };
     let entries = palimpsest::dataset::list(runner, &list_opts).await?;
     let entry = entries.into_iter().next().ok_or_else(|| {
-        ApiError(palimpsest::ZfsError::Other {
-            exit_code: None,
-            stderr: format!("snapshot {full} created but not visible to subsequent list"),
-        })
+        ApiError::internal(format!(
+            "snapshot {full} created but not visible to subsequent list"
+        ))
     })?;
 
     Ok((StatusCode::CREATED, Json(DatasetSummary::from(entry))))
@@ -132,6 +149,8 @@ pub async fn destroy_snapshot(
     State(state): State<AppState>,
     Path((name, snapshot)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
+    check_dataset(&name)?;
+    check_snapshot_leaf(&snapshot)?;
     let full = format!("{name}@{snapshot}");
     palimpsest::dataset::destroy(state.runner.as_ref(), &full, &DestroyOptions::default()).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -159,6 +178,8 @@ pub async fn list_holds(
     State(state): State<AppState>,
     Path((name, snapshot)): Path<(String, String)>,
 ) -> Result<Json<Vec<SnapshotHold>>, ApiError> {
+    check_dataset(&name)?;
+    check_snapshot_leaf(&snapshot)?;
     let full = format!("{name}@{snapshot}");
     let holds = palimpsest::hold::list_holds(state.runner.as_ref(), &full).await?;
     let mut out: Vec<SnapshotHold> = holds

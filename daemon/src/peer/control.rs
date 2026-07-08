@@ -9,11 +9,6 @@
 //! frames (request_id == None) fan out via a `broadcast::Sender`
 //! exposed by `subscribe_events`.
 
-// The full client surface is consumed by handlers/peers in step 10
-// and the push executor in step 9. Until then the unit tests below
-// are the sole live caller — silence dead-code warnings module-wide.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -62,10 +57,12 @@ struct Outbound {
 }
 
 impl ControlClient {
-    /// Construct a client over a pair of byte streams. Spawns a single
-    /// background task that owns both halves and demuxes responses.
-    /// Returns the client + the join handle so callers can detect a
-    /// terminated background task (and trigger reconnect).
+    /// Construct a client over a pair of byte streams. Spawns a reader
+    /// task that solely owns the read half (so a partially-read frame
+    /// can never be lost to `select!` cancellation — `read_exact` is
+    /// not cancel-safe) plus the demux loop that owns the write half.
+    /// Returns the client + the demux join handle so callers can detect
+    /// a terminated background task (and trigger reconnect).
     pub fn spawn<R, W>(reader: R, writer: W) -> (Self, JoinHandle<()>)
     where
         R: AsyncRead + Unpin + Send + 'static,
@@ -75,11 +72,24 @@ impl ControlClient {
         let (events_tx, _events_rx) = broadcast::channel::<EventWire>(EVENT_BROADCAST_CAPACITY);
         let next_id = Arc::new(AtomicU64::new(1));
         let pending = Arc::new(Mutex::new(HashMap::<u64, Pending>::new()));
+        let (inbound_tx, inbound_rx) = mpsc::channel::<ResponseFrame>(64);
+        let reader_task = tokio::spawn(async move {
+            let mut reader = reader;
+            // Loop ends on read error (EOF / stream corruption — peer
+            // hung up) or when the demux loop is gone.
+            while let Ok(frame) = read_response(&mut reader).await {
+                if inbound_tx.send(frame).await.is_err() {
+                    break;
+                }
+            }
+        });
         let task = {
             let events = events_tx.clone();
             let pending = pending.clone();
             tokio::spawn(async move {
-                run_loop(reader, writer, rx, pending, events).await;
+                run_loop(writer, rx, inbound_rx, pending, events).await;
+                // Unblock the reader if it is still parked on a read.
+                reader_task.abort();
             })
         };
         let client = Self {
@@ -120,17 +130,18 @@ impl ControlClient {
     }
 }
 
-async fn run_loop<R, W>(
-    mut reader: R,
+async fn run_loop<W>(
     mut writer: W,
     mut rx: mpsc::Receiver<Outbound>,
+    mut inbound: mpsc::Receiver<ResponseFrame>,
     pending: Arc<Mutex<HashMap<u64, Pending>>>,
     events: broadcast::Sender<EventWire>,
 ) where
-    R: AsyncRead + Unpin + Send,
     W: AsyncWrite + Unpin + Send,
 {
     loop {
+        // Both branches are mpsc::Receiver::recv — cancel-safe by
+        // contract, unlike reading the byte stream directly here.
         tokio::select! {
             // Outbound: a caller wants to send a Request.
             out = rx.recv() => {
@@ -153,13 +164,13 @@ async fn run_loop<R, W>(
                     break;
                 }
             }
-            // Inbound: server sent a frame.
-            frame = read_response(&mut reader) => {
+            // Inbound: the reader task decoded a frame.
+            frame = inbound.recv() => {
                 match frame {
-                    Ok(ResponseFrame { request_id: None, body: Response::Event(ev) }) => {
+                    Some(ResponseFrame { request_id: None, body: Response::Event(ev) }) => {
                         let _ = events.send(ev);
                     }
-                    Ok(ResponseFrame { request_id: Some(id), body }) => {
+                    Some(ResponseFrame { request_id: Some(id), body }) => {
                         let mut p = pending.lock().await;
                         if let Some(reply) = p.remove(&id) {
                             let result = match body {
@@ -170,11 +181,11 @@ async fn run_loop<R, W>(
                         }
                         // Unmatched id = server bug or stale frame; drop it.
                     }
-                    Ok(ResponseFrame { request_id: None, body: _ }) => {
+                    Some(ResponseFrame { request_id: None, body: _ }) => {
                         // Non-event frame with None id: protocol violation; ignore.
                     }
-                    Err(_e) => {
-                        // Read side died — peer hung up or stream broke.
+                    None => {
+                        // Reader task ended — peer hung up or stream broke.
                         break;
                     }
                 }
@@ -233,6 +244,7 @@ mod tests {
                             last_run: None,
                             next_run: None,
                             last_error: None,
+                            running: false,
                         }],
                     },
                 };

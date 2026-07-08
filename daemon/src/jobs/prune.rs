@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration as StdDuration;
 
-use arctern_config::{PruneJobConfig, SnapshotEntry, evaluate_keep_rules, filter::resolve_all};
-use palimpsest::dataset::{DestroyOptions, ListOptions};
+use arctern_config::{PruneJobConfig, filter::resolve_all};
+use palimpsest::dataset::ListOptions;
 use palimpsest::models::DatasetType;
 use time::OffsetDateTime;
 use tokio::time::sleep;
@@ -50,6 +50,7 @@ impl PruneJob {
         s.last_run = Some(now);
         s.next_run = Some(now + time::Duration::try_from(interval).unwrap_or(time::Duration::ZERO));
         s.last_error = last_error;
+        s.running = false;
     }
 }
 
@@ -92,6 +93,7 @@ impl Job for PruneJob {
 }
 
 async fn run_and_record(job: &PruneJob, ctx: &JobContext, job_name: &str, interval: StdDuration) {
+    job.status.lock().unwrap().running = true;
     let started_at = OffsetDateTime::now_utc().unix_timestamp();
     if let Some(pool) = ctx.state.as_ref() {
         let _ = crate::state::job_runs::record_start(pool, job_name, started_at).await;
@@ -142,7 +144,7 @@ impl PruneJob {
         }
         let mut errors: Vec<String> = Vec::new();
         for ds in &targets {
-            if let Err(e) = self.prune_one(runner, ds).await {
+            if let Err(e) = super::prune_dataset(runner, &self.config.pruning().keep, ds).await {
                 warn!(dataset = %ds, error = %e, "prune cycle errored");
                 errors.push(format!("prune {ds}: {e}"));
             }
@@ -152,57 +154,5 @@ impl PruneJob {
         } else {
             Err(errors.join("; "))
         }
-    }
-
-    async fn prune_one(
-        &self,
-        runner: &dyn palimpsest::runner::CommandRunner,
-        dataset: &str,
-    ) -> Result<(), String> {
-        let opts = ListOptions {
-            recursive: false,
-            types: vec![DatasetType::Snapshot],
-            roots: vec![dataset.to_string()],
-            properties: vec!["creation".into()],
-            ..ListOptions::default()
-        };
-        let snaps = palimpsest::dataset::list(runner, &opts)
-            .await
-            .map_err(|e| format!("list snapshots: {e}"))?;
-        let mut entries: Vec<SnapshotEntry> = Vec::with_capacity(snaps.len());
-        let mut full_names: Vec<String> = Vec::with_capacity(snaps.len());
-        for s in &snaps {
-            let creation = s
-                .properties
-                .get("creation")
-                .and_then(|p| p.value.parse::<i64>().ok())
-                .and_then(|t| OffsetDateTime::from_unix_timestamp(t).ok());
-            let Some(creation) = creation else {
-                warn!(snapshot = %s.name, "snapshot has no parseable creation property; skipping");
-                continue;
-            };
-            let tag = s.name.split_once('@').map(|(_, t)| t).unwrap_or(&s.name);
-            entries.push(SnapshotEntry {
-                name: tag.to_string(),
-                creation,
-            });
-            full_names.push(s.name.clone());
-        }
-        let destroy_idx = evaluate_keep_rules(&self.config.pruning().keep, &entries)
-            .map_err(|e| format!("keep-rule evaluation: {e}"))?;
-        for i in destroy_idx {
-            let target = &full_names[i];
-            tracing::info!(snapshot = %target, "destroying snapshot");
-            match palimpsest::dataset::destroy(runner, target, &DestroyOptions::new()).await {
-                Ok(()) => {}
-                Err(palimpsest::ZfsError::SnapshotHeld { .. }) => {
-                    warn!(snapshot = %target, "snapshot is held; skipping");
-                }
-                Err(e) => {
-                    return Err(format!("destroy {target}: {e}"));
-                }
-            }
-        }
-        Ok(())
     }
 }

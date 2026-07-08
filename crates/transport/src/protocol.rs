@@ -1,14 +1,14 @@
 //! Wire protocol for the SSH-multiplexed transport.
 //!
-//! Two channel kinds, each with its own framing:
+//! Two channel kinds, both framed as `[u32 big-endian length][JSON body]`
+//! via the `read_frame`/`write_frame` helpers below (frames bounded by
+//! `MAX_FRAME_LEN`):
 //!
-//! - **Control channel** (long-lived, one per peer session). Carries
-//!   length-delimited JSON frames. The client writes a `RequestFrame`,
-//!   the server replies with one or more `ResponseFrame`s correlated
-//!   by `request_id`. Server may also push `ResponseFrame`s with
-//!   `request_id == None` carrying `Response::Event` for SSE proxying.
-//!   Frame size is bounded by `LengthDelimitedCodec`'s
-//!   `max_frame_length` (1 MiB; see `control_codec`).
+//! - **Control channel** (long-lived, one per peer session). The client
+//!   writes a `RequestFrame`, the server replies with one or more
+//!   `ResponseFrame`s correlated by `request_id`. Server may also push
+//!   `ResponseFrame`s with `request_id == None` carrying
+//!   `Response::Event` for SSE proxying.
 //!
 //! - **Recv channel** (short-lived, one per replication step). Wire
 //!   layout:
@@ -18,15 +18,13 @@
 //!   <half-close>
 //!   [ length-prefixed JSON Response (Ok / Error) ]
 //!   ```
-//!   The header is read with `recv_header_codec` (same length-delimited
-//!   shape as control); the bulk bytes are then plain `tokio::io::copy`
-//!   into the receiver's `zfs recv` stdin.
+//!   The bulk bytes after the header are plain `tokio::io::copy` into
+//!   the receiver's `zfs recv` stdin.
 
 use bytes::{BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio_util::codec::LengthDelimitedCodec;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -37,30 +35,6 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// reader allocate before validation. The planner uses the leaner
 /// `ListReceiverGuids` so the critical path stays far below this.
 pub const MAX_FRAME_LEN: usize = 8 << 20;
-
-// Backwards-compatibility alias for code paths that still talk about
-// the header limit specifically. Same value as MAX_FRAME_LEN; kept for
-// clarity at call sites that read RecvHeader.
-pub const MAX_HEADER_LEN: usize = MAX_FRAME_LEN;
-
-// ─── Control-channel framing ───────────────────────────────────────
-
-/// Length-delimited codec configured for the control channel: 4-byte
-/// big-endian length prefix, frames bounded by `MAX_FRAME_LEN`.
-pub fn control_codec() -> LengthDelimitedCodec {
-    LengthDelimitedCodec::builder()
-        .length_field_length(4)
-        .max_frame_length(MAX_FRAME_LEN)
-        .big_endian()
-        .new_codec()
-}
-
-/// Same wire shape as `control_codec`; named separately so a future
-/// recv-only tweak (smaller max_frame_length, for instance) can land
-/// without churning every call site.
-pub fn recv_header_codec() -> LengthDelimitedCodec {
-    control_codec()
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RequestFrame {
@@ -197,6 +171,8 @@ pub struct JobStatusWire {
     pub last_run: Option<String>,
     pub next_run: Option<String>,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub running: bool,
 }
 
 /// One log event surfaced over the SSE bridge. Mirrors the
@@ -246,9 +222,10 @@ pub enum SendKind {
     Full,
     Incremental,
     /// `zfs send -t <token>` resume of a prior partial recv. The wire
-    /// `from_snap` is None and `to_snap` carries the decoded token's
-    /// to-snapshot identity for logging only — the receiver does not
-    /// validate it.
+    /// `from_snap` is None and `to_snap` carries the snapshot *leaf*
+    /// name (part after `@`) plus GUID from the decoded token — the
+    /// receiver validates it like any other snapshot leaf and uses it
+    /// for the last-received hold after the resumed recv completes.
     Resume,
 }
 
@@ -613,6 +590,7 @@ mod tests {
                 last_run: Some("2026-05-09T00:00:00Z".into()),
                 next_run: None,
                 last_error: None,
+                running: false,
             }],
         });
     }
@@ -626,6 +604,7 @@ mod tests {
                 last_run: None,
                 next_run: None,
                 last_error: Some("boom".into()),
+                running: false,
             },
         });
     }

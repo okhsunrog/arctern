@@ -6,7 +6,10 @@
 //!   3. Spawn `zfs recv -s -u` via palimpsest's streaming recv.
 //!   4. Copy stdin bytes into the recv child's stdin until EOF.
 //!   5. Wait for the recv child to exit.
-//!   6. Write a single `ResponseFrame` (Ok / Error) to stdout.
+//!   6. Advance the last-received hold (`arctern_last_J_<job>`) to the
+//!      just-received snapshot so a receiver-side prune job cannot
+//!      destroy the last common snapshot between syncs.
+//!   7. Write a single `ResponseFrame` (Ok / Error) to stdout.
 
 use std::sync::Arc;
 
@@ -15,6 +18,8 @@ use arctern_config::zfs_names::{validate_dataset_name, validate_snapshot_leaf};
 use arctern_transport::{
     ErrorCode, RecvHeader, Response, ResponseFrame, read_header, write_response,
 };
+use palimpsest::dataset::ListOptions;
+use palimpsest::models::DatasetType;
 use palimpsest::recv::{RecvArgs, recv as zfs_recv};
 use palimpsest::runner::CommandRunner;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -26,6 +31,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub async fn run<R, W>(
     runner: Arc<dyn CommandRunner>,
     acl: AllowedClient,
+    job: &str,
     mut reader: R,
     mut writer: W,
 ) -> std::io::Result<()>
@@ -49,6 +55,15 @@ where
         }
     };
     let outcome = drive(&runner, &acl, &header, &mut reader).await;
+    if outcome.is_ok() {
+        advance_last_hold(
+            runner.as_ref(),
+            job,
+            &header.target_dataset,
+            &header.send.to_snap.name,
+        )
+        .await;
+    }
     let resp = ResponseFrame {
         request_id: None,
         body: match outcome {
@@ -61,6 +76,59 @@ where
     }
     let _ = writer.flush().await;
     Ok(())
+}
+
+fn last_hold_tag(job: &str) -> String {
+    format!("arctern_last_J_{job}")
+}
+
+/// Place the last-received hold on the just-received snapshot, then
+/// release the tag from every other snapshot of the dataset (the
+/// previous holder, plus any stale ones). Best-effort: the stream has
+/// already landed, so failures here degrade retention protection but
+/// must not fail the replication step.
+async fn advance_last_hold(
+    runner: &dyn CommandRunner,
+    job: &str,
+    target_dataset: &str,
+    to_leaf: &str,
+) {
+    let tag = last_hold_tag(job);
+    let new_snap = format!("{target_dataset}@{to_leaf}");
+    if let Err(e) = palimpsest::hold::hold(runner, &new_snap, &tag).await {
+        tracing::warn!(snapshot = %new_snap, tag = %tag, error = %e, "recv: last-received hold failed");
+        return;
+    }
+    let opts = ListOptions {
+        recursive: false,
+        types: vec![DatasetType::Snapshot],
+        roots: vec![target_dataset.to_string()],
+        ..ListOptions::default()
+    };
+    let snaps = match palimpsest::dataset::list(runner, &opts).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(dataset = %target_dataset, error = %e, "recv: last-hold sweep list failed");
+            return;
+        }
+    };
+    let others: Vec<&str> = snaps
+        .iter()
+        .map(|s| s.name.as_str())
+        .filter(|n| *n != new_snap)
+        .collect();
+    let holds = match palimpsest::hold::list_holds_many(runner, &others).await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(dataset = %target_dataset, error = %e, "recv: last-hold sweep holds query failed");
+            return;
+        }
+    };
+    for h in holds.iter().filter(|h| h.tag == tag) {
+        if let Err(e) = palimpsest::hold::release(runner, &h.dataset, &tag).await {
+            tracing::warn!(snapshot = %h.dataset, tag = %tag, error = %e, "recv: release stale last-hold failed");
+        }
+    }
 }
 
 async fn drive<R>(

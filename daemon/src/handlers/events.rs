@@ -18,10 +18,9 @@ use tokio_stream::wrappers::BroadcastStream;
 use crate::app_state::AppState;
 
 /// Subscribe to the daemon's log-event broadcast and yield each as an
-/// SSE frame. Backlog replay is intentionally out of scope for v1 — the
-/// receiver-side SubscribeEvents handler is built around polling
-/// log_events directly. UI clients that want history hit a
-/// future `/api/v1/events?since=…` endpoint or the SQLite directly.
+/// SSE frame, preceded by a replay of the most recent events so a
+/// freshly opened page shows context instead of an empty feed until
+/// something new happens.
 #[utoipa::path(
     get,
     path = "/api/v1/events",
@@ -33,14 +32,38 @@ use crate::app_state::AppState;
 pub async fn stream_events(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    // Subscribe BEFORE reading the backlog so nothing falls between
+    // them; live events already present in the backlog are dropped by
+    // the id filter below.
     let rx = state.events.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|r| match r {
-        Ok(ev) => Some(Ok(serialise(&ev))),
-        // Lagged: the broadcast dropped some frames because this
-        // subscriber was slow. Skip them silently — the cursor
-        // mechanism is what guarantees no-loss for clients that care.
-        Err(_) => None,
+    let backlog = crate::state::log_events::recent(&state.state, 100)
+        .await
+        .unwrap_or_default();
+    let last_backlog_id = backlog.last().map(|r| r.id as u64).unwrap_or(0);
+    let backlog_frames: Vec<Result<Event, Infallible>> = backlog
+        .into_iter()
+        .map(|row| {
+            Ok(serialise(&LogEvent {
+                id: row.id as u64,
+                timestamp: row.timestamp,
+                level: row.level,
+                job_name: row.job_name,
+                message: row.message,
+            }))
+        })
+        .collect();
+    let live = BroadcastStream::new(rx).filter_map(move |r| match r {
+        Ok(ev) if ev.id > last_backlog_id => Some(Ok(serialise(&ev))),
+        // Duplicate of a backlog row, or Lagged (the broadcast dropped
+        // frames because this subscriber was slow) — skip silently.
+        _ => None,
     });
+    // End the stream on daemon shutdown, or graceful shutdown would
+    // wait forever on the browser's open EventSource.
+    let stream = futures_util::StreamExt::take_until(
+        futures_util::stream::iter(backlog_frames).chain(live),
+        state.shutdown.clone().cancelled_owned(),
+    );
     Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))

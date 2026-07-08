@@ -261,6 +261,10 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
     // peers map; push jobs and HTTP handlers read from there. A
     // CancellationToken drives graceful shutdown.
     let peers_state = peer::state::new_state();
+    // Connectivity edge signal: reconnect tasks bump this on every
+    // publish; push jobs re-evaluate due-ness immediately instead of
+    // waiting out their nap.
+    let (peers_changed_tx, peers_changed_rx) = tokio::sync::watch::channel(0u64);
     let peers_cancel = tokio_util::sync::CancellationToken::new();
     let mut reconnect_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     for p in &config.peers {
@@ -268,8 +272,9 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
         let cancel = peers_cancel.clone();
         let name = p.name.clone();
         let routes = p.routes.clone();
+        let changed = peers_changed_tx.clone();
         reconnect_handles.push(tokio::spawn(async move {
-            peer::reconnect::run_for_peer(state_for_task, name, routes, cancel).await;
+            peer::reconnect::run_for_peer(state_for_task, name, routes, changed, cancel).await;
         }));
     }
     for job in config.jobs {
@@ -279,8 +284,13 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
                 manager.spawn(job, ctx.clone());
             }
             arctern_config::JobConfig::Push(s) => {
-                let job = jobs::push::PushJob::new(s, Some(peers_state.clone()), &config.peers)
-                    .map_err(|e| eyre::eyre!("push job filter regex: {e}"))?;
+                let job = jobs::push::PushJob::new(
+                    s,
+                    Some(peers_state.clone()),
+                    &config.peers,
+                    Some(peers_changed_rx.clone()),
+                )
+                .map_err(|e| eyre::eyre!("push job filter regex: {e}"))?;
                 manager.spawn(Arc::new(job), ctx.clone());
             }
             arctern_config::JobConfig::Prune(s) => {

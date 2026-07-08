@@ -349,6 +349,33 @@ fn validate_prune(idx: usize, s: &PruneJobConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// Parse a human bandwidth figure ("10MiB", "800KiB", "1GiB", plain
+/// bytes) into bytes per second.
+pub fn parse_bytes_per_sec(s: &str) -> Result<u64, String> {
+    let t = s.trim().trim_end_matches("/s").trim();
+    let split = t.find(|c: char| !c.is_ascii_digit() && c != '.');
+    let (num, unit) = match split {
+        Some(i) => t.split_at(i),
+        None => (t, ""),
+    };
+    let n: f64 = num
+        .trim()
+        .parse()
+        .map_err(|e| format!("bad number {num:?}: {e}"))?;
+    let mult: u64 = match unit.trim() {
+        "" | "B" => 1,
+        "KiB" | "K" | "k" => 1 << 10,
+        "MiB" | "M" | "m" => 1 << 20,
+        "GiB" | "G" | "g" => 1 << 30,
+        other => return Err(format!("unknown unit {other:?} (use B/KiB/MiB/GiB)")),
+    };
+    let v = (n * mult as f64) as u64;
+    if v == 0 {
+        return Err("bandwidth limit must be positive".into());
+    }
+    Ok(v)
+}
+
 fn validate_push(
     idx: usize,
     s: &PushJobConfig,
@@ -356,6 +383,11 @@ fn validate_push(
 ) -> Result<(), String> {
     if s.name.is_empty() {
         return Err(format!("jobs[{idx}].name: must not be empty"));
+    }
+    if let Some(bw) = &s.bandwidth_limit
+        && let Err(e) = parse_bytes_per_sec(bw)
+    {
+        return Err(format!("jobs[{idx}].bandwidth_limit: {e}"));
     }
     if s.target.root_fs.is_empty() {
         return Err(format!("jobs[{idx}].target.root_fs: must not be empty"));

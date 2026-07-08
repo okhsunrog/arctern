@@ -588,6 +588,7 @@ async fn execute_one_plan(
     target_dataset: &str,
     sender_dataset: &str,
     flags: &SendFlagsConfig,
+    bandwidth_limit: Option<u64>,
     cancel: &CancellationToken,
     transfer: &Mutex<Option<TransferInfo>>,
 ) -> Result<(), String> {
@@ -638,6 +639,7 @@ async fn execute_one_plan(
         let mut buf = vec![0u8; 256 * 1024];
         let mut copied: u64 = 0;
         let mut last_published: u64 = 0;
+        let throttle_start = tokio::time::Instant::now();
         loop {
             let step = async {
                 let n = child_stdout.read(&mut buf).await?;
@@ -657,6 +659,16 @@ async fn execute_one_plan(
                 break;
             }
             copied += n as u64;
+            // Token-bucket-by-arithmetic: if we are ahead of the
+            // configured rate, sleep off the surplus. Chunk-grained
+            // (256 KiB) which is plenty smooth at network scales.
+            if let Some(rate) = bandwidth_limit {
+                let expected = StdDuration::from_secs_f64(copied as f64 / rate as f64);
+                let elapsed = throttle_start.elapsed();
+                if expected > elapsed {
+                    tokio::time::sleep(expected - elapsed).await;
+                }
+            }
             if copied - last_published >= 8 * 1024 * 1024 {
                 last_published = copied;
                 if let Some(t) = transfer.lock().unwrap().as_mut() {
@@ -724,6 +736,7 @@ async fn run_one_filesystem(
     plan: &SnapshotPlan,
     sender_snaps: &[SnapshotRef],
     flags: &SendFlagsConfig,
+    bandwidth_limit: Option<u64>,
     cancel: &CancellationToken,
     transfer: &Mutex<Option<TransferInfo>>,
 ) -> Result<(), String> {
@@ -768,6 +781,7 @@ async fn run_one_filesystem(
         target_dataset,
         sender_dataset,
         flags,
+        bandwidth_limit,
         cancel,
         transfer,
     )
@@ -863,8 +877,19 @@ pub const KIND: &str = arctern_api::JOB_KIND_PUSH;
 /// Per-peer last outcome: (last successful sync unix seconds, last error).
 type PeerOutcomes = HashMap<String, (Option<i64>, Option<String>)>;
 
+/// Safety-net poll when nothing is due and no signal arrives.
+const FALLBACK_POLL: StdDuration = StdDuration::from_secs(15 * 60);
+/// Retry cadence while a target is due but blocked (manual-only route
+/// active / peer unreachable) — waking sooner would just spin.
+const BLOCKED_RETRY: StdDuration = StdDuration::from_secs(5 * 60);
+
 pub struct PushJob {
     config: PushJobConfig,
+    /// Parsed `bandwidth_limit`, bytes per second.
+    bandwidth_limit: Option<u64>,
+    /// Bumped by the reconnect tasks on any peer state change so the
+    /// scheduler re-evaluates due-ness the moment a link appears.
+    peers_changed: Option<tokio::sync::watch::Receiver<u64>>,
     /// `[[peers]]` entries for this job's targets (mode, auto_interval).
     peer_configs: Vec<PeerConfig>,
     filter: CompiledFilter,
@@ -895,8 +920,14 @@ impl PushJob {
         config: PushJobConfig,
         peers: Option<PeersState>,
         all_peer_configs: &[PeerConfig],
+        peers_changed: Option<tokio::sync::watch::Receiver<u64>>,
     ) -> Result<Self, regex::Error> {
         let filter = CompiledFilter::from_config(config.snapshot_filter())?;
+        // Validated at config load; a parse failure here is unreachable.
+        let bandwidth_limit = config
+            .bandwidth_limit
+            .as_deref()
+            .and_then(|s| arctern_config::parse_bytes_per_sec(s).ok());
         let peer_configs = all_peer_configs
             .iter()
             .filter(|p| config.targets.contains(&p.name))
@@ -904,6 +935,8 @@ impl PushJob {
             .collect();
         Ok(Self {
             config,
+            bandwidth_limit,
+            peers_changed,
             peer_configs,
             filter,
             status: Mutex::new(JobStatusInner::default()),
@@ -1066,7 +1099,8 @@ impl PushJob {
                 .and_then(|o| o.0);
             let cadence = self
                 .peer_auto_interval(name)
-                .unwrap_or(self.config.interval)
+                .or(self.config.interval)
+                .unwrap_or(FALLBACK_POLL)
                 .as_secs() as i64;
             let auto_link = match link {
                 Some((l, _route, true)) => Some(l),
@@ -1292,6 +1326,7 @@ impl PushJob {
                 &plan,
                 &sender_snaps,
                 &self.config.send,
+                self.bandwidth_limit,
                 cancel,
                 &self.transfer,
             )
@@ -1414,7 +1449,7 @@ impl Job for PushJob {
         let span = info_span!("push_job", name = %self.config.name);
         Box::pin(
             async move {
-                let interval = self.config.interval;
+                let interval = self.config.interval.unwrap_or(FALLBACK_POLL);
                 // Startup-immediate like the snap job, but a push cycle
                 // needs a connected peer: give the eager-reconnect tasks
                 // a short grace to establish the first link so a daemon
@@ -1430,11 +1465,23 @@ impl Job for PushJob {
                     }
                 }
                 self.run_and_record(&ctx, &cancel, interval).await;
+                // Event-driven: sleep exactly until the earliest auto
+                // target is due; wake early on a manual request or a
+                // peer connectivity change. `interval` is only the
+                // upper bound on how long we may sleep blind.
+                let mut peers_rx = self.peers_changed.clone();
                 loop {
+                    let nap = self.next_wake(interval);
                     tokio::select! {
                         _ = cancel.cancelled() => break,
-                        _ = sleep(interval) => {}
+                        _ = sleep(nap) => {}
                         _ = self.wakeup.notified() => {}
+                        _ = async {
+                            match peers_rx.as_mut() {
+                                Some(rx) => { let _ = rx.changed().await; }
+                                None => std::future::pending::<()>().await,
+                            }
+                        } => {}
                     }
                     self.run_and_record(&ctx, &cancel, interval).await;
                 }
@@ -1445,6 +1492,36 @@ impl Job for PushJob {
 }
 
 impl PushJob {
+    /// How long to sleep before the next scheduling decision. Earliest
+    /// auto-target due time wins; a due-but-blocked target degrades to
+    /// a fixed retry so the loop doesn't spin; no auto targets = the
+    /// fallback (manual requests wake us via Notify anyway).
+    fn next_wake(&self, fallback: StdDuration) -> StdDuration {
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let outcomes = self.peer_outcomes.lock().unwrap();
+        let mut earliest: Option<i64> = None;
+        for name in &self.config.targets {
+            if self.peer_mode(name) != PeerMode::Auto {
+                continue;
+            }
+            let due_at = match (
+                self.peer_auto_interval(name),
+                outcomes.get(name).and_then(|o| o.0),
+            ) {
+                (Some(iv), Some(ts)) => ts + iv.as_secs() as i64,
+                // No interval or no history: due immediately.
+                _ => now,
+            };
+            earliest = Some(earliest.map_or(due_at, |e| e.min(due_at)));
+        }
+        let nap = match earliest {
+            None => fallback,
+            Some(at) if at <= now => BLOCKED_RETRY,
+            Some(at) => StdDuration::from_secs((at - now) as u64).min(fallback),
+        };
+        nap.max(StdDuration::from_secs(10))
+    }
+
     async fn run_and_record(
         &self,
         ctx: &JobContext,

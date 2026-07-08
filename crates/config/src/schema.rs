@@ -348,10 +348,16 @@ pub struct PushJobConfig {
     /// from where it left off when it comes back.
     #[serde(default)]
     pub targets: Vec<String>,
-    /// How often the planner cycle fires. The wakeup endpoint
-    /// (POST /api/v1/jobs/{name}/wakeup) re-enters the cycle on demand.
-    #[serde(with = "humantime_serde")]
-    pub interval: Duration,
+    /// Optional safety-net poll cadence. Scheduling is event-driven —
+    /// the job sleeps until the earliest auto target is due and wakes on
+    /// manual requests / peer connectivity changes — so this only bounds
+    /// how long the job may sleep when nothing is due (default 15m).
+    #[serde(default, with = "humantime_serde::option")]
+    pub interval: Option<Duration>,
+    /// Cap on outgoing replication bandwidth, e.g. "10MiB" (per second).
+    /// Applied inside the send copy loop; unset = unthrottled.
+    #[serde(default)]
+    pub bandwidth_limit: Option<String>,
     #[serde(deserialize_with = "crate::filter::deserialize_filesystems")]
     pub filesystems: Vec<FilesystemFilter>,
     pub target: PushTarget,

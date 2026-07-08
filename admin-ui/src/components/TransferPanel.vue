@@ -66,16 +66,20 @@ function fmtIn(s: number): string {
   return `${Math.round(s / 86400)}d`
 }
 
-/** For auto targets: when the next automatic sync becomes due. */
-function dueLabel(tg: {
+/** One human line per target: last sync + (for auto) when the next
+ * automatic sync becomes due. */
+function targetLine(tg: {
   mode: string
   auto_interval_secs?: number | null
   last_success?: number | null
-}): string | null {
-  if (tg.mode !== 'auto') return null
-  if (!tg.auto_interval_secs || !tg.last_success) return 'auto: every cycle'
+  last_error?: string | null
+}): string {
+  if (tg.last_error) return `error: ${tg.last_error}`
+  const synced = tg.last_success ? `synced ${age(tg.last_success)}` : 'never synced'
+  if (tg.mode !== 'auto') return synced
+  if (!tg.auto_interval_secs || !tg.last_success) return `${synced} · auto: every cycle`
   const due = tg.last_success + tg.auto_interval_secs - Math.floor(Date.now() / 1000)
-  return due <= 0 ? 'auto: due now' : `auto: due in ~${fmtIn(due)}`
+  return due <= 0 ? `${synced} · auto: due now` : `${synced} · next auto in ~${fmtIn(due)}`
 }
 </script>
 
@@ -99,46 +103,37 @@ function dueLabel(tg: {
     </div>
 
     <!-- Per-target policy + manual trigger -->
-    <div v-if="job.targets.length" class="space-y-1">
-      <div
-        v-for="tg in job.targets"
-        :key="tg.peer"
-        class="flex items-center justify-between text-sm gap-2"
-      >
-        <div class="flex items-center gap-2 min-w-0">
-          <span
-            class="inline-block w-2 h-2 rounded-full shrink-0"
-            :class="tg.connected ? 'bg-success-500' : 'bg-gray-400'"
-            :title="tg.connected ? 'reachable' : 'unreachable'"
-          />
-          <span class="truncate">{{ tg.peer }}</span>
-          <UBadge
-            variant="subtle"
-            size="xs"
-            :color="tg.mode === 'auto' ? 'info' : 'neutral'"
-            :title="dueLabel(tg) ?? 'manual: Send now only'"
-          >
-            {{ tg.mode }}
-          </UBadge>
-          <span v-if="dueLabel(tg)" class="text-xs text-gray-500 truncate">{{ dueLabel(tg) }}</span>
-        </div>
-        <div class="flex items-center gap-2 shrink-0">
-          <span
-            class="text-xs"
+    <div v-if="job.targets.length" class="space-y-2">
+      <div v-for="tg in job.targets" :key="tg.peer" class="flex items-start justify-between gap-3">
+        <div class="min-w-0">
+          <div class="flex items-center gap-2 text-sm">
+            <span
+              class="inline-block w-2 h-2 rounded-full shrink-0"
+              :class="tg.connected ? 'bg-success-500' : 'bg-gray-400'"
+              :title="tg.connected ? 'reachable' : 'unreachable'"
+            />
+            <span class="font-medium">{{ tg.peer }}</span>
+            <UBadge variant="subtle" size="xs" :color="tg.mode === 'auto' ? 'info' : 'neutral'">
+              {{ tg.mode }}
+            </UBadge>
+          </div>
+          <div
+            class="text-xs mt-0.5 ml-4"
             :class="tg.last_error ? 'text-error-500' : 'text-gray-500'"
             :title="tg.last_error ?? undefined"
           >
-            {{ tg.last_error ? 'error' : age(tg.last_success) }}
-          </span>
-          <UButton
-            size="xs"
-            variant="soft"
-            icon="i-lucide-send"
-            :disabled="!tg.connected"
-            @click="onPushTo?.(job.name, tg.peer)"
-            >Send now</UButton
-          >
+            {{ targetLine(tg) }}
+          </div>
         </div>
+        <UButton
+          size="xs"
+          variant="soft"
+          icon="i-lucide-send"
+          class="shrink-0"
+          :disabled="!tg.connected"
+          @click="onPushTo?.(job.name, tg.peer)"
+          >Send now</UButton
+        >
       </div>
     </div>
 

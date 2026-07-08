@@ -103,8 +103,12 @@ function targetLine(tg: {
     </div>
 
     <!-- Per-target policy + manual trigger -->
-    <div v-if="job.targets.length" class="space-y-2">
-      <div v-for="tg in job.targets" :key="tg.peer" class="flex items-start justify-between gap-3">
+    <div v-if="job.targets?.length" class="space-y-2">
+      <div
+        v-for="tg in job.targets ?? []"
+        :key="tg.peer"
+        class="flex items-start justify-between gap-3"
+      >
         <div class="min-w-0">
           <div class="flex items-center gap-2 text-sm">
             <span

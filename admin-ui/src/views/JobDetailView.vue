@@ -76,7 +76,7 @@ const tableColumns = computed(() => [
         </div>
         <UButton icon="i-lucide-zap" @click="wake(job.name)">Wakeup</UButton>
       </div>
-      <UCard v-if="job.transfer || job.targets.length || job.paused">
+      <UCard v-if="job.transfer || job.targets?.length || job.paused">
         <TransferPanel
           :job="job"
           :on-cancel="cancel"

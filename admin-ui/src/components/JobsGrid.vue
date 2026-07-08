@@ -53,7 +53,7 @@ function statusBadge(j: JobStatus): {
           {{ j.last_error }}
         </div>
       </dl>
-      <div v-if="j.transfer || j.targets.length || j.paused" class="mt-3">
+      <div v-if="j.transfer || j.targets?.length || j.paused" class="mt-3">
         <TransferPanel
           :job="j"
           :on-cancel="onCancel"

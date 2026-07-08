@@ -64,7 +64,7 @@ export function visibleDatasetRows(
     rows.push({
       name: d.name,
       depth: parts.length - 1,
-      label: parts[parts.length - 1],
+      label: parts[parts.length - 1] ?? d.name,
       type: d.dataset_type,
       used: usedOf(d),
       hasChildren: hasChildren(d.name),

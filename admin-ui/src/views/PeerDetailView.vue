@@ -3,7 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { listPeerJobs, listPeerSnapshots, wakeupPeerJob } from '../client'
 import type { JobStatus, PeerSnapshotEntry } from '../client'
-import { formatRelative } from '../utils/format'
+import { formatNextRun, formatRelative } from '../utils/format'
 import { useEvents } from '../composables/useEvents'
 import EventsLog from '../components/EventsLog.vue'
 
@@ -93,7 +93,7 @@ const tail = computed(() => events.value.slice(-30))
               <div class="font-semibold">{{ j.name }}</div>
               <div class="text-xs text-gray-500">
                 {{ j.kind }} · last {{ formatRelative(j.last_run) }} · next
-                {{ formatRelative(j.next_run) }}
+                {{ formatNextRun(j.next_run, j.running) }}
               </div>
               <div v-if="j.last_error" class="text-error-600 text-xs mt-1">
                 {{ j.last_error }}

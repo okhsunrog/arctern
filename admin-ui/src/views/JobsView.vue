@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, h, resolveComponent } from 'vue'
 import { useJobs } from '../composables/useJobs'
-import { formatRelative } from '../utils/format'
+import { formatNextRun, formatRelative } from '../utils/format'
 import type { JobStatus } from '../client'
 
 const { jobs, error, loading, wake } = useJobs()
@@ -55,7 +55,8 @@ const columns = computed(() => [
   {
     accessorKey: 'next_run',
     header: 'Next run',
-    cell: ({ row }: { row: { original: JobStatus } }) => formatRelative(row.original.next_run),
+    cell: ({ row }: { row: { original: JobStatus } }) =>
+      formatNextRun(row.original.next_run, row.original.running),
   },
   {
     id: 'actions',

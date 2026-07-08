@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { JobStatus } from '../client'
-import { formatRelative } from '../utils/format'
+import { formatNextRun, formatRelative } from '../utils/format'
 import TransferPanel from './TransferPanel.vue'
 
 defineProps<{
@@ -47,7 +47,7 @@ function statusBadge(j: JobStatus): {
         </div>
         <div class="flex justify-between">
           <dt class="text-gray-500">Next run</dt>
-          <dd>{{ formatRelative(j.next_run) }}</dd>
+          <dd>{{ formatNextRun(j.next_run, j.running) }}</dd>
         </div>
         <div v-if="j.last_error" class="text-error-600 text-xs mt-2 truncate" :title="j.last_error">
           {{ j.last_error }}

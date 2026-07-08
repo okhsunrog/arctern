@@ -17,6 +17,19 @@ export function formatRelative(rfc3339: string | null | undefined): string {
   return past ? `${out} ago` : `in ${out}`
 }
 
+// A job's `next_run` is `last_run + interval`. When a cycle runs longer
+// than its interval (e.g. a multi-hour send), that timestamp slides into
+// the past — rendering it as "16m ago" reads as nonsense for a *next*
+// run. Show the real situation instead: the next cycle fires once the
+// current one finishes, or the job is already due to fire.
+export function formatNextRun(rfc3339: string | null | undefined, running?: boolean): string {
+  if (!rfc3339) return '—'
+  const t = Date.parse(rfc3339)
+  if (Number.isNaN(t)) return rfc3339
+  if (t <= Date.now()) return running ? 'after current run' : 'due'
+  return formatRelative(rfc3339)
+}
+
 export function formatTimestamp(rfc3339: string | null | undefined): string {
   if (!rfc3339) return '—'
   const d = new Date(rfc3339)

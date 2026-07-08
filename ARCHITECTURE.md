@@ -423,7 +423,6 @@ admin-ui/                    Vue + Nuxt UI as before; add Peers tab to AdminView
 
 ## Conventions (preserved from CLAUDE.md)
 
-- Rust edition 2024.
 - Async-only.
 - `cargo add` for deps, no hand-edits to Cargo.toml versions.
 - Errors via `thiserror` in libraries, `eyre` only in `main.rs`.

@@ -2,9 +2,10 @@
 
 <p align="center">Push-based ZFS replication daemon — async Rust over SSH, with a web UI.</p>
 
-> **Status:** early, under active development (`v0.1.0`, edition 2024). The design
-> is settled (see [`ARCHITECTURE.md`](ARCHITECTURE.md)); APIs and config are not
-> yet stable.
+> **Status:** pre-1.0, but real. The design is settled (see
+> [`ARCHITECTURE.md`](ARCHITECTURE.md)) and arctern runs in production on the
+> author's machines, where it replaced zrepl for laptop→NAS backups. The HTTP
+> API and TOML config schema may still change before 1.0.
 
 ## What it is
 
@@ -81,7 +82,7 @@ snapshot history.
 ## Requirements
 
 - OpenZFS on both hosts, and OpenSSH for the transport.
-- A Rust toolchain with **edition 2024** support to build.
+- A recent stable Rust toolchain (edition 2024, so Rust 1.85+).
 - Sibling crate [`palimpsest`](https://github.com/okhsunrog/palimpsest) — arctern
   depends on it via a relative path (`../palimpsest`), so clone it next to this
   repo.

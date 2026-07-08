@@ -4,11 +4,9 @@
 //! via the `read_frame`/`write_frame` helpers below (frames bounded by
 //! `MAX_FRAME_LEN`):
 //!
-//! - **Control channel** (long-lived, one per peer session). The client
-//!   writes a `RequestFrame`, the server replies with one or more
-//!   `ResponseFrame`s correlated by `request_id`. Server may also push
-//!   `ResponseFrame`s with `request_id == None` carrying
-//!   `Response::Event` for SSE proxying.
+//! - **Control channel** RPC lives in `crate::control` (tarpc service
+//!   over the same length-delimited JSON framing). This module keeps
+//!   only what the raw channels share.
 //!
 //! - **Recv channel** (short-lived, one per replication step). Wire
 //!   layout:
@@ -37,15 +35,6 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_FRAME_LEN: usize = 8 << 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RequestFrame {
-    /// Monotonic per-session, client-assigned. Server echoes back in the
-    /// matching `ResponseFrame::request_id`.
-    pub id: u64,
-    #[serde(flatten)]
-    pub body: Request,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ResponseFrame {
     /// `Some(id)` for normal request/response correlation.
     /// `None` for server-pushed `Response::Event` frames routed to the
@@ -57,65 +46,9 @@ pub struct ResponseFrame {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Request {
-    /// Planner-only variant of `ListSnapshots`: returns just the receiver
-    /// GUIDs (the only field the GUID-intersection planner consumes),
-    /// keeping the response ~4x smaller than full `SnapshotEntry` rows so
-    /// it stays well under `MAX_FRAME_LEN` for datasets with many tens of
-    /// thousands of snapshots. The UI keeps using `ListSnapshots`.
-    ListReceiverGuids {
-        dataset: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        prefix_regex: Option<String>,
-    },
-    /// Sender-driven cleanup: invoke `palimpsest::recv::abort_partial`
-    /// on `dataset` before the next recv channel opens. Used when the
-    /// planner picked Full / Incremental + discard against a stale
-    /// receiver token.
-    DiscardPartialRecv {
-        dataset: String,
-    },
-    GetLogCursor,
-    /// Generic passthrough into the receiver's local daemon HTTP API
-    /// (over its UNIX socket). This is what makes managing a peer
-    /// IDENTICAL to managing the local host: the sender's UI reuses its
-    /// own endpoints with a per-peer base path instead of growing a
-    /// bespoke (and always poorer) RPC per feature. `GET` is gated by
-    /// the read scope; mutating methods require the explicit
-    /// `control:proxy_admin` ACL operation.
-    Proxy {
-        /// `GET` | `POST` | `DELETE` (uppercase).
-        method: String,
-        /// Absolute local API path, must start with `/api/v1/`.
-        path: String,
-        /// JSON request body for POST.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        body: Option<String>,
-    },
-    Shutdown,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Response {
-    ListReceiverGuidsOk {
-        guids: Vec<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        receive_resume_token: Option<String>,
-    },
-    DiscardPartialRecvOk,
-    GetLogCursorOk {
-        id: u64,
-    },
-    /// Proxy passthrough result: the local daemon's HTTP status and
-    /// raw body (JSON or empty).
-    ProxyOk {
-        status: u16,
-        body: String,
-    },
-    /// Recv-channel terminal response. Same shape on the control channel
-    /// is reserved for "operation succeeded with no payload" replies
-    /// where a richer Ok variant doesn't add value.
+    /// Recv-channel terminal response: the stream was received and
+    /// finalised cleanly.
     Ok,
     Error {
         code: ErrorCode,
@@ -318,17 +251,6 @@ pub async fn read_response<R: AsyncRead + Unpin>(
     read_frame(r).await
 }
 
-pub async fn write_request<W: AsyncWrite + Unpin>(
-    w: &mut W,
-    r: &RequestFrame,
-) -> Result<(), ProtocolError> {
-    write_frame(w, r).await
-}
-
-pub async fn read_request<R: AsyncRead + Unpin>(r: &mut R) -> Result<RequestFrame, ProtocolError> {
-    read_frame(r).await
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,83 +325,6 @@ mod tests {
         ));
     }
 
-    fn check_request_roundtrip(req: Request) {
-        let f = RequestFrame {
-            id: 7,
-            body: req.clone(),
-        };
-        let s = serde_json::to_string(&f).unwrap();
-        let back: RequestFrame = serde_json::from_str(&s).unwrap();
-        assert_eq!(back.id, 7);
-        assert_eq!(back.body, req);
-    }
-
-    #[test]
-    fn response_list_receiver_guids_roundtrip() {
-        check_response_roundtrip(Response::ListReceiverGuidsOk {
-            guids: vec![11587258101628135412, 1711743136468914064],
-            receive_resume_token: Some("1-deadbeef".into()),
-        });
-        check_response_roundtrip(Response::ListReceiverGuidsOk {
-            guids: vec![],
-            receive_resume_token: None,
-        });
-    }
-
-    #[test]
-    fn request_list_receiver_guids_roundtrip() {
-        check_request_roundtrip(Request::ListReceiverGuids {
-            dataset: "tank/backups/laptop/data".into(),
-            prefix_regex: Some("^zrepl_".into()),
-        });
-        check_request_roundtrip(Request::ListReceiverGuids {
-            dataset: "tank/data".into(),
-            prefix_regex: None,
-        });
-    }
-
-    /// Old peers omit the new optional SnapshotEntry fields; the JSON
-    /// without them must still parse (serde defaults).
-
-    #[test]
-    fn request_discard_partial_recv_roundtrip() {
-        check_request_roundtrip(Request::DiscardPartialRecv {
-            dataset: "tank/backups/laptop/data".into(),
-        });
-    }
-
-    #[test]
-    fn request_get_log_cursor_roundtrip() {
-        check_request_roundtrip(Request::GetLogCursor);
-    }
-
-    #[test]
-    fn request_proxy_roundtrip() {
-        check_request_roundtrip(Request::Proxy {
-            method: "GET".into(),
-            path: "/api/v1/pools".into(),
-            body: None,
-        });
-        check_request_roundtrip(Request::Proxy {
-            method: "POST".into(),
-            path: "/api/v1/pools/tank/scrub".into(),
-            body: Some(r#"{"action":"start"}"#.into()),
-        });
-    }
-
-    #[test]
-    fn response_proxy_roundtrip() {
-        check_response_roundtrip(Response::ProxyOk {
-            status: 200,
-            body: r#"[{"name":"tank"}]"#.into(),
-        });
-    }
-
-    #[test]
-    fn request_shutdown_roundtrip() {
-        check_request_roundtrip(Request::Shutdown);
-    }
-
     fn check_response_roundtrip(resp: Response) {
         let f = ResponseFrame {
             request_id: Some(11),
@@ -489,16 +334,6 @@ mod tests {
         let back: ResponseFrame = serde_json::from_str(&s).unwrap();
         assert_eq!(back.request_id, Some(11));
         assert_eq!(back.body, resp);
-    }
-
-    #[test]
-    fn response_discard_partial_recv_roundtrip() {
-        check_response_roundtrip(Response::DiscardPartialRecvOk);
-    }
-
-    #[test]
-    fn response_get_log_cursor_roundtrip() {
-        check_response_roundtrip(Response::GetLogCursorOk { id: 12345 });
     }
 
     #[test]
@@ -520,22 +355,6 @@ mod tests {
                 message: "boom".into(),
             });
         }
-    }
-
-    #[tokio::test]
-    async fn request_frame_wire_roundtrip() {
-        let f = RequestFrame {
-            id: 1,
-            body: Request::ListReceiverGuids {
-                dataset: "tank/data".into(),
-                prefix_regex: None,
-            },
-        };
-        let mut buf = Vec::new();
-        write_request(&mut buf, &f).await.unwrap();
-        let mut cur = Cursor::new(buf);
-        let back: RequestFrame = read_request(&mut cur).await.unwrap();
-        assert_eq!(back, f);
     }
 
     #[tokio::test]

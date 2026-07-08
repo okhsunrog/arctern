@@ -151,16 +151,12 @@ pub async fn run_for_peer(
                     if link.active_recvs() > 0 {
                         continue;
                     }
-                    // GetLogCursor, not ListJobs: the probe checks the
-                    // CHANNEL, and ListJobs now proxies into the
-                    // receiver's local daemon — a stopped daemon there
+                    // log_cursor, not a daemon proxy: the probe checks
+                    // the CHANNEL — a stopped daemon on the receiver
                     // must not read as a dead link.
-                    let probe = tokio::time::timeout(
-                        probe_timeout,
-                        link.rpc(arctern_transport::Request::GetLogCursor),
-                    )
-                    .await
-                    .unwrap_or(Err(super::RpcError::Timeout));
+                    let probe = tokio::time::timeout(probe_timeout, link.log_cursor())
+                        .await
+                        .unwrap_or(Err(super::RpcError::Timeout));
                     if let Err(e) = probe {
                         tracing::warn!(
                             peer = %peer_name,

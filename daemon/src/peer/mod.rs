@@ -2,8 +2,8 @@
 //! `[[peers]]` entry. Each link multiplexes:
 //!
 //! - one **control** channel: a long-lived `arctern stdinserver-dispatch
-//!   <id>` child carrying length-delimited Request/Response/Event frames.
-//!   Owned by `ControlClient`'s background task.
+//!   <id>` child carrying tarpc `ArcternControl` RPC over
+//!   length-delimited JSON frames. tarpc's dispatch task owns the demux.
 //! - zero or more **recv** channels: short-lived children spawned per
 //!   replication step via `PeerLink::open_recv`.
 //!
@@ -21,14 +21,14 @@ pub mod state;
 use std::sync::Arc;
 
 use arctern_transport::{
-    RecvHeader, Request, Response, ResponseFrame, read_response, write_header,
+    ArcternControlClient, GuidsReply, ProxyReply, RecvHeader, Response, ResponseFrame,
+    read_response, write_header,
 };
 use openssh::{KnownHosts, Session, SessionBuilder, Stdio};
 use thiserror::Error;
 use tokio::io::BufReader;
-use tokio::sync::oneshot;
 
-pub use control::{ControlClient, RpcError};
+pub use control::RpcError;
 
 /// Strip ANSI escape sequences (CSI colour codes and friends) from a
 /// remote process's stderr line. The dispatcher disables colours when
@@ -95,7 +95,7 @@ fn emit_remote_stderr(peer: &str, channel: &'static str, raw: &str) {
 pub struct PeerLink {
     pub(crate) name: String,
     pub(crate) session: Arc<openssh::Session>,
-    pub(crate) control: ControlClient,
+    pub(crate) control: ArcternControlClient,
     /// Number of recv channels currently streaming over this link.
     /// The reconnect loop skips its liveness probe and route re-rank
     /// while this is non-zero: a bulk send legitimately starves the
@@ -155,7 +155,7 @@ impl PeerLink {
                 }
             });
         }
-        let (control, _task) = ControlClient::spawn(stdout, stdin);
+        let control = control::spawn(stdout, stdin);
         Ok(PeerLink {
             name,
             session,
@@ -172,22 +172,47 @@ impl PeerLink {
         self.active_recvs.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Send a Request on the control channel and await its matching
-    /// Response. Returns immediately with `RpcError::ChannelClosed`
-    /// when the background task has died (e.g. session lost; reconnect
-    /// is in progress) — handlers should map that to HTTP 503 with
-    /// Retry-After per ARCHITECTURE.md "UI federation".
-    pub async fn rpc(&self, req: Request) -> Result<Response, RpcError> {
-        self.control.send(req).await
+    /// Receiver snapshot GUIDs + resume token for the planner. Fails
+    /// fast with `RpcError::ChannelClosed` when tarpc's dispatch task
+    /// has died (session lost; reconnect in progress) — handlers map
+    /// that to HTTP 503 per ARCHITECTURE.md "UI federation".
+    pub async fn list_receiver_guids(
+        &self,
+        dataset: String,
+        prefix_regex: Option<String>,
+    ) -> Result<GuidsReply, RpcError> {
+        Ok(self
+            .control
+            .list_receiver_guids(control::ctx(), dataset, prefix_regex)
+            .await??)
     }
 
-    /// Subscribe to server-pushed Event frames on this peer's control
-    /// channel. The first subscriber triggers the one-time
-    /// `SubscribeEvents` RPC that makes the receiver start pushing;
-    /// later subscribers reuse the same server-side pusher via the
-    /// local broadcast. New subscribers see events that arrive after
-    /// they subscribe; backlog replay is the SSE bridge's
-    /// responsibility.
+    /// `zfs recv -A` on the receiver: drop stale partial-receive state.
+    pub async fn discard_partial_recv(&self, dataset: String) -> Result<(), RpcError> {
+        Ok(self
+            .control
+            .discard_partial_recv(control::ctx(), dataset)
+            .await??)
+    }
+
+    /// Cheap liveness probe; also the receiver's event-log cursor.
+    pub async fn log_cursor(&self) -> Result<u64, RpcError> {
+        Ok(self.control.log_cursor(control::ctx()).await?)
+    }
+
+    /// Generic passthrough into the receiver's local daemon HTTP API.
+    pub async fn proxy(
+        &self,
+        method: String,
+        path: String,
+        body: Option<String>,
+    ) -> Result<ProxyReply, RpcError> {
+        Ok(self
+            .control
+            .proxy(control::ctx(), method, path, body)
+            .await??)
+    }
+
     /// Subscribe to the peer's event stream. Events ride a dedicated
     /// one-way channel (`stdinserver <id> events`, NDJSON lines) — not
     /// the control channel — opened once per link by the first
@@ -207,11 +232,11 @@ impl PeerLink {
                 let mut child = cmd
                     .spawn()
                     .await
-                    .map_err(|e| RpcError::Server(format!("spawn events channel: {e}")))?;
+                    .map_err(|e| RpcError::Transport(format!("spawn events channel: {e}")))?;
                 let stdout = child
                     .stdout()
                     .take()
-                    .ok_or_else(|| RpcError::Server("events child has no stdout".into()))?;
+                    .ok_or_else(|| RpcError::Transport("events child has no stdout".into()))?;
                 if let Some(mut stderr) = child.stderr().take() {
                     let peer_name = self.name.clone();
                     tokio::spawn(async move {
@@ -346,10 +371,6 @@ pub enum PeerError {
     #[error("internal: {0}")]
     Internal(String),
 }
-
-/// One in-flight RPC. The control task holds the `tx` half until the
-/// matching ResponseFrame arrives; the caller awaits `rx`.
-pub(crate) type Pending = oneshot::Sender<Result<Response, RpcError>>;
 
 #[cfg(test)]
 mod tests {

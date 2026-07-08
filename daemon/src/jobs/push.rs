@@ -34,8 +34,8 @@ use std::time::Duration as StdDuration;
 use arctern_api::{TargetStatus, TransferInfo};
 use arctern_config::{PeerConfig, PeerMode, PushJobConfig, SendFlagsConfig, SnapshotFilterConfig};
 use arctern_transport::{
-    PROTOCOL_VERSION, RecvHeader, Request, Response, SendFlagsWire, SendHeader, SendKind,
-    SnapshotEntry, SnapshotRef, compile_prefix_regex, regex,
+    PROTOCOL_VERSION, RecvHeader, Response, SendFlagsWire, SendHeader, SendKind, SnapshotEntry,
+    SnapshotRef, compile_prefix_regex, regex,
 };
 use palimpsest::dataset::ListOptions;
 use palimpsest::models::DatasetType;
@@ -499,23 +499,11 @@ async fn plan_one_filesystem(
     // gets SENT; the receiver list only decides what counts as a
     // common base. Filtering here forced a full resend in exactly the
     // migration scenarios the bookmark fallback exists for.
-    let resp = peer
-        .rpc(Request::ListReceiverGuids {
-            dataset: target_dataset.to_string(),
-            prefix_regex: None,
-        })
+    let reply = peer
+        .list_receiver_guids(target_dataset.to_string(), None)
         .await
-        .map_err(|e| format!("ListReceiverGuids: {e}"))?;
-    let (guids, token) = match resp {
-        Response::ListReceiverGuidsOk {
-            guids,
-            receive_resume_token,
-        } => (guids, receive_resume_token),
-        Response::Error { message, .. } => {
-            return Err(format!("ListReceiverGuids receiver error: {message}"));
-        }
-        other => return Err(format!("unexpected ListReceiverGuids response: {other:?}")),
-    };
+        .map_err(|e| format!("list_receiver_guids: {e}"))?;
+    let (guids, token) = (reply.guids, reply.receive_resume_token);
     // The planner intersects on GUID only (see pick_plan); the receiver's
     // snapshot names and createtxg are unused, so carry each GUID in an
     // otherwise-empty SnapshotEntry to keep the pure planner signature.
@@ -737,7 +725,6 @@ async fn execute_one_plan(
     match resp {
         Response::Ok => Ok(()),
         Response::Error { message, .. } => Err(format!("receiver: {message}")),
-        other => Err(format!("unexpected recv response: {other:?}")),
     }
 }
 
@@ -1272,13 +1259,8 @@ impl PushJob {
             if needs_discard {
                 if self.config.dry_run {
                     tracing::info!(target = %target, "push: dry-run would discard partial receive state");
-                } else if let Err(e) = peer
-                    .rpc(Request::DiscardPartialRecv {
-                        dataset: target.clone(),
-                    })
-                    .await
-                {
-                    warn!(target = %target, error = %e, "DiscardPartialRecv RPC failed");
+                } else if let Err(e) = peer.discard_partial_recv(target.clone()).await {
+                    warn!(target = %target, error = %e, "discard_partial_recv RPC failed");
                 }
             }
             match &plan {

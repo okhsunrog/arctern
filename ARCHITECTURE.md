@@ -79,62 +79,33 @@ The identity name (`laptop_nova`) is hardcoded per key. OpenSSH's `command=` dir
 
 ### Wire protocol on a control channel
 
-The control channel uses framed enum messages. `tokio_util::codec::LengthDelimitedCodec` for framing, `serde_json` for payload (readable in logs; switch to `postcard` later if size matters).
+The control channel is a tarpc RPC service (`ArcternControl` in `crates/transport/src/control.rs`) over `tokio_util::codec::LengthDelimitedCodec` framing with `serde_json` payloads (readable in logs; switch to `postcard` later if size matters). tarpc generates the client and the server glue and owns request-id correlation — the server processes requests concurrently (each on its own task) and emits responses in any order, so one slow query over a 10k-snapshot dataset never head-of-line blocks the UI proxy.
 
 ```rust
-// crates/transport/src/protocol.rs
+// crates/transport/src/control.rs
 
-#[derive(Serialize, Deserialize)]
-pub struct RequestFrame {
-    pub id: u64,                             // monotonic per-session, client-assigned
-    #[serde(flatten)]
-    pub body: Request,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Request {
-    ListSnapshots {
+#[tarpc::service]
+pub trait ArcternControl {
+    // Replication core — must work with no daemon on the receiver.
+    async fn list_receiver_guids(
         dataset: String,
         prefix_regex: Option<String>,
-    },
-    GetReceiveResumeToken {
-        dataset: String,
-    },
-    DestroySnapshot {
-        name: String,
-    },
-    ListJobs,
-    GetJobStatus { name: String },
-    WakeupJob { name: String },
-    SubscribeEvents { since: Option<u64> },  // for SSE proxying
-    GetLogCursor,                            // returns current max log_events.id
-    Shutdown,                                // graceful
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct ResponseFrame {
-    pub request_id: Option<u64>,             // None for pushed Event frames
-    #[serde(flatten)]
-    pub body: Response,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Response {
-    ListSnapshotsOk { snapshots: Vec<SnapshotEntry> },
-    GetReceiveResumeTokenOk { token: Option<String> },
-    DestroySnapshotOk,
-    ListJobsOk { jobs: Vec<JobStatusWire> },
-    GetJobStatusOk(JobStatusWire),
-    WakeupJobOk,
-    GetLogCursorOk { id: u64 },
-    Event(EventWire),                        // pushed; ResponseFrame.request_id = None
-    Error { code: ErrorCode, message: String },
+    ) -> Result<GuidsReply, WireError>;
+    async fn discard_partial_recv(dataset: String) -> Result<(), WireError>;
+    // Cheap; doubles as the link liveness probe.
+    async fn log_cursor() -> u64;
+    // Management plane — passthrough into the receiver's local daemon
+    // HTTP API. GET rides the control read scope; mutating methods
+    // require the explicit control:proxy_admin ACL grant.
+    async fn proxy(
+        method: String,
+        path: String,
+        body: Option<String>,
+    ) -> Result<ProxyReply, WireError>;
 }
 ```
 
-Requests and responses are correlated by `request_id`. Client maintains a `HashMap<u64, oneshot::Sender<Response>>` keyed by id; server may process requests concurrently and emit responses in any order. `Event` frames have `request_id = None` and are routed to the broadcast subscribers. This avoids head-of-line blocking when one slow query (e.g. `ListSnapshots` over a 10k-snapshot dataset) would otherwise stall the UI.
+Events are not RPC: they ride a dedicated one-way stream channel (`stdinserver <id> events`) as newline-delimited `EventWire` JSON, bridged from the receiver daemon's SSE endpoint (or a SQLite poll on a daemon-less receiver).
 
 ### Wire protocol on a recv channel
 
@@ -261,15 +232,17 @@ pub struct ControlClient {
 }
 
 impl PeerLink {
-    pub async fn connect(name: String, target: SshTarget, acl_role: Role) -> Result<Self> { ... }
-    pub async fn list_snapshots(&self, dataset: &str) -> Result<Vec<SnapshotEntry>> { ... }
-    pub async fn destroy_snapshot(&self, name: &str) -> Result<()> { ... }
-    pub async fn open_recv(&self, header: RecvHeader) -> Result<RecvChannel> { ... }
-    pub fn subscribe_events(&self) -> broadcast::Receiver<EventWire> { ... }
+    pub async fn connect(name: String, ssh_target: &str, job: &str) -> Result<Self> { ... }
+    pub async fn list_receiver_guids(&self, dataset: String, prefix_regex: Option<String>) -> Result<GuidsReply> { ... }
+    pub async fn discard_partial_recv(&self, dataset: String) -> Result<()> { ... }
+    pub async fn log_cursor(&self) -> Result<u64> { ... }
+    pub async fn proxy(&self, method: String, path: String, body: Option<String>) -> Result<ProxyReply> { ... }
+    pub async fn open_recv(&self, job: &str, header: &RecvHeader) -> Result<RecvChannel> { ... }
+    pub async fn subscribe_events(&self) -> Result<broadcast::Receiver<EventWire>> { ... }
 }
 ```
 
-A background task owns the control channel's read half, demuxes `ResponseFrame`s by `request_id` into the matching oneshot from the in-flight map, and routes Event frames (request_id = None) into the broadcast.
+tarpc's dispatch task owns the control channel's stdio and correlates responses; the peer's event stream is a separate NDJSON channel fanned out via a broadcast.
 
 Reconnect runs **eagerly in a background task** per peer, not lazily on next call. On session loss the task tears down the PeerLink, marks the peer unreachable in `/api/v1/peers`, and attempts reconnect with exponential backoff (1s, 2s, 4s, … capped at 60s). UI calls during a backoff window return HTTP 503 immediately with `Retry-After`, instead of blocking on the backoff. Once reconnected, the task installs the new `ConnectedSession` into a shared `RwLock<Option<…>>` that handlers read.
 

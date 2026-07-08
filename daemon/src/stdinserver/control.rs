@@ -1,31 +1,32 @@
-//! Server-side control-channel handler. Reads RequestFrames off stdin,
-//! dispatches each to the matching `handle_*` function on its own task
-//! (so one slow `ListSnapshots` over a huge dataset cannot head-of-line
-//! block the UI proxy's other queries — responses correlate by
-//! `request_id`, not arrival order), writes ResponseFrames to stdout
-//! through a shared mutex-serialised writer.
+//! Server side of the control channel: a tarpc `ArcternControl`
+//! implementation over the channel's stdio. tarpc owns the demux —
+//! each in-flight request runs on its own task (so one slow
+//! `list_receiver_guids` over a huge dataset cannot head-of-line block
+//! the UI proxy's other queries) and responses correlate by tarpc's
+//! request ids, not arrival order.
 //!
-//! Per-Request handlers translate `palimpsest::ZfsError` and friends
-//! into `Response::Error { code, message }` rather than letting them
-//! escape; the caller never sees a process exit short of EOF.
+//! Handlers translate `palimpsest::ZfsError` and friends into
+//! `WireError { code, message }` rather than letting them escape; the
+//! caller never sees a process exit short of EOF.
 
 use std::sync::Arc;
 
 use arctern_config::zfs_names::validate_dataset_name;
 use arctern_config::{AllowedClient, Config};
 use arctern_transport::{
-    ErrorCode, Request, RequestFrame, Response, ResponseFrame, SnapshotEntry, compile_prefix_regex,
-    read_request, write_response,
+    ArcternControl, ErrorCode, GuidsReply, ProxyReply, SnapshotEntry, WireError,
+    compile_prefix_regex,
 };
+use futures_util::StreamExt;
 use palimpsest::ZfsError;
 use palimpsest::dataset::ListOptions;
 use palimpsest::models::DatasetType;
 use palimpsest::runner::CommandRunner;
 use sqlx::SqlitePool;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufWriter};
-use tokio::sync::Mutex;
+use tarpc::server::{BaseChannel, Channel};
+use tokio::io::{AsyncRead, AsyncWrite};
 
-/// Run the control channel until stdin EOF or a fatal write error.
+/// Run the control channel until stdin EOF or a fatal transport error.
 /// `acl` scopes destroy / discard operations; `runner` is the
 /// palimpsest CommandRunner the dispatch process opened (typically a
 /// `RealRunner` invoking local `zfs(8)`).
@@ -34,129 +35,109 @@ pub async fn run<R, W>(
     config: Arc<Config>,
     acl: AllowedClient,
     pool: Option<Arc<SqlitePool>>,
-    mut reader: R,
+    reader: R,
     writer: W,
 ) -> std::io::Result<()>
 where
-    R: AsyncRead + Unpin,
+    R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    // Stdout is shared between the concurrent request tasks and any
-    // background SubscribeEvents pusher; serialise writes through one
-    // mutex so frames never interleave on the wire.
-    let writer = Arc::new(Mutex::new(BufWriter::new(writer)));
-    let mut inflight = tokio::task::JoinSet::new();
-    let result = loop {
-        let frame: RequestFrame = match read_request(&mut reader).await {
-            Ok(f) => f,
-            Err(arctern_transport::ProtocolError::UnexpectedEof) => break Ok(()),
-            Err(arctern_transport::ProtocolError::Io(e))
-                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                break Ok(());
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "control: bad request frame; closing channel");
-                break Ok(());
-            }
-        };
-        let RequestFrame { id, body } = frame;
-        if matches!(body, Request::Shutdown) {
-            // Let in-flight requests finish (and write their responses)
-            // before acknowledging shutdown, so the ack is the last frame.
-            while inflight.join_next().await.is_some() {}
-            let resp = ResponseFrame {
-                request_id: Some(id),
-                body: Response::Ok,
-            };
-            let mut w = writer.lock().await;
-            let _ = write_response(&mut *w, &resp).await;
-            let _ = w.flush().await;
-            break Ok(());
-        }
-        let runner = runner.clone();
-        let config = config.clone();
-        let acl = acl.clone();
-        let pool = pool.clone();
-        let writer = writer.clone();
-        inflight.spawn(async move {
-            let resp_body = dispatch(runner.as_ref(), &config, &acl, pool.as_deref(), body).await;
-            let resp = ResponseFrame {
-                request_id: Some(id),
-                body: resp_body,
-            };
-            let mut w = writer.lock().await;
-            if let Err(e) = write_response(&mut *w, &resp).await {
-                tracing::warn!(error = %e, "control: write_response failed");
-                return;
-            }
-            if let Err(e) = w.flush().await {
-                tracing::warn!(error = %e, "control: flush failed");
-            }
-        });
-        // Reap finished request tasks as we go — a days-long control
-        // channel would otherwise accumulate one completed-task slot
-        // per request in the JoinSet until EOF.
-        while inflight.try_join_next().is_some() {}
+    let transport = arctern_transport::transport(tokio::io::join(reader, writer));
+    let server = ControlServer {
+        runner,
+        config,
+        acl,
+        pool,
     };
-    // EOF path: let in-flight tasks finish writing before tearing down.
-    while inflight.join_next().await.is_some() {}
-    result
+    BaseChannel::with_defaults(transport)
+        .execute(server.serve())
+        .for_each_concurrent(None, |handler| async {
+            tokio::spawn(handler);
+        })
+        .await;
+    Ok(())
 }
 
-async fn dispatch(
-    runner: &dyn CommandRunner,
-    config: &Config,
-    acl: &AllowedClient,
-    pool: Option<&SqlitePool>,
-    req: Request,
-) -> Response {
-    match req {
-        Request::ListReceiverGuids {
-            dataset,
-            prefix_regex,
-        } => {
-            if let Err(r) = enforce_control_acl(acl, "control:list_snapshots", true) {
-                return r;
-            }
-            handle_list_receiver_guids(runner, acl, &dataset, prefix_regex.as_deref()).await
+#[derive(Clone)]
+struct ControlServer {
+    runner: Arc<dyn CommandRunner>,
+    config: Arc<Config>,
+    acl: AllowedClient,
+    pool: Option<Arc<SqlitePool>>,
+}
+
+impl ArcternControl for ControlServer {
+    async fn list_receiver_guids(
+        self,
+        _ctx: tarpc::context::Context,
+        dataset: String,
+        prefix_regex: Option<String>,
+    ) -> Result<GuidsReply, WireError> {
+        enforce_control_acl(&self.acl, "control:list_snapshots", true)?;
+        let (snapshots, receive_resume_token) = collect_receiver_snapshots(
+            self.runner.as_ref(),
+            &self.acl,
+            &dataset,
+            prefix_regex.as_deref(),
+        )
+        .await?;
+        Ok(GuidsReply {
+            guids: snapshots.into_iter().map(|s| s.guid).collect(),
+            receive_resume_token,
+        })
+    }
+
+    async fn discard_partial_recv(
+        self,
+        _ctx: tarpc::context::Context,
+        dataset: String,
+    ) -> Result<(), WireError> {
+        enforce_control_acl(&self.acl, "control:discard_partial_recv", false)?;
+        validate_dataset_name(&dataset).map_err(|e| {
+            WireError::new(
+                ErrorCode::BadRequest,
+                format!("invalid dataset {dataset:?}: {e}"),
+            )
+        })?;
+        enforce_root_fs(&self.acl, &dataset)?;
+        palimpsest::recv::abort_partial(self.runner.as_ref(), &dataset)
+            .await
+            .map_err(|e| {
+                WireError::new(zfs_error_code(&e), format!("abort_partial {dataset}: {e}"))
+            })
+    }
+
+    async fn log_cursor(self, _ctx: tarpc::context::Context) -> u64 {
+        // ACL-free by design: this doubles as the link liveness probe
+        // and leaks nothing but a monotonically increasing counter.
+        match &self.pool {
+            Some(p) => match crate::state::log_events::cursor(p).await {
+                Ok(id) => id as u64,
+                Err(e) => {
+                    tracing::warn!(error = %e, "log_events cursor query failed");
+                    0
+                }
+            },
+            None => 0,
         }
-        Request::DiscardPartialRecv { dataset } => {
-            if let Err(r) = enforce_control_acl(acl, "control:discard_partial_recv", false) {
-                return r;
-            }
-            handle_discard_partial_recv(runner, acl, &dataset).await
-        }
-        Request::GetLogCursor => {
-            if let Err(r) = enforce_control_acl(acl, "control:get_log_cursor", true) {
-                return r;
-            }
-            match pool {
-                Some(p) => match crate::state::log_events::cursor(p).await {
-                    Ok(id) => Response::GetLogCursorOk { id: id as u64 },
-                    Err(e) => Response::Error {
-                        code: ErrorCode::Internal,
-                        message: format!("log_events cursor: {e}"),
-                    },
-                },
-                None => Response::GetLogCursorOk { id: 0 },
-            }
-        }
-        Request::Proxy { method, path, body } => {
-            handle_proxy(config, acl, &method, &path, body).await
-        }
-        Request::Shutdown => unreachable!("handled in run()"),
+    }
+
+    async fn proxy(
+        self,
+        _ctx: tarpc::context::Context,
+        method: String,
+        path: String,
+        body: Option<String>,
+    ) -> Result<ProxyReply, WireError> {
+        handle_proxy(&self.config, &self.acl, &method, &path, body).await
     }
 }
 
-// Err carries a ready-to-send Response (>128 bytes); fine for a
-// per-request cold path, not worth boxing at every call site.
-#[allow(clippy::result_large_err)]
 fn enforce_control_acl(
     acl: &AllowedClient,
     op: &'static str,
     allow_legacy_control: bool,
-) -> Result<(), Response> {
+) -> Result<(), WireError> {
     if acl.operations.iter().any(|configured| configured == op)
         || (allow_legacy_control
             && acl
@@ -166,20 +147,19 @@ fn enforce_control_acl(
     {
         return Ok(());
     }
-    Err(Response::Error {
-        code: ErrorCode::Unauthorized,
-        message: format!(
+    Err(WireError::new(
+        ErrorCode::Unauthorized,
+        format!(
             "identity {:?} is not allowed for control operation {op:?}",
             acl.identity
         ),
-    })
+    ))
 }
 
 /// Reject `dataset` if the ACL has a `root_fs` set and `dataset` is not
 /// equal to or a descendant of it. No root_fs configured means no
 /// restriction.
-#[allow(clippy::result_large_err)] // Err is a ready-to-send Response; cold path.
-fn enforce_root_fs<'a>(acl: &'a AllowedClient, dataset: &'a str) -> Result<(), Response> {
+fn enforce_root_fs<'a>(acl: &'a AllowedClient, dataset: &'a str) -> Result<(), WireError> {
     let Some(root) = acl.root_fs.as_deref() else {
         return Ok(());
     };
@@ -190,57 +170,35 @@ fn enforce_root_fs<'a>(acl: &'a AllowedClient, dataset: &'a str) -> Result<(), R
     if dataset.starts_with(&prefix) {
         return Ok(());
     }
-    Err(Response::Error {
-        code: ErrorCode::Unauthorized,
-        message: format!("{dataset:?} is not under allowed root_fs {root:?}"),
-    })
-}
-
-/// Lean variant for the planner: returns only the receiver GUIDs (plus
-/// the resume token), so the response stays small for datasets with many
-/// thousands of snapshots. The planner intersects on GUID alone.
-async fn handle_list_receiver_guids(
-    runner: &dyn CommandRunner,
-    acl: &AllowedClient,
-    dataset: &str,
-    prefix_regex: Option<&str>,
-) -> Response {
-    match collect_receiver_snapshots(runner, acl, dataset, prefix_regex).await {
-        Ok((snapshots, receive_resume_token)) => Response::ListReceiverGuidsOk {
-            guids: snapshots.into_iter().map(|s| s.guid).collect(),
-            receive_resume_token,
-        },
-        Err(r) => r,
-    }
+    Err(WireError::new(
+        ErrorCode::Unauthorized,
+        format!("{dataset:?} is not under allowed root_fs {root:?}"),
+    ))
 }
 
 /// Shared core for the snapshot-inventory requests. Validates the
 /// dataset, enforces `root_fs`, lists matching snapshots and reads the
 /// receive resume token. A missing dataset (first replication) is the
-/// non-error empty case. Returns the entries + token on success, or a
-/// ready-to-send `Response::Error` on failure.
+/// non-error empty case.
 async fn collect_receiver_snapshots(
     runner: &dyn CommandRunner,
     acl: &AllowedClient,
     dataset: &str,
     prefix_regex: Option<&str>,
-) -> Result<(Vec<SnapshotEntry>, Option<String>), Response> {
-    if let Err(e) = validate_dataset_name(dataset) {
-        return Err(Response::Error {
-            code: ErrorCode::BadRequest,
-            message: format!("invalid dataset {dataset:?}: {e}"),
-        });
-    }
+) -> Result<(Vec<SnapshotEntry>, Option<String>), WireError> {
+    validate_dataset_name(dataset).map_err(|e| {
+        WireError::new(
+            ErrorCode::BadRequest,
+            format!("invalid dataset {dataset:?}: {e}"),
+        )
+    })?;
     enforce_root_fs(acl, dataset)?;
-    let regex = match compile_prefix_regex(prefix_regex) {
-        Ok(opt) => opt,
-        Err(e) => {
-            return Err(Response::Error {
-                code: ErrorCode::BadRequest,
-                message: format!("compile prefix_regex {:?}: {e}", prefix_regex.unwrap_or("")),
-            });
-        }
-    };
+    let regex = compile_prefix_regex(prefix_regex).map_err(|e| {
+        WireError::new(
+            ErrorCode::BadRequest,
+            format!("compile prefix_regex {:?}: {e}", prefix_regex.unwrap_or("")),
+        )
+    })?;
     let opts = ListOptions {
         recursive: false,
         types: vec![DatasetType::Snapshot],
@@ -253,10 +211,10 @@ async fn collect_receiver_snapshots(
         // First-replication shape: receiver dataset doesn't exist yet.
         Err(ZfsError::DatasetNotFound { .. }) => return Ok((vec![], None)),
         Err(e) => {
-            return Err(Response::Error {
-                code: zfs_error_code(&e),
-                message: format!("list {dataset}: {e}"),
-            });
+            return Err(WireError::new(
+                zfs_error_code(&e),
+                format!("list {dataset}: {e}"),
+            ));
         }
     };
     let snapshots: Vec<SnapshotEntry> = entries
@@ -291,29 +249,6 @@ async fn collect_receiver_snapshots(
     Ok((snapshots, receive_resume_token))
 }
 
-async fn handle_discard_partial_recv(
-    runner: &dyn CommandRunner,
-    acl: &AllowedClient,
-    dataset: &str,
-) -> Response {
-    if let Err(e) = validate_dataset_name(dataset) {
-        return Response::Error {
-            code: ErrorCode::BadRequest,
-            message: format!("invalid dataset {dataset:?}: {e}"),
-        };
-    }
-    if let Err(r) = enforce_root_fs(acl, dataset) {
-        return r;
-    }
-    match palimpsest::recv::abort_partial(runner, dataset).await {
-        Ok(()) => Response::DiscardPartialRecvOk,
-        Err(e) => Response::Error {
-            code: zfs_error_code(&e),
-            message: format!("abort_partial {dataset}: {e}"),
-        },
-    }
-}
-
 fn zfs_error_code(e: &ZfsError) -> ErrorCode {
     match e {
         ZfsError::DatasetNotFound { .. } => ErrorCode::NotFound,
@@ -332,27 +267,23 @@ async fn handle_proxy(
     method: &str,
     path: &str,
     body: Option<String>,
-) -> Response {
-    let read_only = method == "GET";
-    let gate = if read_only {
-        enforce_control_acl(acl, "control:proxy_read", true)
+) -> Result<ProxyReply, WireError> {
+    if method == "GET" {
+        enforce_control_acl(acl, "control:proxy_read", true)?;
     } else if method == "POST" || method == "DELETE" {
-        enforce_control_acl(acl, "control:proxy_admin", false)
+        enforce_control_acl(acl, "control:proxy_admin", false)?;
     } else {
-        return Response::Error {
-            code: ErrorCode::BadRequest,
-            message: format!("unsupported proxy method {method:?}"),
-        };
-    };
-    if let Err(r) = gate {
-        return r;
+        return Err(WireError::new(
+            ErrorCode::BadRequest,
+            format!("unsupported proxy method {method:?}"),
+        ));
     }
     // Absolute API paths only — no scheme/host smuggling, no traversal.
     if !path.starts_with("/api/v1/") || path.contains("..") {
-        return Response::Error {
-            code: ErrorCode::BadRequest,
-            message: format!("proxy path must be under /api/v1/: {path:?}"),
-        };
+        return Err(WireError::new(
+            ErrorCode::BadRequest,
+            format!("proxy path must be under /api/v1/: {path:?}"),
+        ));
     }
     match arctern_client::raw(
         &daemon_socket(config),
@@ -362,17 +293,17 @@ async fn handle_proxy(
     )
     .await
     {
-        Ok((status, bytes)) => Response::ProxyOk {
+        Ok((status, bytes)) => Ok(ProxyReply {
             status,
             body: String::from_utf8_lossy(&bytes).into_owned(),
-        },
-        Err(e) => Response::Error {
-            code: ErrorCode::Internal,
-            message: format!(
+        }),
+        Err(e) => Err(WireError::new(
+            ErrorCode::Internal,
+            format!(
                 "local daemon unreachable at {}: {e}",
                 daemon_socket(config).display()
             ),
-        },
+        )),
     }
 }
 
@@ -389,7 +320,7 @@ fn daemon_socket(config: &Config) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arctern_transport::{read_response, write_request};
+    use arctern_transport::ArcternControlClient;
     use palimpsest::runner::{Cmd, RecordingRunner};
     use std::sync::Arc;
 
@@ -417,27 +348,22 @@ mod tests {
         })
     }
 
-    /// One end-to-end roundtrip per request kind, using duplex pipes
-    /// for the framed transport and a RecordingRunner for ZFS.
-    async fn rpc(runner: Arc<dyn CommandRunner>, acl: AllowedClient, req: Request) -> Response {
+    /// End-to-end tarpc roundtrip over duplex pipes with a
+    /// RecordingRunner for ZFS. Dropping the returned client ends the
+    /// server loop via transport EOF.
+    fn client(runner: Arc<dyn CommandRunner>, acl: AllowedClient) -> ArcternControlClient {
         let (a, b) = tokio::io::duplex(64 * 1024);
         let (areader, awriter) = tokio::io::split(a);
-        let (mut breader, mut bwriter) = tokio::io::split(b);
-        let server =
-            tokio::spawn(async move { run(runner, cfg(), acl, None, areader, awriter).await });
-        let frame = RequestFrame { id: 1, body: req };
-        write_request(&mut bwriter, &frame).await.unwrap();
-        // Send Shutdown to make the server exit cleanly after the reply.
-        let frame = RequestFrame {
-            id: 2,
-            body: Request::Shutdown,
-        };
-        write_request(&mut bwriter, &frame).await.unwrap();
-        let resp = read_response(&mut breader).await.unwrap();
-        // Drain the Shutdown reply so the server can exit.
-        let _ = read_response(&mut breader).await;
-        let _ = server.await.unwrap();
-        resp.body
+        tokio::spawn(run(runner, cfg(), acl, None, areader, awriter));
+        ArcternControlClient::new(
+            tarpc::client::Config::default(),
+            arctern_transport::transport(b),
+        )
+        .spawn()
+    }
+
+    fn ctx() -> tarpc::context::Context {
+        tarpc::context::current()
     }
 
     #[tokio::test]
@@ -457,86 +383,61 @@ mod tests {
             b"cannot open 'tank/missing': dataset does not exist".to_vec(),
             1,
         ));
-        let r = rpc(
-            runner,
-            acl(None),
-            Request::ListReceiverGuids {
-                dataset: "tank/missing".into(),
-                prefix_regex: None,
-            },
-        )
-        .await;
-        match r {
-            Response::ListReceiverGuidsOk {
-                guids,
-                receive_resume_token,
-            } => {
-                assert!(guids.is_empty());
-                assert_eq!(receive_resume_token, None);
-            }
-            other => panic!("unexpected response {other:?}"),
-        }
+        let c = client(runner, acl(None));
+        let r = c
+            .list_receiver_guids(ctx(), "tank/missing".into(), None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(r.guids.is_empty());
+        assert_eq!(r.receive_resume_token, None);
     }
 
     #[tokio::test]
     async fn list_receiver_guids_enforces_root_fs() {
-        let runner = Arc::new(RecordingRunner::new());
-        let r = rpc(
-            runner,
+        let c = client(
+            Arc::new(RecordingRunner::new()),
             acl(Some("tank/backups/laptop")),
-            Request::ListReceiverGuids {
-                dataset: "tank/other".into(),
-                prefix_regex: None,
-            },
-        )
-        .await;
-        match r {
-            Response::Error { code, .. } => assert_eq!(code, ErrorCode::Unauthorized),
-            other => panic!("expected Error, got {other:?}"),
-        }
+        );
+        let e = c
+            .list_receiver_guids(ctx(), "tank/other".into(), None)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::Unauthorized);
     }
 
     #[tokio::test]
     async fn discard_partial_recv_rejects_invalid_dataset_name() {
-        let runner = Arc::new(RecordingRunner::new());
-        let r = rpc(
-            runner,
+        let c = client(
+            Arc::new(RecordingRunner::new()),
             acl_with_ops(
                 Some("tank/backups/laptop"),
                 &["control", "control:discard_partial_recv", "recv"],
             ),
-            Request::DiscardPartialRecv {
-                dataset: "tank/backups/laptop#bookmark".into(),
-            },
-        )
-        .await;
-        match r {
-            Response::Error { code, message } => {
-                assert_eq!(code, ErrorCode::BadRequest);
-                assert!(message.contains("invalid dataset"));
-            }
-            other => panic!("expected Error, got {other:?}"),
-        }
+        );
+        let e = c
+            .discard_partial_recv(ctx(), "tank/backups/laptop#bookmark".into())
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::BadRequest);
+        assert!(e.message.contains("invalid dataset"));
     }
 
     #[tokio::test]
     async fn discard_partial_recv_requires_fine_grained_acl() {
-        let runner = Arc::new(RecordingRunner::new());
-        let r = rpc(
-            runner,
+        let c = client(
+            Arc::new(RecordingRunner::new()),
             acl(Some("tank/backups/laptop")),
-            Request::DiscardPartialRecv {
-                dataset: "tank/backups/laptop".into(),
-            },
-        )
-        .await;
-        match r {
-            Response::Error { code, message } => {
-                assert_eq!(code, ErrorCode::Unauthorized);
-                assert!(message.contains("control:discard_partial_recv"));
-            }
-            other => panic!("expected Error, got {other:?}"),
-        }
+        );
+        let e = c
+            .discard_partial_recv(ctx(), "tank/backups/laptop".into())
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::Unauthorized);
+        assert!(e.message.contains("control:discard_partial_recv"));
     }
 
     #[tokio::test]
@@ -556,80 +457,63 @@ mod tests {
             b"cannot open 'tank/backups/laptop': dataset does not exist".to_vec(),
             1,
         ));
-        let r = rpc(
-            runner,
-            acl(Some("tank/backups/laptop")),
-            Request::ListReceiverGuids {
-                dataset: "tank/backups/laptop".into(),
-                prefix_regex: None,
-            },
-        )
-        .await;
-        assert!(
-            matches!(r, Response::ListReceiverGuidsOk { .. }),
-            "got {r:?}"
-        );
+        let c = client(runner, acl(Some("tank/backups/laptop")));
+        let r = c
+            .list_receiver_guids(ctx(), "tank/backups/laptop".into(), None)
+            .await
+            .unwrap();
+        assert!(r.is_ok(), "got {r:?}");
     }
 
     #[tokio::test]
     async fn list_receiver_guids_rejects_invalid_dataset_name() {
-        let runner = Arc::new(RecordingRunner::new());
-        let r = rpc(
-            runner,
+        let c = client(
+            Arc::new(RecordingRunner::new()),
             acl(Some("tank/backups/laptop")),
-            Request::ListReceiverGuids {
-                dataset: "tank/backups/laptop/../escape".into(),
-                prefix_regex: None,
-            },
-        )
-        .await;
-        match r {
-            Response::Error { code, .. } => assert_eq!(code, ErrorCode::BadRequest),
-            other => panic!("expected Error, got {other:?}"),
-        }
+        );
+        let e = c
+            .list_receiver_guids(ctx(), "tank/backups/laptop/../escape".into(), None)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::BadRequest);
+    }
+
+    #[tokio::test]
+    async fn log_cursor_is_zero_without_sqlite() {
+        let c = client(Arc::new(RecordingRunner::new()), acl(None));
+        assert_eq!(c.log_cursor(ctx()).await.unwrap(), 0);
     }
 
     #[tokio::test]
     async fn proxy_get_errors_honestly_when_local_daemon_unreachable() {
-        let runner = Arc::new(RecordingRunner::new());
-        let r = rpc(
-            runner,
-            acl(None),
-            Request::Proxy {
-                method: "GET".into(),
-                path: "/api/v1/jobs".into(),
-                body: None,
-            },
-        )
-        .await;
-        match r {
-            Response::Error { code, message } => {
-                assert_eq!(code, ErrorCode::Internal);
-                assert!(
-                    message.contains("local daemon unreachable"),
-                    "got: {message}"
-                );
-            }
-            other => panic!("expected Error, got {other:?}"),
-        }
+        let c = client(Arc::new(RecordingRunner::new()), acl(None));
+        let e = c
+            .proxy(ctx(), "GET".into(), "/api/v1/jobs".into(), None)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::Internal);
+        assert!(
+            e.message.contains("local daemon unreachable"),
+            "got: {}",
+            e.message
+        );
     }
 
     #[tokio::test]
     async fn proxy_post_requires_proxy_admin() {
-        let runner = Arc::new(RecordingRunner::new());
-        let r = rpc(
-            runner,
-            acl(None),
-            Request::Proxy {
-                method: "POST".into(),
-                path: "/api/v1/jobs/databak/wakeup".into(),
-                body: None,
-            },
-        )
-        .await;
-        match r {
-            Response::Error { code, .. } => assert_eq!(code, ErrorCode::Unauthorized),
-            other => panic!("expected Error, got {other:?}"),
-        }
+        let c = client(Arc::new(RecordingRunner::new()), acl(None));
+        let e = c
+            .proxy(
+                ctx(),
+                "POST".into(),
+                "/api/v1/jobs/databak/wakeup".into(),
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::Unauthorized);
     }
 }

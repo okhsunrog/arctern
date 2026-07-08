@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use arctern_transport::{
-    ErrorCode, RecvHeader, Request, RequestFrame, Response, SendFlagsWire, SendHeader, SendKind,
-    SnapshotRef, read_response, write_header, write_request,
+    ArcternControlClient, ErrorCode, RecvHeader, Response, SendFlagsWire, SendHeader, SendKind,
+    SnapshotRef, read_response, tarpc, write_header,
 };
 use openssh::{KnownHosts, Session, SessionBuilder, Stdio};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -467,56 +467,39 @@ root_fs = {receiver_root:?}
         .spawn()
         .await
         .expect("spawn forced-command control channel");
-    let mut stdin = child.stdin().take().expect("control stdin");
-    let mut stdout = child.stdout().take().expect("control stdout");
+    let stdin = child.stdin().take().expect("control stdin");
+    let stdout = child.stdout().take().expect("control stdout");
     let mut stderr = child.stderr().take().expect("control stderr");
 
-    eprintln!("openssh test: sending GetLogCursor");
-    write_request(
-        &mut stdin,
-        &RequestFrame {
-            id: 1,
-            body: Request::GetLogCursor,
-        },
+    eprintln!("openssh test: calling log_cursor");
+    let client = ArcternControlClient::new(
+        tarpc::client::Config::default(),
+        arctern_transport::transport(tokio::io::join(stdout, stdin)),
+    )
+    .spawn();
+    let cursor = timeout(
+        Duration::from_secs(10),
+        client.log_cursor(tarpc::context::current()),
     )
     .await
-    .expect("write GetLogCursor request");
-
-    let response_frame = timeout(Duration::from_secs(10), read_response(&mut stdout))
-        .await
-        .expect("timed out waiting for GetLogCursor response");
-    if let Err(e) = &response_frame {
+    .expect("timed out waiting for log_cursor response");
+    if let Err(e) = &cursor {
         let mut stderr_text = String::new();
         let _ = timeout(
             Duration::from_secs(2),
             stderr.read_to_string(&mut stderr_text),
         )
         .await;
-        panic!("read GetLogCursor response: {e}; stderr:\n{stderr_text}");
+        panic!("log_cursor rpc: {e}; stderr:\n{stderr_text}");
     }
-    eprintln!("openssh test: got GetLogCursor response");
-    let response = response_frame.expect("checked response frame").body;
-    match response {
-        Response::GetLogCursorOk { .. } => {}
-        other => panic!("unexpected response: {other:?}"),
-    }
+    eprintln!(
+        "openssh test: got log_cursor response: {}",
+        cursor.expect("checked cursor")
+    );
 
-    eprintln!("openssh test: sending Shutdown");
-    write_request(
-        &mut stdin,
-        &RequestFrame {
-            id: 2,
-            body: Request::Shutdown,
-        },
-    )
-    .await
-    .expect("write Shutdown request");
-    let _ = timeout(Duration::from_secs(10), read_response(&mut stdout))
-        .await
-        .expect("timed out waiting for Shutdown response")
-        .expect("read Shutdown response");
-    stdin.shutdown().await.expect("shutdown control stdin");
-
+    // Dropping the client closes the transport (stdin EOF on the
+    // remote); the control channel must exit cleanly on its own.
+    drop(client);
     let _ = timeout(Duration::from_secs(10), child.wait())
         .await
         .expect("timed out waiting for control channel exit");

@@ -1,11 +1,11 @@
 //! Peer-aware handlers. `GET /api/v1/peers` enumerates configured peers
-//! with their current reachability; the rest proxy a Request over the
-//! peer's control channel and translate the typed Response to HTTP.
+//! with their current reachability; the rest call the peer's control
+//! channel RPCs and translate the typed replies to HTTP.
 
 use std::sync::Arc;
 
 use arctern_api::{ApiErrorBody, LogEvent, PeerReachability, PeerRoute, PeerSummary};
-use arctern_transport::{ErrorCode, Request, Response};
+use arctern_transport::{ErrorCode, ProxyReply};
 use axum::{
     Json,
     extract::{Path, State},
@@ -188,12 +188,8 @@ pub async fn proxy_any(
         Ok(l) => l,
         Err(e) => return e.into_response(),
     };
-    let resp = match link.rpc(Request::Proxy { method, path, body }).await {
-        Ok(r) => r,
-        Err(e) => return rpc_error_to_http(format!("{e}")).into_response(),
-    };
-    match resp {
-        Response::ProxyOk { status, body } => {
+    match link.proxy(method, path, body).await {
+        Ok(ProxyReply { status, body }) => {
             let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
             (
                 code,
@@ -202,12 +198,10 @@ pub async fn proxy_any(
             )
                 .into_response()
         }
-        Response::Error { code, message } => map_response_error(code, message).into_response(),
-        other => map_response_error(
-            ErrorCode::Internal,
-            format!("unexpected response: {other:?}"),
-        )
-        .into_response(),
+        Err(crate::peer::RpcError::Server(e)) => {
+            map_response_error(e.code, e.message).into_response()
+        }
+        Err(e) => rpc_error_to_http(format!("{e}")).into_response(),
     }
 }
 
@@ -252,16 +246,10 @@ pub async fn stream_peer_events(
     // Pull a JSON tail through the generic proxy so each fresh page
     // gets context, then dedup live frames by id.
     let backlog: Vec<LogEvent> = match link
-        .rpc(Request::Proxy {
-            method: "GET".into(),
-            path: "/api/v1/events/recent?limit=100".into(),
-            body: None,
-        })
+        .proxy("GET".into(), "/api/v1/events/recent?limit=100".into(), None)
         .await
     {
-        Ok(Response::ProxyOk { status: 200, body }) => {
-            serde_json::from_str(&body).unwrap_or_default()
-        }
+        Ok(ProxyReply { status: 200, body }) => serde_json::from_str(&body).unwrap_or_default(),
         _ => Vec::new(),
     };
     let last_backlog_id = backlog.last().map(|e| e.id).unwrap_or(0);

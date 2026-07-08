@@ -12,13 +12,24 @@ later doesn't need re-explanation.
 
 ## What's already shipped (for context)
 
-- Snap jobs (zrepl-compatible prefix tags, grid retention).
-- Push replication over SSH (full + incremental, resume tokens, hold
-  + cursor bookmark choreography).
-- Local loopback admin UI (Vue 3 + Nuxt UI v4) with: Dashboard, Jobs
-  (with per-cycle duration + bytes charts), Snapshots (with destroy
-  confirm), Peers, Events (SSE live tail), Config (read-only display).
-- SQLite persistence for `job_runs` + `log_events`.
+- Snap + prune jobs (zrepl-compatible prefix tags, grid retention).
+- Push replication over SSH: full + incremental, resume tokens,
+  bookmark fallback, hold + cursor bookmark choreography, multi-target
+  jobs, peer routes with auto re-ranking, event-driven scheduling,
+  `parallel = N` sends under a shared `bandwidth_limit`.
+- tarpc control channel + dedicated NDJSON events channel; receiver
+  transfer accounting (`recv_transfers` + the Incoming panel).
+- Host-scoped console: every view works for peers via the generic
+  control-channel proxy (`/h/{host}/...`), gated by
+  `control:proxy_admin` for mutations.
+- Local loopback admin UI (Vue 3 + Nuxt UI v4): Dashboard (capacity,
+  ARC gauge, job cards), Jobs (multi-slot transfer progress),
+  Snapshots (dataset tree with sizes, holds, destroy confirm), Pools
+  (vdev tree, scrub control), ARC charts, Events (SSE live tail,
+  structured fields), Peer links (routes + health), Config.
+- SQLite persistence: `job_runs`, `log_events`, `push_syncs`,
+  `recv_transfers`, `arcstats_history`.
+- CSRF guard (`Sec-Fetch-Site`) on mutating endpoints.
 - `zfs allow`-friendly: daemon runs unprivileged with delegated
   permissions; no CAP_SYS_ADMIN unless mounting is required.
 
@@ -26,7 +37,10 @@ later doesn't need re-explanation.
 
 ## Now — the next slice
 
-### 1. CSRF guard for mutating endpoints
+Items 1–5 below shipped (kept for the record with a DONE marker);
+the live edge starts at #6.
+
+### 1. CSRF guard for mutating endpoints — DONE
 
 Loopback is a perimeter against off-host attackers, not against a
 malicious local browser tab issuing a cross-origin POST. Cheap to fix,
@@ -39,7 +53,7 @@ annoying to retrofit:
   `X-Arctern-Cli: 1`).
 - Tests: 403 on cross-origin POST, 204 on same-origin POST.
 
-### 2. Pool overview + scrub control
+### 2. Pool overview + scrub control — DONE
 
 The first ZFS-console slice — replaces the current admin UI's "yeah,
 it has replication" framing with "here's your pool's health, here's
@@ -67,7 +81,7 @@ its scrub state, click to start one."
   faulted), capacity ring, Scrub button + live progress bar when
   active, recent scrub history (date + duration + errors).
 
-### 3. ARC stats — `palimpsest::system` module
+### 3. ARC stats — `palimpsest::system` module — DONE
 
 ARC stats live in `/proc/spl/kstat/zfs/arcstats`, not in `zfs(8)`. This
 breaks palimpsest's "CLI-only" rule by design — add a new sibling
@@ -101,14 +115,14 @@ FFI and not a CLI" amendment.
 
 ## Next — the next slice after that
 
-### 4. Per-vdev error counters + tree view
+### 4. Per-vdev error counters + tree view — DONE
 
 Already comes back from `zpool status -j`. Render as a collapsible
 tree with red badges on degraded vdevs. Operators look at this at
 3am with one eye open; the visual hierarchy matters more than the
 data density.
 
-### 5. Hold inspection on snapshots
+### 5. Hold inspection on snapshots — DONE
 
 palimpsest already has `hold::holds(snapshot)`. Wire it through:
 
@@ -177,11 +191,11 @@ provide altroot, click import. Useful for disaster recovery; the
 palimpsest primitives already exist from the archinstall_zfs
 side of the project.
 
-### 14. Real `bytes_sent` from push jobs
+### 14. Real `bytes_sent` from push jobs — DONE
 
-Already flagged. Surface the send-stream size from `SendStream`
-stats into `job_runs.bytes_sent`. The bar chart on JobDetail
-becomes meaningful.
+The push copy loop counts bytes per transfer slot; cycle totals land
+in `job_runs.bytes_sent` and the receiver records its own view in
+`recv_transfers`.
 
 ### 15. Dataset CRUD with strong confirms
 

@@ -1,14 +1,15 @@
-# arctern: architecture pivot
+# arctern: architecture
 
-This document supersedes the QUIC-based design in `.specify/memory/constitution.md` and the slice docs under `specs/`. Read it end-to-end before changing code.
+The durable design: transport, protocol, ACL model, scheduling, state storage.
+Read it end-to-end before changing code. (This document started life as the
+QUIC→SSH pivot plan; the pivot is complete and everything below describes the
+tree as built.)
 
-## What changes
-
-The QUIC transport, the dual HTTP/2-and-HTTP/3 axum router, the self-signed TLS identity, and the accept-any verifier are all gone. Replication runs over SSH using a multi-channel stdinserver pattern. Each daemon serves its own UI on loopback HTTP. The active daemon proxies a subset of API endpoints to its peer over a persistent SSH control channel, so the user gets a single dashboard that sees both hosts without the passive host exposing a network listener.
-
-The push direction stays the same: the laptop has the data, the home server stores backups, the laptop is the active sender, the home server is the passive receiver. Everything else about replication semantics — GUID-based common-snapshot detection, resume token logic, `discard_partial_recv` + `recv -A`, send flags, retention rules — is preserved.
-
-The spec-kit workflow is dropped. `.specify/` and `specs/` are deleted. Comments referencing slice numbers (D6, T002, etc.) are removed opportunistically as files are touched.
+The push direction is fixed: the laptop has the data, the home server stores
+backups, the laptop is the active sender, the home server is the passive
+receiver. Replication semantics — GUID-based common-snapshot detection, resume
+token logic, `discard_partial_recv` + `recv -A`, send flags, retention rules —
+are shared with zrepl in spirit, not in wire format.
 
 ## Topology
 
@@ -17,14 +18,14 @@ The spec-kit workflow is dropped. `.specify/` and `specs/` are deleted. Comments
                         │              Laptop             │
                         │                                 │
               browser ──┼──→ axum on 127.0.0.1:7878       │
-                        │     │                            │
+                        │     │                           │
                         │     │ /api/v1/...   (local)     │
-                        │     │ /api/v1/peers/home/...    │
+                        │     │ /api/v1/peers/mira/...    │
                         │     │   (proxied over SSH)      │
-                        │     ↓                            │
+                        │     ↓                           │
                         │   arctern daemon                │
                         │     ├─ scheduler (snap, push)   │
-                        │     ├─ PeerLink to home server  │
+                        │     ├─ PeerLink per [[peers]]   │
                         │     ├─ SQLite at state.db       │
                         │     └─ openssh::Session         │
                         └─────────────┬───────────────────┘
@@ -38,32 +39,48 @@ The spec-kit workflow is dropped. `.specify/` and `specs/` are deleted. Comments
                         │   sshd                          │
                         │     │ ForcedCommand on          │
                         │     │ authorized_keys           │
-                        │     ↓                            │
+                        │     ↓                           │
                         │   arctern stdinserver-dispatch  │
                         │     ├─ control channel (long)   │
-                        │     ├─ recv channel (per send)  │
-                        │     └─ ... (parallel)           │
+                        │     ├─ recv channels (parallel) │
+                        │     └─ events channel (stream)  │
                         │                                 │
                         │   arctern daemon (optional)     │
-                        │     for own snap-jobs and       │
-                        │     own UI on 127.0.0.1:7878    │
+                        │     own snap/prune jobs, own    │
+                        │     loopback UI, proxy target   │
                         └─────────────────────────────────┘
 ```
 
-The home server runs sshd, the arctern binary in PATH, and an `authorized_keys` entry with `ForcedCommand`. That alone is enough for replication and for the laptop's UI to view/manage server state. The home server's own `arctern daemon` is optional — only needed if you want the home server to run its own snap-jobs and serve its own loopback UI for local browsing.
+The home server runs sshd, the arctern binary in PATH, and an
+`authorized_keys` entry with `ForcedCommand`. That alone is enough for
+replication. Its own `arctern daemon` is optional — run it for local snap and
+prune jobs, and to make the host manageable through the sender's console (the
+control channel's `proxy` RPC forwards into the receiver daemon's local API
+over its UNIX socket).
 
 ## Transport: SSH with multiple channels
 
-Use the `openssh` crate. Not `russh`. The system `ssh(1)` brings `~/.ssh/config`, agent, hardware tokens, ProxyJump, and ControlMaster — none of which we want to reimplement.
+Use the `openssh` crate. Not `russh`. The system `ssh(1)` brings
+`~/.ssh/config`, agent, hardware tokens, ProxyJump, and ControlMaster — none
+of which we want to reimplement.
 
-The laptop's daemon holds one `openssh::Session` per peer. ControlMaster keeps the underlying TCP and crypto state alive across all channels in that session. Channels are opened on demand via `session.command(...)`. Each channel maps to one `arctern stdinserver-dispatch` process on the home server, spawned by sshd, with a role determined by `SSH_ORIGINAL_COMMAND`.
+The sender's daemon holds one `openssh::Session` per peer. ControlMaster keeps
+the underlying TCP and crypto state alive across all channels in that session.
+Channels are opened on demand via `session.command(...)`. Each channel maps to
+one `arctern stdinserver-dispatch` process on the receiver, spawned by sshd,
+with a role determined by `SSH_ORIGINAL_COMMAND`.
 
 Channel kinds:
 
-- **`control`** — long-lived, one per session. Carries framed RPC requests and responses. Used for LIST, status queries, snapshot inventory, destroy operations, anything not bulk. The laptop's daemon opens this when establishing the peer link and reuses it indefinitely.
-- **`recv`** — short-lived, one per replication step. Spawned for the duration of a single `zfs send → zfs recv` pipe. Closed after the recv completes (success or failure).
-
-Multiple `recv` channels can be open concurrently for parallel replication of different filesystems, alongside the control channel which keeps serving UI queries during transfers. SSH multiplexes them transparently over the one TCP connection.
+- **`control`** — long-lived, one per session. Carries tarpc RPC (see below).
+  Opened when the peer link is established, reused indefinitely.
+- **`recv`** — short-lived, one per replication step. Spawned for the duration
+  of a single `zfs send → zfs recv` pipe. Closed after the recv completes
+  (success or failure). A push job with `parallel = N` keeps up to N of these
+  open concurrently, alongside the control channel which keeps serving UI
+  queries during transfers.
+- **`events`** — long-lived, one-way. Streams the receiver host's structured
+  event log as NDJSON lines; the sender fans it out to its SSE subscribers.
 
 ### authorized_keys entry
 
@@ -71,15 +88,35 @@ Multiple `recv` channels can be open concurrently for parallel replication of di
 command="/usr/local/bin/arctern stdinserver-dispatch laptop_nova",restrict ssh-ed25519 AAAA...laptop-key
 ```
 
-The identity name (`laptop_nova`) is hardcoded per key. OpenSSH's `command=` directive does not have a portable substitution for the authenticating key's fingerprint — `%k` only exists in `AuthorizedKeysCommand` (server-side dynamic auth), not in `authorized_keys`. Valid substitutions in `command=` are `%h` (home), `%u` (user), `%i` (key id from `authorized_keys` options), and `%%`.
+The identity name (`laptop_nova`) is hardcoded per key. OpenSSH's `command=`
+directive does not have a portable substitution for the authenticating key's
+fingerprint — `%k` only exists in `AuthorizedKeysCommand` (server-side dynamic
+auth), not in `authorized_keys`. Valid substitutions in `command=` are `%h`
+(home), `%u` (user), `%i` (key id from `authorized_keys` options), and `%%`.
 
-`restrict` (OpenSSH ≥ 7.2) disables every channel feature except command exec. The full requested command is in `SSH_ORIGINAL_COMMAND`. The matched `authorized_keys` line is exposed via `SSH_AUTH_INFO_0` (OpenSSH ≥ 7.4) for an optional defense-in-depth fingerprint pin — see ACL config below.
+`restrict` (OpenSSH ≥ 7.2) disables every channel feature except command exec.
+The full requested command is in `SSH_ORIGINAL_COMMAND`. The matched
+`authorized_keys` line is exposed via `SSH_AUTH_INFO_0` (OpenSSH ≥ 7.4) for an
+optional defense-in-depth fingerprint pin — see ACL config below. (Pinning
+requires `ExposeAuthInfo yes` in sshd_config; the default is no.)
 
-`stdinserver-dispatch` reads `SSH_ORIGINAL_COMMAND`, parses `arctern stdinserver <job> <op> [args...]`, validates that the identity is allowed for the requested `(job, op)` pair via arctern config, then exec's into the appropriate handler.
+`stdinserver-dispatch` reads `SSH_ORIGINAL_COMMAND`, parses
+`arctern stdinserver <job> <op>`, validates the identity/job/op against the
+`[[allowed_clients]]` ACL (plus the optional fingerprint pin), and runs the
+matching handler: `control` (job-unscoped — one channel serves every job),
+`recv` (job-scoped), or `events` (read-only, implicitly granted with the
+`control` scope). The dispatch process opens the same SQLite as the daemon, so
+its tracing events land in the shared host event log.
 
 ### Wire protocol on a control channel
 
-The control channel is a tarpc RPC service (`ArcternControl` in `crates/transport/src/control.rs`) over `tokio_util::codec::LengthDelimitedCodec` framing with `serde_json` payloads (readable in logs; switch to `postcard` later if size matters). tarpc generates the client and the server glue and owns request-id correlation — the server processes requests concurrently (each on its own task) and emits responses in any order, so one slow query over a 10k-snapshot dataset never head-of-line blocks the UI proxy.
+The control channel is a tarpc RPC service (`ArcternControl` in
+`crates/transport/src/control.rs`) over `tokio_util::codec::LengthDelimitedCodec`
+framing with `serde_json` payloads (readable in logs; switch to `postcard`
+later if size matters). tarpc generates the client and the server glue and
+owns request-id correlation — the server processes requests concurrently (each
+on its own task) and emits responses in any order, so one slow query over a
+10k-snapshot dataset never head-of-line blocks the UI proxy.
 
 ```rust
 // crates/transport/src/control.rs
@@ -105,112 +142,150 @@ pub trait ArcternControl {
 }
 ```
 
-Events are not RPC: they ride a dedicated one-way stream channel (`stdinserver <id> events`) as newline-delimited `EventWire` JSON, bridged from the receiver daemon's SSE endpoint (or a SQLite poll on a daemon-less receiver).
+There is no shutdown RPC — transport EOF (the client dropping the channel) is
+the shutdown signal on both ends.
+
+Events are not RPC: they ride the dedicated events channel as
+newline-delimited `EventWire` JSON, bridged from the receiver daemon's SSE
+endpoint (or a SQLite poll on a daemon-less receiver).
 
 ### Wire protocol on a recv channel
 
-A recv channel writes one header frame followed by the raw `zfs send` byte stream, then half-closes. The server reads the header, spawns `zfs recv -s -u`, pipes the channel's stdin into recv's stdin, waits for the channel EOF and recv's exit, then writes a single response frame and exits.
+A recv channel writes one header frame followed by the raw `zfs send` byte
+stream, then half-closes. The server reads the header, spawns
+`zfs recv -s -u`, pipes the channel's stdin into recv's stdin, waits for the
+channel EOF and recv's exit, then writes a single response frame
+(`Response::Ok` / `Response::Error`) and exits.
 
 ```rust
 #[derive(Serialize, Deserialize)]
 pub struct RecvHeader {
     pub version: u32,
     pub target_dataset: String,
-    pub send: SendHeader,                    // existing struct, unchanged
+    pub send: SendHeader,
 }
 ```
 
-`SendHeader`, `SendKind`, `SnapshotRef`, `SendFlagsWire`, the `discard_partial_recv` flag — all preserved from the current `transport::protocol`. They get reused inside `RecvHeader` and inside `Request::ListSnapshots` responses.
+`SendHeader`, `SendKind`, `SnapshotRef`, `SendFlagsWire` and the
+`discard_partial_recv` flag live in `crates/transport/src/protocol.rs`
+alongside the length-delimited framing helpers the raw channels share.
 
-### The dispatch entry point
-
-```rust
-// daemon/src/stdinserver/dispatch.rs
-
-#[tokio::main]
-async fn main() -> ExitCode {
-    let fp = env::args().nth(1).unwrap_or_default();
-    let original = env::var("SSH_ORIGINAL_COMMAND").unwrap_or_default();
-    // SSH_ORIGINAL_COMMAND parses to: arctern stdinserver <job> <op> [args...]
-    
-    let parts: Vec<&str> = original.split_whitespace().collect();
-    let (job, op, args) = match parts.as_slice() {
-        ["arctern", "stdinserver", job, op, rest @ ..] => (job, op, rest),
-        _ => return exit_with_error("malformed SSH_ORIGINAL_COMMAND"),
-    };
-    
-    let cfg = arctern_config::load_from_path(&default_config_path())?;
-    let acl = cfg.peer_acl(job, &fp).ok_or("unauthorized")?;
-    
-    match *op {
-        "control" if acl.allows_control() => 
-            stdinserver::control::run(cfg, job).await,
-        "recv" if acl.allows_recv() => 
-            stdinserver::recv::run(cfg, job).await,
-        _ => exit_with_error("operation not permitted"),
-    }
-}
-```
-
-The control handler holds open framed stdio and serves Requests until EOF. The recv handler reads one RecvHeader, runs recv, writes one Response, exits.
+On success the recv handler also advances the last-received hold (see below)
+and records the completed transfer — byte count from the copy loop, wall time,
+sender identity — into the `recv_transfers` table plus a structured
+`recv: transfer complete` event. That is the receiver-side accounting the
+console's "Incoming" panel reads.
 
 ## Replication flow
 
-For a push job firing on the laptop:
+For a push job replicating one target peer:
 
-1. Daemon ensures the `PeerLink` to the home server is alive (open `Session` if not, send a `Ping` request on control if it is).
-2. For each filesystem in the job:
-   - `Request::ListSnapshots { dataset = target, prefix_regex }` over the control channel. Receive `Response::ListSnapshotsOk { snapshots }`.
-   - `Request::GetReceiveResumeToken { dataset = target }`. Receive token if present.
-   - List local sender snapshots via palimpsest.
-   - Compute plan via existing `pick_plan_with_token` logic.
-   - If plan is `Resume { decoded }`, validate the local-side prerequisites (the snapshots referenced by the token still exist on the sender). Adjust to fall through to `Full+discard` or `Incremental+discard` if invalid.
-   - If plan is `Nothing`, skip.
-   - Otherwise:
-     - Place a step hold on the `to` snapshot locally before sending. `palimpsest::hold::hold(runner, &full_to, "arctern_step_J_<job>_P_<peer>")`.
-     - If `discard_partial_recv`, send `Request::DiscardPartialRecv { dataset }` over control first.
-     - Open a fresh recv channel: `session.command("arctern").arg("stdinserver").arg(job).arg("recv").spawn()`.
-     - Write `RecvHeader` to the channel's stdin.
-     - Spawn `zfs send` locally, pipe its stdout into the recv channel's stdin via `tokio::io::copy`, drain stderr on a separate task, wait for both.
-     - Half-close stdin, read the recv channel's stdout for the single Response frame.
-     - On Ok: advance the cursor — create the new GUID-named cursor bookmark, destroy stale same-(job, peer) cursors, then sweep the step-hold tag from the dataset's filtered snapshots.
-     - On Error: log, leave step hold in place (so a retry can find the snapshot), record the error.
-3. After all filesystems processed, drop the recv channels (control stays open). ControlMaster keeps TCP alive.
+1. The scheduler picks the peer's live `PeerLink` from the shared peers map
+   (maintained by the reconnect task; see below). No link → the target is
+   blocked, retried on the next connectivity signal.
+2. Filesystems replicate through a bounded-concurrency pipeline (`parallel =
+   N`, default 1). For each filesystem:
+   - `list_receiver_guids(target, None)` over the control channel — receiver
+     GUIDs plus the `receive_resume_token`. Deliberately unfiltered: the
+     common base may carry a foreign prefix (zrepl history, a travelled
+     manual snapshot).
+   - List local sender snapshots (filtered) and bookmarks via palimpsest.
+   - Compute the plan via `pick_plan_with_token`: resume, full, incremental
+     from snapshot, or incremental from bookmark (the no-common-snapshot
+     fallback).
+   - If the plan wants `discard_partial_recv`, call the RPC first — it's
+     idempotent and makes the recv channel's first action a clean recv.
+   - Place step holds (the `to` snapshot, plus the `from` snapshot for
+     incrementals) BEFORE the send.
+   - Open a fresh recv channel, write `RecvHeader`, spawn `zfs send` locally,
+     and copy its stdout into the channel — through the job-wide token bucket
+     when `bandwidth_limit` is set, publishing progress into the job's
+     transfer slots as it goes.
+   - Half-close stdin, read the single response frame.
+   - On Ok: advance the cursor — create the new GUID-named cursor bookmark,
+     destroy stale same-(job, peer) cursors, then sweep the step-hold tag from
+     the dataset's filtered snapshots.
+   - On Error: log, leave step holds in place (so a retry can find the
+     snapshot), record the error.
+3. After all filesystems, record the per-peer outcome (`push_syncs`) and the
+   cycle (`job_runs`, with bytes sent). Recv channels are gone; control stays
+   open.
+
+## Scheduling
+
+Push scheduling is event-driven, not tick-based. The job sleeps until the
+earliest auto target is due (last success + the peer's `auto_interval`) and
+wakes early on:
+
+- a manual "Send now" request (per-target) or a job wakeup,
+- any peer connectivity change (the reconnect tasks bump a watch channel).
+
+A target is auto-eligible only while its ACTIVE route has `auto = true` —
+route reachability is the locality signal, so "auto at home over LAN, manual
+on the road over WireGuard" needs no network-detection config. A due-but-
+blocked target retries every 5 minutes; `interval` on the job is only an
+optional safety-net bound on the blind sleep (default 15m), not a poll rate.
 
 ## Holds and replication cursor
 
-The hold/bookmark choreography is the protection against the snap-job's prune racing the push-job's send. palimpsest exposes `hold`, `release`, `list_holds`, `list_holds_many`, `bookmark::create`, `bookmark::destroy`.
+The hold/bookmark choreography is the protection against the snap-job's prune
+racing the push-job's send. palimpsest exposes `hold`, `release`,
+`list_holds`, `list_holds_many`, `bookmark::create`, `bookmark::destroy`.
 
-Naming conventions, pinned for compatibility (peer-namespaced so a multi-target push job tracks each receiver independently):
+Naming conventions, pinned for compatibility (peer-namespaced so a
+multi-target push job tracks each receiver independently):
 
-- Step hold: `arctern_step_J_<jobname>_P_<peer>` on the `to` snapshot of an in-flight send. Placed before the send; on success the tag is swept from every filtered snapshot of the dataset (one `zfs holds` invocation via `list_holds_many`, then a release per actual holder) — this also cleans stale holds left by earlier failed cycles, which would otherwise pin their snapshots against prune forever. On failure the hold stays so a retry can find the snapshot.
-- Replication cursor bookmark: `<dataset>#arctern_cursor_G_<guid>_J_<jobname>_P_<peer>`. GUID-suffixed (zrepl's scheme): on success the new cursor is created first, then stale cursors for the same (job, peer) are destroyed — a crash in between leaves at least one cursor alive. ZFS bookmarks are GUID-anchored so the cursor survives even if the underlying snapshot is later destroyed. When the planner finds no common *snapshot* between sender and receiver (offline gap longer than the sender's retention window), it falls back to `zfs send -i <bookmark>` from any sender bookmark whose GUID the receiver still has — matching is by GUID, not name, so zrepl's `#zrepl_CURSOR_*` bookmarks qualify too (this is the zrepl migration path).
-- Last-received hold (on receiver side): `arctern_last_J_<jobname>` on the most recent successfully received snapshot. Set by stdinserver after recv exits cleanly; the tag is then swept from the dataset's other snapshots. This keeps a receiver-side prune job from destroying the last common snapshot between syncs (which would force a full resend).
+- Step hold: `arctern_step_J_<jobname>_P_<peer>` on the `to` snapshot of an
+  in-flight send. Placed before the send; on success the tag is swept from
+  every filtered snapshot of the dataset (one `zfs holds` invocation via
+  `list_holds_many`, then a release per actual holder) — this also cleans
+  stale holds left by earlier failed cycles, which would otherwise pin their
+  snapshots against prune forever. On failure the hold stays so a retry can
+  find the snapshot.
+- Replication cursor bookmark:
+  `<dataset>#arctern_cursor_G_<guid>_J_<jobname>_P_<peer>`. GUID-suffixed
+  (zrepl's scheme): on success the new cursor is created first, then stale
+  cursors for the same (job, peer) are destroyed — a crash in between leaves
+  at least one cursor alive. ZFS bookmarks are GUID-anchored so the cursor
+  survives even if the underlying snapshot is later destroyed. When the
+  planner finds no common *snapshot* between sender and receiver (offline gap
+  longer than the sender's retention window), it falls back to
+  `zfs send -i <bookmark>` from any sender bookmark whose GUID the receiver
+  still has — matching is by GUID, not name, so zrepl's `#zrepl_CURSOR_*`
+  bookmarks qualify too (this is the zrepl migration path).
+- Last-received hold (on receiver side): `arctern_last_J_<jobname>` on the
+  most recent successfully received snapshot. Set by stdinserver after recv
+  exits cleanly; the tag is then swept from the dataset's other snapshots.
+  This keeps a receiver-side prune job from destroying the last common
+  snapshot between syncs (which would force a full resend).
 
-The snap-job's pruner skips snapshots that return `ZfsError::SnapshotHeld`, so held snapshots survive prune on both sides.
+The snap-job's pruner skips snapshots that return `ZfsError::SnapshotHeld`, so
+held snapshots survive prune on both sides.
 
-## UI federation: peer-aware axum routes
+## UI federation: the host-scoped console
 
-The laptop's daemon mounts these routes:
+The guiding rule (owner's): **managing a peer must be identical to managing
+the local host** — never a parallel, lesser UI.
+
+The sender's daemon mounts, besides its local API, a generic passthrough:
 
 ```
-GET    /api/v1/jobs                                       (local)
-GET    /api/v1/jobs/{name}                                (local)
-POST   /api/v1/jobs/{name}/wakeup                         (local)
-GET    /api/v1/datasets                                   (local)
-GET    /api/v1/snapshots?dataset=...                      (local)
-GET    /api/v1/events                                     (local SSE)
-
-GET    /api/v1/peers                                      (lists configured peers + reachability)
-GET    /api/v1/peers/{peer}/jobs                          (proxied)
-GET    /api/v1/peers/{peer}/snapshots?dataset=...         (proxied)
-POST   /api/v1/peers/{peer}/snapshots/{name}/destroy      (proxied, if ACL allows)
-GET    /api/v1/peers/{peer}/events                        (proxied SSE)
+GET    /api/v1/peers                              configured peers + routes + reachability
+ANY    /api/v1/peers/{peer}/proxy/{*rest}         → the peer daemon's /api/v1/{rest}
+GET    /api/v1/peers/{peer}/events                proxied SSE (events channel + backlog)
 ```
 
-Proxied handlers go through the daemon's `PeerLink`, send a Request on the control channel, await Response, translate to the HTTP type. There's no second axum router on the home server reachable from the laptop's browser; the laptop's daemon is the single point of contact. The home server's optional own daemon serves its own loopback UI for local-on-server browsing only.
+The proxy forwards the raw (still percent-encoded) path and query over the
+control channel's `proxy` RPC; the receiver's stdinserver relays it into the
+local daemon's UNIX socket. `GET` rides the control read scope; `POST` /
+`DELETE` require the receiver to grant `control:proxy_admin` — that single ACL
+line is the switch between "sender may watch this host" and "sender may manage
+this host like its own".
 
-The browser sees one API. The daemon hides the SSH channel.
+The SPA renders every view under `/h/{host}/...` with the same components and
+composables it uses locally, just with a per-peer base URL. The sidebar's
+Hosts group switches scope; the browser talks to one endpoint (the sender's
+loopback bind) regardless of which host it is looking at.
 
 ### PeerLink shape
 
@@ -220,15 +295,8 @@ The browser sees one API. The daemon hides the SSH channel.
 pub struct PeerLink {
     name: String,
     session: Arc<openssh::Session>,
-    control: ControlClient,
-    // recv_channels are owned by individual replication tasks, not stored here
-}
-
-pub struct ControlClient {
-    tx: mpsc::Sender<(Request, oneshot::Sender<Result<Response, RpcError>>)>,
-    events: broadcast::Sender<EventWire>,
-    // background task owns the channel's stdio and demuxes Responses by request order
-    // plus pushes any Event frames into `events`.
+    control: ArcternControlClient,      // tarpc client; dispatch task owns the stdio
+    // recv channels are owned by individual replication tasks, not stored here
 }
 
 impl PeerLink {
@@ -242,164 +310,147 @@ impl PeerLink {
 }
 ```
 
-tarpc's dispatch task owns the control channel's stdio and correlates responses; the peer's event stream is a separate NDJSON channel fanned out via a broadcast.
+tarpc's dispatch task owns the control channel's stdio and correlates
+responses (60s per-request deadline — anything longer is a dead or half-open
+session). The peer's event stream is a separate NDJSON channel opened lazily
+by the first subscriber and fanned out via a broadcast.
 
-Reconnect runs **eagerly in a background task** per peer, not lazily on next call. On session loss the task tears down the PeerLink, marks the peer unreachable in `/api/v1/peers`, and attempts reconnect with exponential backoff (1s, 2s, 4s, … capped at 60s). UI calls during a backoff window return HTTP 503 immediately with `Retry-After`, instead of blocking on the backoff. Once reconnected, the task installs the new `ConnectedSession` into a shared `RwLock<Option<…>>` that handlers read.
+Reconnect runs **eagerly in a background task** per peer, not lazily on next
+call. It tries routes in priority order (first reachable wins), probes the
+live link every 15s with `log_cursor` (skipped while recv channels are
+streaming — a bulk send legitimately starves the control channel), re-ranks
+back to a higher-priority route when one returns, and on loss tears the entry
+down and retries with exponential backoff (1s, 2s, 4s, … capped at 60s). UI
+calls during a backoff window return HTTP 503 immediately with `Retry-After`.
+Every state change bumps a watch channel that wakes the push schedulers.
 
 ### ACL config
 
 ```toml
-[[peers]]
-name = "home"
-ssh_target = "arctern-replicator@homeserver.lan"
-
-# A peer is one PHYSICAL host; `ssh_target` is shorthand for a single
-# route. Multi-homed hosts list ordered `[[peers.routes]]` (highest
-# priority first) — the link connects the first reachable route,
-# re-ranks back when a higher one returns, and `auto = false` marks a
-# route as manual-push-only (metered WireGuard). Cursor bookmarks, step
+# Sender side: a peer is one PHYSICAL host; multi-homed hosts list
+# ordered [[peers.routes]] (highest priority first). `ssh_target` on the
+# peer itself is shorthand for a single route. Cursor bookmarks, step
 # holds and push_syncs are keyed by the PEER name, never the route, so
 # switching networks never invalidates replication state.
+[[peers]]
+name = "mira"
+auto_interval = "1d"            # auto-sync at most once a day
+[[peers.routes]]
+name = "lan"
+ssh_target = "arctern-mira-lan" # ~/.ssh/config alias
+[[peers.routes]]
+name = "wg"
+ssh_target = "arctern-mira-wg"
+auto = false                    # manual "Send now" only on this route
 
 [[jobs]]
 type = "push"
-name = "backup"
-peer = "home"                          # references [[peers]] entry
-interval = "15m"
-# ... existing push fields, minus connect/server_name
-target = { root_fs = "tank/backups/laptop" }
+name = "push_to_mira"
+targets = ["mira"]              # multi-target: each peer keeps its own cursors
+parallel = 2                    # concurrent filesystems per target (1..=4)
+# bandwidth_limit = "10MiB"     # shared across parallel sends
+filesystems = { "novafs/arch0/data/home" = true }
+[jobs.target]
+root_fs = "okdata/backups/nova"
 
-[jobs.snapshot_filter]
-prefix = "zrepl_"
-
-# On the HOME SERVER side, the peer's authorized_keys + arctern config
-# define what the laptop is allowed to do.
-
+# On the RECEIVER side, authorized_keys + arctern config define what the
+# sender is allowed to do.
 [[allowed_clients]]
 identity = "laptop_nova"               # matches the argv to stdinserver-dispatch
-fingerprint = "SHA256:abc123..."       # optional defense-in-depth pin; verified
-                                       # against SSH_AUTH_INFO_0 if set
-jobs = ["backup", "test_backup"]       # one identity may serve multiple jobs
-operations = ["control", "recv"]       # control: RPC, recv: bulk receive
-root_fs = "tank/backups/laptop"        # recv operations restricted to this subtree
+fingerprint = "SHA256:abc123..."       # optional pin, verified against SSH_AUTH_INFO_0
+jobs = ["push_to_mira"]                # one identity may serve multiple jobs
+operations = [
+  "control",                           # read RPC + GET proxy + events
+  "control:discard_partial_recv",      # zfs recv -A over RPC
+  "recv",                              # bulk receive
+  "control:proxy_admin",               # mutating proxy = full host console
+]
+root_fs = "okdata/backups/nova"        # recv confined to this subtree
 ```
 
 `stdinserver-dispatch` enforces that:
 - the identity matches an `[[allowed_clients]]` entry,
 - if `fingerprint` is set, it matches the key in `SSH_AUTH_INFO_0`,
-- the parsed `<job>` from `SSH_ORIGINAL_COMMAND` is in `jobs`,
-- the requested `<op>` is in `operations`,
-- recv operations target a dataset under the configured `root_fs`,
-- destroy operations on snapshots are restricted to that subtree.
+- the parsed `<job>` from `SSH_ORIGINAL_COMMAND` is in `jobs` (recv only —
+  the control channel is per-peer, not per-job),
+- the requested `<op>` is in `operations` (fine-grained `control:*` checks
+  happen per RPC in the control handler),
+- recv and discard operations target a dataset under the configured `root_fs`.
 
 ## State storage
 
-All replication state lives in ZFS (holds, bookmarks, `receive_resume_token`). The daemon is a stateless scheduler that re-derives plans from ZFS state every cycle. **Do not introduce etcd or any external coordination store.**
+All replication state lives in ZFS (holds, bookmarks, `receive_resume_token`).
+The daemon is a stateless scheduler that re-derives plans from ZFS state every
+cycle. **Do not introduce etcd or any external coordination store.**
 
-Per-daemon SQLite for observability only. Path: `<state_dir>/state.db`. Use `sqlx` with the `sqlite` and `runtime-tokio` features. `journal_mode=WAL`, `synchronous=NORMAL`. Schema:
+Per-daemon SQLite for observability only. Path: `<state_dir>/state.db`. `sqlx`
+with the `sqlite` + `runtime-tokio` features, `journal_mode=WAL`,
+`synchronous=NORMAL`. Tables:
 
-```sql
-CREATE TABLE IF NOT EXISTS job_runs (
-    job_name      TEXT NOT NULL,
-    started_at    INTEGER NOT NULL,             -- unix seconds
-    finished_at   INTEGER,
-    status        TEXT NOT NULL,                -- 'ok' | 'error' | 'cancelled' | 'running'
-    error_message TEXT,
-    bytes_sent    INTEGER,
-    PRIMARY KEY (job_name, started_at)
-);
+- `job_runs` — one row per cycle (status, error, bytes sent). 30-day trim.
+- `log_events` — the host event log, written by a tracing layer (INFO+ only;
+  DEBUG/TRACE go to journald — kHz-rate tokio internals would explode the DB).
+  24-hour trim.
+- `push_syncs` — latest per-(job, peer) outcome; drives `auto_interval` and
+  the per-target status UI.
+- `recv_transfers` — completed inbound transfers recorded by recv channels
+  (bytes, duration, sender identity). 30-day trim.
+- `arcstats_history` — ARC stats time series for the dashboard.
 
-CREATE TABLE IF NOT EXISTS log_events (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp INTEGER NOT NULL,
-    level     TEXT NOT NULL,
-    job_name  TEXT,
-    message   TEXT NOT NULL
-);
+`stdinserver` processes open the same DB (WAL handles multiple writers), so
+receiver-side events and transfers land in the shared host log. Trims run
+every 6 hours from the daemon.
 
-CREATE INDEX IF NOT EXISTS idx_log_recent ON log_events(timestamp DESC);
-```
-
-`stdinserver` processes also open this DB to log their operations. SQLite WAL mode handles multiple writers; brief lock contention is fine. Trim policy: keep last 30 days of `job_runs`, last 24 h of `log_events`. Run trim every 6 hours from the daemon's scheduler.
-
-The SQLite tracing layer filters at `INFO` and above. `DEBUG`/`TRACE` events go only to stdout/journald via the standard `tracing-subscriber` fmt layer. This is a hard rule — without it, a debug-level run inside tokio internals will produce kHz-rate events and explode the DB.
+Events flow through an in-process bus: the tracing layer sends to a writer
+task (SQLite assigns the event id) which broadcasts to SSE subscribers —
+there is no polling anywhere in the daemon-side pipeline. The stdinserver
+events channel bridges the daemon's SSE when one is running and falls back to
+tailing SQLite on a daemon-less receiver.
 
 ## Cancellation and backpressure
 
-Existing patterns in `push.rs` are correct and stay. Specifically:
+Patterns in `push.rs`:
 
-- Wrap `tokio::io::copy(&mut zfs_send_stdout, &mut recv_channel_stdin)` in `tokio::select!` against the job's `CancellationToken`, with `biased;` so cancel wins races.
-- On cancel: drop the copy future, drop the recv channel (which closes the SSH child's stdin and propagates SIGPIPE to remote `zfs recv`), call `start_kill` on the local `zfs send` child, then `wait` to reap.
+- The bulk copy loop races the job/cycle `CancellationToken` inside
+  `tokio::select!` with `biased;` so cancel wins races.
+- On cancel: drop the recv channel (which closes the SSH child's stdin and
+  propagates SIGPIPE to remote `zfs recv`), `start_kill` the local `zfs send`
+  child, then `wait` to reap.
 - Drain `zfs send` stderr on a separate `tokio::spawn` to avoid pipe deadlock.
-- Always use `recv -s` so partial state survives. The next cycle picks up via resume token logic.
-- After copy completes (success or error), call `child.stdin.shutdown().await` on the SSH channel before reading the response frame, so the remote `zfs recv` sees EOF and finalises.
+- Always `recv -s`, so partial state survives; the next cycle resumes via the
+  token. Pause = cancel the in-flight transfer resumably + suspend scheduling.
+- After the copy completes, `shutdown()` the channel's stdin before reading
+  the response frame, so the remote `zfs recv` sees EOF and finalises.
+- `bandwidth_limit` is enforced by a job-wide debt-based token bucket shared
+  by all parallel sends; each stream may overshoot by one 256 KiB chunk and
+  then sleeps off the debt.
 
-## What to delete
-
-- `crates/transport/src/tls.rs`
-- `crates/transport/src/identity.rs`
-- All `quinn`, `rustls`, `rcgen`, `rustls-pemfile`, `rustls-pki-types` dependencies in `crates/transport/Cargo.toml`, `daemon/Cargo.toml`.
-- The `LISTEN_QUIC` handshake line in `daemon/src/main.rs` and the `bound_addr` polling loop.
-- The `parking_lot_or_std` cosmetic re-export module in `daemon/src/jobs/mod.rs`.
-- `_join_state_dir` and `_io_kind` placeholder dead code in `transport/src/identity.rs` (gone with the file anyway).
-- `.specify/` directory entirely.
-- `specs/` directory entirely.
-- The `<!-- SPECKIT START -->` ... `<!-- SPECKIT END -->` markers in `CLAUDE.md`.
-- All inline doc comments referencing slice numbers (D6, D16, D18, D22, T002, T008, etc.). Remove opportunistically as files are touched, not in a dedicated sweep.
-
-## What to keep verbatim
-
-- `palimpsest` entirely. Do not modify.
-- The `arctern-api` crate's wire types for the local API. They keep working unchanged for `/api/v1/...` endpoints.
-- The `arctern-config` crate's `KeepRule`, grid retention algorithm, prune evaluator, filter resolver. The `SnapJobConfig`, `PruningConfig`, `SnapshottingConfig`, `FilesystemFilter`, `SnapshotFilterConfig`, `SendFlagsConfig` shapes. Add `peer` field to `PushJobConfig` (replaces `connect`, `server_name`); add new top-level `[[peers]]` and `[[allowed_clients]]` sections.
-- `SnapJob` entirely.
-- `JobManager`, `Job` trait, status reporting, wakeup mechanism.
-- The planner: `pick_plan`, `pick_plan_with_token`, `pick_plan_with_discard`, `CompiledFilter`, `list_sender_snaps`, `build_send_header`, `build_send_args`. These are pure functions over the plan; they don't care about the transport.
-- The resume token decode and validation logic.
-- The `discard_partial_recv` plumbing in `SendHeader`.
-- The `RecvProperties` (overrides + inherit) wiring on the receive side.
-- `palimpsest::recv::abort_partial` integration on the receive side.
-- The CLI subcommand surface (`daemon`, `stdinserver`, `configcheck`). Replace `stdinserver` with the dispatch shape above; the others are unchanged.
-
-## Crate layout after pivot
+## Crate layout
 
 ```
 crates/
-  api/        request/response types for HTTP API (utoipa::ToSchema). Add peer-aware
-              variants and the EventWire type for SSE.
-  config/     unchanged structurally; add Peer, AllowedClient, peer-reference in PushJobConfig.
-  transport/  framed protocol enums (Request, Response, RecvHeader, SendHeader, etc.),
-              the LengthDelimitedCodec wrapper, error types. Pure types; no I/O. No more
-              tls/identity modules.
+  api/        request/response types for the HTTP API (utoipa::ToSchema),
+              including EventWire-shaped LogEvent, TransferInfo, RecvTransfer.
+  config/     TOML schema: jobs, peers + routes, retention grid, filters, ACL.
+  transport/  control.rs — the tarpc ArcternControl service + transport();
+              protocol.rs — recv/event framing shared by the raw channels.
+              Pure types; no I/O.
+  client/     UNIX-socket client helpers (raw requests, SSE streaming) used
+              by the stdinserver proxy and the events bridge.
 daemon/
   src/
     main.rs                  daemon and dispatch entry points (split via subcommand)
-    auth.rs                  PeerCredentials connect-info for UDS
-    handlers/                axum handlers
-      jobs.rs                local job endpoints
-      snapshots.rs           local snapshot endpoints
-      datasets.rs            local dataset endpoints
-      peers.rs               new — proxied peer endpoints
-      events.rs              new — SSE for live logs/events
-    jobs/
-      mod.rs                 JobManager, Job trait
-      snap.rs                unchanged
-      push.rs                rewritten executor — uses PeerLink::open_recv,
-                             palimpsest::hold + bookmark for cursor choreography
-    peer/
-      mod.rs                 PeerLink, ControlClient, RecvChannel
-      reconnect.rs           backoff + reachability state
-    stdinserver/
-      dispatch.rs            entry point for `arctern stdinserver-dispatch %k`
-      control.rs             control channel handler
-      recv.rs                recv channel handler
-    state/
-      mod.rs                 SQLite pool, migrations
-      job_runs.rs            queries
-      log_events.rs          queries + tracing layer
-    router.rs                axum router wiring
+    auth.rs                  UDS peer credentials + Sec-Fetch-Site CSRF guard
+    handlers/                axum handlers: jobs, snapshots, datasets, pools,
+                             system (ARC), events (SSE), transfers, peers (proxy)
+    jobs/                    JobManager + snap / push / prune
+    peer/                    PeerLink (tarpc client), reconnect + route ranking
+    stdinserver/             dispatch, control (tarpc server), recv, events
+    state/                   SQLite pool, migrations, queries, tracing layer
+    router.rs                axum wiring
     error.rs                 ApiError → HTTP response mapping
-admin-ui/                    Vue + Nuxt UI as before; add Peers tab to AdminView
+admin-ui/                    Vue 3 + Nuxt UI SPA; host-scoped console under
+                             /h/{host}; embedded into the binary by build.rs
 ```
 
 ## Conventions (preserved from CLAUDE.md)
@@ -410,36 +461,26 @@ admin-ui/                    Vue + Nuxt UI as before; add Peers tab to AdminView
 - Comment WHY, never WHAT.
 - No emojis in code, comments, or commit messages.
 - TS client auto-generated from OpenAPI; never hand-edit `admin-ui/src/client/`.
+- All ZFS work goes through palimpsest; missing primitives are added there
+  first.
 
-## Order of work
+## Out of scope
 
-Suggested commit sequence. Each commit should compile and pass tests. Don't try to do this in one PR.
-
-1. Delete `.specify/` and `specs/`. Update `CLAUDE.md` to reflect the new design (remove SPECKIT markers, rewrite Stack and Status sections, point at this `ARCHITECTURE.md`).
-2. Delete `crates/transport/src/{tls.rs, identity.rs}` and the QUIC-only fields in `Cargo.toml`. Stub out the QUIC code paths in jobs (compile-time disabled) so the rest of the tree still builds while transport is being rewritten.
-3. Add the framed protocol module: `Request`, `Response`, `RecvHeader`, `LengthDelimitedCodec` wrapper, codec helpers. Unit tests for round-trip serde of every variant. No I/O yet.
-4. Add `daemon/src/state/` — SQLite pool, schema migrations, basic queries. Add a tracing layer that writes to `log_events`.
-5. Replace `daemon/src/main.rs`'s subcommand dispatch: keep `daemon`, `configcheck`; replace `stdinserver` with `stdinserver-dispatch`. Add `stdinserver/dispatch.rs` that parses `SSH_ORIGINAL_COMMAND` and exits with not-implemented for now.
-6. Add `daemon/src/peer/` — `PeerLink`, `ControlClient`, the openssh integration. Smoke test against a local sshd.
-7. Add `stdinserver/control.rs` — handle `Request::ListSnapshots`, `GetReceiveResumeToken`, `DestroySnapshot`, basic plumbing. Unit-test handlers with `RecordingRunner` from palimpsest.
-8. Add `stdinserver/recv.rs` — read RecvHeader, run `zfs recv -s -u`, copy stdin, return Response. Reuse the existing sink logic.
-9. Rewrite `daemon/src/jobs/push.rs` executor to use `PeerLink::open_recv` instead of QUIC. Wire holds and bookmark cursor choreography.
-10. Add `handlers/peers.rs` — proxy local axum routes to PeerLink. Add `/api/v1/peers/{peer}/...` to router.
-11. Add SSE infrastructure for `/api/v1/events` and `/api/v1/peers/{peer}/events`. Hook it to the SQLite-backed log layer.
-12. Update `admin-ui/` — add a Peers tab to `AdminView.vue`, add peer-namespaced views for jobs and snapshots, update the OpenAPI codegen.
-13. Integration test: real ssh between two VM instances, full push cycle with hold + cursor + resume token paths.
-14. Sweep: remove orphaned slice references in comments, retire any leftover QUIC scaffolding, update the integration test fixtures.
-
-## Out of scope for v1
-
-- Multi-peer fan-out per push job (one peer per job is fine).
-- Pull jobs. The data direction is laptop → home server only.
-- HTTP/3. Browsers reach the daemon over HTTP/1.1 or HTTP/2 over TLS as axum handles natively. No h3 integration anywhere.
-- Persistent state for the scheduler beyond what SQLite covers.
-- Federation across more than two hosts. The PeerLink design extends naturally but don't generalise speculatively.
+- Pull jobs. The data direction is sender → receiver only. (A receiver that
+  should push elsewhere runs its own push job.)
+- HTTP/3. Browsers reach the daemon over HTTP/1.1 or HTTP/2 as axum handles
+  natively.
+- Persistent scheduler state beyond what SQLite covers.
+- Federation beyond a handful of peers. The PeerLink design extends naturally
+  but don't generalise speculatively.
 - Hooks (pre/post-replication scripts).
-- Auth on the local UI's loopback bind. UNIX socket permissions and loopback are the perimeter for now.
+- Auth on the local UI's loopback bind. UNIX socket permissions + loopback +
+  the Sec-Fetch-Site guard are the perimeter; multi-user access is a
+  different product.
+- `arctern status` / `signal` / `wakeup` / `list` subcommands. The web UI
+  replaces them; only `daemon`, `stdinserver-dispatch`, `configcheck`,
+  `openapi` are CLI surface.
 
-## Out of scope for the daemon binary entirely
-
-- `arctern status`, `arctern signal`, `arctern wakeup`, `arctern list` subcommands. The web UI replaces them. Only `daemon`, `stdinserver-dispatch`, `configcheck` are CLI surface.
+See `docs/design-process-model.md` for why the stdinserver stays a separate
+process per channel (and what would justify merging it into the daemon), and
+`docs/roadmap.md` for the feature direction.

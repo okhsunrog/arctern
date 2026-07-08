@@ -1,6 +1,14 @@
 <h1 align="center">arctern</h1>
 
-<p align="center">Push-based ZFS replication daemon — async Rust over SSH, with a web UI.</p>
+<p align="center">Push-based ZFS replication over SSH — with a web console for <em>both</em> ends of the link.</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+  <img alt="Rust" src="https://img.shields.io/badge/rust-stable-orange.svg">
+  <img alt="OpenZFS" src="https://img.shields.io/badge/OpenZFS-%E2%89%A5%202.2-lightgrey.svg">
+</p>
+
+![Dashboard](docs/screenshots/dashboard.png)
 
 > **Status:** pre-1.0, but real. The design is settled (see
 > [`ARCHITECTURE.md`](ARCHITECTURE.md)) and arctern runs in production on the
@@ -9,88 +17,129 @@
 
 ## What it is
 
-arctern replicates ZFS datasets from an **active sender** (e.g. a laptop or
-workstation that holds the data) to one or more **passive receivers** (e.g. a
-home NAS that stores backups). Replication is **push-only**: the sender runs the
+arctern replicates ZFS datasets from an **active sender** (a laptop or
+workstation that holds the data) to one or more **passive receivers** (a home
+NAS that stores backups). Replication is **push-only**: the sender runs the
 scheduler, decides what to send, and drives every transfer.
 
-It is heavily inspired by [zrepl](https://zrepl.github.io/). Snapshot names use
-the same `<prefix><RFC3339-utc-no-colons>` convention (e.g.
-`zrepl_20260514T134500Z`), so a host migrating from zrepl keeps its existing
-snapshot history.
+It is heavily inspired by [zrepl](https://zrepl.github.io/) — same snapshot
+naming idiom (`<prefix><RFC3339-utc>`), same grid retention, same hold/cursor
+discipline — but built as a single Rust binary with an embedded web console
+that treats the peer as a first-class host, not a footnote.
 
 ## How it works
 
 ```
                 ┌──────────────────────────────────────┐
-                │            Sender (laptop)            │
-   browser ──┐  │  arctern daemon                       │
-             └──┼─→ axum on 127.0.0.1:7878 (web UI+API) │
-                │   ├─ scheduler: snap / push / prune   │
-                │   ├─ PeerLink ──┐  one SSH session    │
-                │   └─ SQLite (observability)           │
+                │            Sender (laptop)           │
+   browser ──┐  │  arctern daemon                      │
+             └──┼─→ axum on 127.0.0.1:7878 (web UI+API)│
+                │   ├─ scheduler: snap / push / prune  │
+                │   ├─ PeerLink ──┐  one SSH session   │
+                │   └─ SQLite (observability only)     │
                 └─────────────────┼────────────────────┘
                                   │  ControlMaster, multi-channel
-                                  │  · control  (framed RPC)
-                                  │  · recv     (zfs send → recv)
+                                  │  · control  (tarpc RPC)
+                                  │  · recv     (zfs send → recv, ×N parallel)
+                                  │  · events   (NDJSON stream)
                 ┌─────────────────┴────────────────────┐
-                │           Receiver (NAS)              │
-                │  sshd → authorized_keys ForcedCommand │
-                │       → arctern stdinserver-dispatch  │
-                │  (no bespoke network listener)        │
-                └───────────────────────────────────────┘
+                │           Receiver (NAS)             │
+                │  sshd → authorized_keys ForcedCommand│
+                │       → arctern stdinserver-dispatch │
+                │  (no bespoke network listener)       │
+                └──────────────────────────────────────┘
 ```
 
-- **Transport is plain SSH.** arctern uses the system `ssh(1)` via the
-  [`openssh`](https://docs.rs/openssh) crate, so it inherits `~/.ssh/config`, the
-  agent, hardware tokens, `ProxyJump`, and `ControlMaster` for free. The sender
-  holds **one** SSH session per peer and multiplexes channels over it: a
-  long-lived **control** channel (framed RPC — snapshot listing, resume tokens,
-  status, events) and short-lived **recv** channels (one per `zfs send | zfs
-  recv` pipe, run in parallel).
-- **The receiver exposes no service of its own.** It only needs `sshd`, the
-  `arctern` binary on `PATH`, and an `authorized_keys` entry with a
-  `ForcedCommand` that runs `arctern stdinserver-dispatch <identity>`. A
-  per-identity ACL in its config decides which jobs/operations that key may use
-  and confines `recv` to a dataset subtree.
+- **Transport is plain SSH.** arctern drives the system `ssh(1)` via the
+  [`openssh`](https://docs.rs/openssh) crate, so it inherits `~/.ssh/config`,
+  the agent, hardware tokens, `ProxyJump`, and `ControlMaster` for free. One
+  SSH session per peer multiplexes a long-lived **control** channel (tarpc RPC:
+  receiver snapshot inventory, resume tokens, liveness, API proxy), short-lived
+  **recv** channels (one per `zfs send | zfs recv` pipe, up to `parallel = N`
+  at once), and a one-way **events** stream (the receiver's live log).
+- **The receiver exposes no service of its own.** It needs `sshd`, the
+  `arctern` binary on `PATH`, and an `authorized_keys` entry whose
+  `ForcedCommand` runs `arctern stdinserver-dispatch <identity>`. A
+  per-identity ACL in its config decides which jobs and operations that key may
+  use and confines `recv` to a dataset subtree.
 - **State lives in ZFS, not in arctern.** Holds, cursor bookmarks, and
-  `receive_resume_token` are the source of truth; the scheduler is stateless and
-  re-derives each plan from ZFS every cycle. A per-host SQLite database is used
-  for observability only (job runs, logs, ARC stats).
-- **One dashboard, two hosts.** The sender's daemon serves a Vue admin UI on
-  `127.0.0.1:7878` and proxies a subset of the peer's API over the SSH control
-  channel — so the browser sees both hosts through a single endpoint, while the
-  receiver keeps no UI or API reachable over the network.
+  `receive_resume_token` are the source of truth; the scheduler is stateless
+  and re-derives each plan from ZFS every cycle. A per-host SQLite database is
+  observability only (job history, event log, received transfers, ARC stats).
+- **One console, every host.** The sender's daemon serves the UI on loopback
+  and proxies the peer's local API over the SSH control channel. Switching to a
+  peer in the sidebar gives you the *same* console — jobs, snapshots, pools,
+  events — scoped to that host, without the receiver exposing anything to the
+  network.
+
+## The console
+
+**A peer is the same console, scoped to that host.** Below: the receiver's
+jobs viewed from the sender, including what it received and how fast
+("Incoming" is recorded by the receiver's own recv channels):
+
+![Peer host console with incoming transfers](docs/screenshots/mira-jobs.png)
+
+**Snapshots answer "what eats my space"** — dataset tree with sizes,
+per-snapshot `used`, holds, create/destroy right there:
+
+![Snapshot browser](docs/screenshots/snapshots.png)
+
+**Multi-path peers.** One peer = one physical host with prioritized routes;
+the link picks the best reachable route and re-ranks automatically. A route
+marked `auto = false` (say, metered WireGuard) still carries manual
+"Send now" pushes but never auto-replicates — "auto at home, manual on the
+road" without any network-detection config:
+
+![Peer links with routes](docs/screenshots/peers.png)
+
+**Pools and events** round it out — scrub control, vdev tree with error
+counters, and a live structured event feed (both hosts' events, bridged over
+SSH):
+
+| ![Pool detail](docs/screenshots/pools.png) | ![Events](docs/screenshots/events.png) |
+|---|---|
 
 ## Features
 
-- **Job types:** `snap` (take snapshots), `push` (replicate to a peer), `prune`
-  (receiver-side retention).
-- **Grid retention** (`4x15m | 24x1h | 14x1d`), with the zrepl idiom of
+- **Job types:** `snap` (periodic snapshots), `push` (replicate to peers),
+  `prune` (receiver-side retention).
+- **Grid retention** (`4x15m | 24x1h | 14x1d`) with the zrepl idiom of
   protecting non-prefixed (manual) snapshots by default.
 - **Robust replication:** GUID-based common-snapshot detection, resume tokens
-  (`recv -s`), `discard_partial_recv`, and a hold + cursor-bookmark choreography
-  that stops the snap job's pruner from racing an in-flight send.
-- **Ordered failover:** a push job can list several peers; the cycle uses the
-  first reachable one, and each peer keeps its own cursor bookmark so an offline
-  peer catches up cleanly later.
-- **Encrypted raw sends by default** (`zfs send -w -e -c -L`); override per job.
-- **Per-client recv tuning:** `-o`/`-x` property overrides and inherits, set in
-  the receiver's ACL.
-- **Cancellable jobs** with graceful cleanup; SSE live event stream in the UI.
+  (`recv -s`), `discard_partial_recv`, bookmark fallback when the common
+  snapshot aged out (zrepl's `#zrepl_CURSOR_*` bookmarks qualify — that is the
+  migration path), and a hold + cursor-bookmark choreography that stops the
+  pruner from racing an in-flight send.
+- **Peer routes:** multiple prioritized paths to one host (LAN, WireGuard, …);
+  cursors and holds are keyed by peer name, so switching networks never
+  invalidates replication state.
+- **Event-driven scheduling:** push jobs sleep until the earliest auto target
+  is due and wake on "Send now" or peer connectivity changes — no blind
+  polling ticks in the UI or the logs.
+- **Parallel sends** (`parallel = N`, each on its own recv channel) under a
+  shared `bandwidth_limit` token bucket.
+- **Receiver-side accounting:** every received stream is recorded (bytes,
+  duration, sender identity) and shown in the console's "Incoming" panel.
+- **Encrypted raw sends by default** (`zfs send -w -e -c -L`); per-job
+  override. Per-client `recv -o/-x` property overrides in the receiver's ACL.
+- **Live events** end to end: structured tracing events (which snapshot was
+  created / destroyed / sent, how many bytes) streamed over SSE locally and
+  bridged from peers over SSH.
+- **Cancellable and pausable transfers** — partial receive state keeps them
+  resumable.
 
 ## Requirements
 
-- OpenZFS on both hosts, and OpenSSH for the transport.
-- A recent stable Rust toolchain (edition 2024, so Rust 1.85+).
-- Sibling crate [`palimpsest`](https://github.com/okhsunrog/palimpsest) — arctern
-  depends on it via a relative path (`../palimpsest`), so clone it next to this
-  repo.
+- OpenZFS ≥ 2.2 and OpenSSH on both hosts.
+- Rust stable (edition 2024) to build.
+- Sibling crate [`palimpsest`](https://github.com/okhsunrog/palimpsest) — the
+  ZFS toolkit arctern is built on; cloned next to this repo (path dependency).
 
 ## Build
 
-The daemon **embeds the built admin UI** (`build.rs` bundles `admin-ui/dist`), so
-build the UI first.
+The daemon **embeds the built admin UI** (`build.rs` bundles `admin-ui/dist`),
+so build the UI first.
 
 ```sh
 # 1. clone the sibling dependency next to this repo
@@ -118,20 +167,66 @@ arctern configcheck /etc/arctern/arctern.toml
 arctern daemon --config /etc/arctern/arctern.toml
 ```
 
-On the **receiver**, instead of running the daemon, add the sender's key to
+A minimal sender config with a two-route peer:
+
+```toml
+state_dir = "/var/lib/arctern"
+socket = "/run/arctern/arctern.sock"
+
+[defaults]
+prefix = "arctern_"           # snapshot tag shared by snap/push/prune jobs
+
+[[peers]]
+name = "mira"
+auto_interval = "1d"          # auto-sync at most once a day
+[[peers.routes]]
+name = "lan"
+ssh_target = "arctern-mira-lan"   # a Host alias from ~/.ssh/config
+[[peers.routes]]
+name = "wg"
+ssh_target = "arctern-mira-wg"
+auto = false                  # metered: manual "Send now" only
+
+[[jobs]]
+type = "push"
+name = "push_to_mira"
+targets = ["mira"]
+parallel = 2                  # replicate 2 filesystems concurrently
+filesystems = { "novafs/arch0/data/home" = true, "novafs/arch0/data/root" = true }
+[jobs.target]
+root_fs = "okdata/backups/nova"
+```
+
+On the **receiver**, instead of running a daemon, add the sender's key to
 `~/.ssh/authorized_keys` with a forced command:
 
 ```
 command="/usr/local/bin/arctern stdinserver-dispatch laptop_nova",restrict ssh-ed25519 AAAA…
 ```
 
-The receiver's own `arctern daemon` is optional — only needed if it should also
-take its own snapshots or serve a local UI.
+and authorize the identity in the receiver's config:
 
-See [`docs/example-config.toml`](docs/example-config.toml) for an annotated
-configuration covering peers, snap/push/prune jobs, and the receiver-side ACL.
+```toml
+[[allowed_clients]]
+identity = "laptop_nova"
+jobs = ["push_to_mira"]
+operations = ["control", "control:discard_partial_recv", "recv",
+              "control:proxy_admin"]   # last one = full host console for this sender
+root_fs = "okdata/backups/nova"
+```
+
+The receiver's own `arctern daemon` is optional — run it if the host should
+take its own snapshots, prune what it received, or be manageable through the
+sender's console.
+
+See [`docs/example-config.toml`](docs/example-config.toml) for the annotated
+full schema, and [`docs/deploy-snap-only.md`](docs/deploy-snap-only.md) /
+[`docs/deploy-full-mirror.md`](docs/deploy-full-mirror.md) for staged
+deployment guides.
 
 ## CLI
+
+The web UI *is* the administration surface; the CLI stays deliberately small.
 
 | Subcommand | Purpose |
 |---|---|
@@ -145,9 +240,9 @@ configuration covering peers, snap/push/prune jobs, and the receiver-side ACL.
 ```
 crates/
   api/         HTTP request/response types (OpenAPI schema)
-  config/      TOML config: jobs, peers, retention grid, filters, ACL
-  transport/   framed wire protocol (Request/Response/RecvHeader); pure types
-  client/      shared client helpers
+  config/      TOML config: jobs, peers + routes, retention grid, filters, ACL
+  transport/   wire types: tarpc control service, recv/event framing; no I/O
+  client/      UNIX-socket client helpers (used by the stdinserver proxy)
 daemon/        the arctern binary: scheduler, peer link, stdinserver, axum API
 admin-ui/      Vue admin UI (embedded into the daemon at build time)
 ```
@@ -156,11 +251,13 @@ The replication primitives (snapshots, sends, holds, bookmarks, resume tokens)
 live in the separate [`palimpsest`](https://github.com/okhsunrog/palimpsest)
 crate.
 
-## Scope (v1)
+## Scope
 
-Push direction only (sender → receiver), one peer in use per cycle, two-host
-federation. Pull jobs, multi-host fan-out, and pre/post hooks are explicitly out
-of scope for now — see [`ARCHITECTURE.md`](ARCHITECTURE.md#out-of-scope-for-v1).
+Push direction only (sender → receiver). A push job can target multiple peers,
+each with its own cursor state; a peer can be multi-homed via routes. Pull
+jobs, fan-out beyond a handful of peers, and pre/post hooks are out of scope
+for now — see [`ARCHITECTURE.md`](ARCHITECTURE.md#out-of-scope) and
+[`docs/roadmap.md`](docs/roadmap.md) for where this is going.
 
 ## License
 

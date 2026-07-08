@@ -11,18 +11,19 @@ disabled.
 
 | Host | Role | Jobs |
 |---|---|---|
-| nova (laptop) | sender | `snapshot_arch0` (snap, 15m), `push_to_mira` (push, 15m, targets mira-lan → mira-wg) |
+| nova (laptop) | sender | `snapshot_arch0` (snap, 15m), `push_to_mira` (push, target `mira` with routes lan → wg) |
 | mira (server) | receiver + own snaps | `databak` (snap, 4h), `rootbak` (snap, 1d), `received_prune` (prune, 1h) |
 
 Transport: SSH. The laptop's daemon connects as `root@mira` using the
 dedicated key `/var/lib/arctern/ssh/id_ed25519` via the host aliases
 `arctern-mira-lan` (10.77.77.100) / `arctern-mira-wg` (10.66.66.2)
-defined in `/root/.ssh/config`. On mira the key is bound in
+defined in `/root/.ssh/config` — one peer `mira` with two prioritized
+routes (`lan` auto, `wg` manual-only since 2026-07-08). On mira the key is bound in
 `/root/.ssh/authorized_keys` to
 `command="/usr/local/bin/arctern stdinserver-dispatch laptop_nova",restrict`.
 
 Receiver tree: `okdata/backups/nova` (push `root_fs`); the laptop's
-datasets land at `okdata/backups/nova/novafs/arch0/data/{home,root}`.
+datasets land at `okdata/backups/nova/novafs/arch0/data/{home_new,root}`.
 `okdata/backups/nova/novafs/archold` is the preserved backup of an old
 machine — the `received_prune` job is scoped to exactly the two active
 datasets so archold is never touched.

@@ -1,4 +1,10 @@
-# admin-ui plan
+# admin-ui plan (historical)
+
+> This delivery plan was executed and is kept for the record. The
+> built UI has since grown past it (host-scoped console under
+> `/h/{host}`, dataset tree with sizes, pools + ARC views, multi-slot
+> transfer progress, Incoming panel). The toolchain section is still
+> accurate; for the current view structure read `admin-ui/src/`.
 
 Build the web UI using the same toolchain and embed pattern as
 `~/code/rust/claude-proxy-rs`. This doc is a delivery plan, not a

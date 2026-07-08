@@ -210,7 +210,9 @@ type = "regex"
 regex = "^arctern_.*"
 negate = true
 
-# SSH peer the push job pushes to.
+# SSH peer the push job pushes to. `ssh_target` is single-route
+# shorthand; multi-homed hosts list ordered [[peers.routes]] instead
+# (see docs/example-config.toml).
 [[peers]]
 name = "home"
 ssh_target = "arctern-home"   # matches the Host alias above
@@ -278,11 +280,12 @@ ssh -L 7879:127.0.0.1:7878 root@server  # 7879 to avoid clashing with the laptop
 # then open http://127.0.0.1:7879/
 ```
 
-Peers tab on the laptop should show `home: connected`; Events tab
-streams `arctern stdinserver-dispatch` events proxied from the server.
-JobDetail charts show cycle duration; bytes-sent appears in the bar
-chart once a push cycle completes (snap cycles record `bytes_sent =
-null`).
+"Peer links" on the laptop should show `home: connected` with the
+active route; picking the peer in the sidebar's Hosts group opens the
+same console scoped to the server (read-only with the ACL above — add
+`control:proxy_admin` to manage it). The Events view streams both
+hosts' logs; job detail charts show cycle duration and bytes sent once
+a push cycle completes (snap cycles record `bytes_sent = null`).
 
 On the server:
 ```bash
@@ -319,7 +322,7 @@ Verify the cursor bookmark + step hold mechanics:
 ```bash
 # On the laptop, after a successful push cycle:
 zfs list -t bookmark novafs/arch0/data/home
-# Expect: novafs/arch0/data/home#arctern_cursor_J_push_to_home_trial
+# Expect: novafs/arch0/data/home#arctern_cursor_G_<guid>_J_push_to_home_trial_P_home
 
 zfs holds novafs/arch0/data/home@arctern_<TAG>
 # Expect: empty (the step hold was released after the cycle succeeded).
@@ -341,7 +344,7 @@ Watch for:
   network blip should be visible.
 - Cursor bookmark advancing on the sender (one entry per push job per
   source dataset; old entries destroyed after each successful cycle).
-- Step holds (`arctern_step_J_push_to_home_trial`) NOT lingering on
+- Step holds (`arctern_step_J_push_to_home_trial_P_home`) NOT lingering on
   any sender snapshot when no cycle is in flight.
 - Receiver disk usage growing as expected.
 
@@ -412,13 +415,13 @@ leave or delete.
 
 ## Known limitations carried into this deployment
 
-- **One peer per push job.** Multi-peer fan-out is out of scope for v1.
 - **Pull jobs are not implemented.** Direction is laptop → home server
   only. If you want the home server to also push somewhere else, run a
   separate push job on the home server's daemon.
-- **No metrics endpoint.** Only `GET /api/v1/jobs` and the SSE event
-  stream at `GET /api/v1/events`. Wrap in a node_exporter textfile
-  cron if you want Prometheus.
+- **No metrics endpoint.** The HTTP API (`/api/v1/jobs`,
+  `/api/v1/transfers/recent`, SSE at `/api/v1/events`) is the
+  observability surface. Wrap in a node_exporter textfile cron if you
+  want Prometheus.
 - **No graceful drain on shutdown.** A cycle in flight when systemd
   sends SIGTERM will be killed mid-stream; receiver gets a partial,
   next cycle resumes from the token.

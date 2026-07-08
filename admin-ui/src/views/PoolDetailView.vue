@@ -31,20 +31,26 @@ const totals = computed(() => {
 })
 
 const scrubActive = computed(() => pool.value?.scan?.state === 'SCANNING')
-// zpool sets `scrub_pause` to the pause timestamp while paused.
-const scrubPaused = computed(() => Boolean(pool.value?.scan?.scrub_pause))
+// zpool sets `scrub_pause` to the pause timestamp while paused; when
+// not paused the field is absent / "-" / "0" depending on version, so
+// truthiness alone would misread a running scrub as paused.
+const scrubPaused = computed(() => {
+  const p = pool.value?.scan?.scrub_pause?.trim()
+  return !!p && p !== '-' && p !== '0'
+})
 
-// `issued` (blocks handed to the scanner) is the metric zpool's own
-// "done" percentage derives from; `examined` runs ahead of it and
-// overstates progress.
-const scrubProgress = computed(() => {
+// A scrub has two counters: `examined` (scanned ahead sequentially)
+// and `issued` (verification I/O actually completed — what zpool's own
+// "done" percentage means). Show both; the bar tracks issued and never
+// silently substitutes examined.
+const scrubPct = computed(() => {
   const s = pool.value?.scan
   if (!s) return null
   const toExamine = parseZpoolSize(s.to_examine ?? null)
   if (toExamine <= 0) return null
-  const issued = parseZpoolSize(s.issued ?? null)
-  const basis = issued > 0 ? issued : parseZpoolSize(s.examined ?? null)
-  return Math.min(100, Math.round((basis / toExamine) * 1000) / 10)
+  const pct = (v: string | null | undefined) =>
+    Math.min(100, Math.round((parseZpoolSize(v ?? null) / toExamine) * 1000) / 10)
+  return { issued: pct(s.issued), scanned: pct(s.examined) }
 })
 </script>
 
@@ -101,17 +107,17 @@ const scrubProgress = computed(() => {
             </div>
           </UCard>
 
-          <UCard :class="scrubActive ? 'rail rail-info' : ''">
+          <UCard :class="scrubPaused ? 'rail rail-warn' : scrubActive ? 'rail rail-info' : ''">
             <template #header>
               <div class="flex items-center justify-between">
                 <div class="flex items-center gap-2">
                   <div class="font-semibold">Scrub</div>
                   <UBadge
                     v-if="pool.scan"
-                    :color="scanStatus(pool.scan.state).color"
+                    :color="scrubPaused ? 'warning' : scanStatus(pool.scan.state).color"
                     variant="subtle"
                     size="sm"
-                    :icon="scanStatus(pool.scan.state).icon"
+                    :icon="scrubPaused ? 'i-lucide-circle-pause' : scanStatus(pool.scan.state).icon"
                   >
                     {{ scrubPaused ? 'paused' : scanStatus(pool.scan.state).label }}
                   </UBadge>
@@ -177,14 +183,22 @@ const scrubProgress = computed(() => {
                 >
                   {{ pool.scan.errors }}
                 </dd>
-                <dt v-if="pool.scan.pass_start" class="text-muted">Pass started</dt>
-                <dd v-if="pool.scan.pass_start">
+                <dt v-if="scrubPaused" class="text-muted">Paused since</dt>
+                <dd v-if="scrubPaused" class="text-warning">{{ pool.scan.scrub_pause }}</dd>
+                <dt v-if="pool.scan.pass_start && !scrubPaused" class="text-muted">Pass started</dt>
+                <dd v-if="pool.scan.pass_start && !scrubPaused">
                   {{ formatRelative(new Date(Number(pool.scan.pass_start) * 1000).toISOString()) }}
                 </dd>
               </dl>
-              <div v-if="scrubActive && scrubProgress != null" class="mt-3">
-                <UProgress :model-value="scrubProgress" />
-                <div class="text-xs text-muted mt-1">{{ scrubProgress }}% issued</div>
+              <div v-if="scrubActive && scrubPct != null" class="mt-3">
+                <UProgress
+                  :model-value="scrubPct.issued"
+                  :color="scrubPaused ? 'warning' : 'primary'"
+                />
+                <div class="text-xs text-muted mt-1">
+                  issued {{ scrubPct.issued }}% · scanned {{ scrubPct.scanned }}%
+                  <template v-if="scrubPaused"> · frozen while paused</template>
+                </div>
               </div>
             </template>
           </UCard>

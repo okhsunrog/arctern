@@ -7,7 +7,7 @@
 pub mod protocol;
 
 pub use protocol::{
-    DatasetWire, ErrorCode, EventWire, JobStatusWire, MAX_FRAME_LEN, PROTOCOL_VERSION,
+    DatasetWire, ErrorCode, EventWire, HoldWire, JobStatusWire, MAX_FRAME_LEN, PROTOCOL_VERSION,
     ProtocolError, RecvHeader, Request, RequestFrame, Response, ResponseFrame, SendFlagsWire,
     SendHeader, SendKind, SnapshotEntry, SnapshotRef, compile_prefix_regex, read_header,
     read_request, read_response, write_header, write_request, write_response,

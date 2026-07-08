@@ -765,6 +765,76 @@
         }
       }
     },
+    "/api/v1/peers/{peer}/datasets/{name}/snapshots/{snapshot}/holds": {
+      "get": {
+        "tags": ["peers"],
+        "operationId": "list_peer_snapshot_holds",
+        "parameters": [
+          {
+            "name": "peer",
+            "in": "path",
+            "description": "Peer name from [[peers]]",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Dataset on the peer (URL-encode `/` as %2F)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "snapshot",
+            "in": "path",
+            "description": "Snapshot tag (the part after `@`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Holds on the peer's snapshot, oldest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SnapshotHold"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such peer / snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Peer not currently connected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/peers/{peer}/events": {
       "get": {
         "tags": ["peers"],
@@ -1761,6 +1831,17 @@
           "createtxg": {
             "type": "integer",
             "format": "int64",
+            "minimum": 0
+          },
+          "creation": {
+            "type": ["integer", "null"],
+            "format": "int64",
+            "description": "`creation` property, unix seconds (None from peers predating it)."
+          },
+          "used": {
+            "type": ["integer", "null"],
+            "format": "int64",
+            "description": "`used` property, bytes.",
             "minimum": 0
           }
         }

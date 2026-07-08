@@ -386,6 +386,12 @@ pub struct PeerSnapshotEntry {
     /// JSON parsers that downgrade large integers to f64.
     pub guid: String,
     pub createtxg: u64,
+    /// `creation` property, unix seconds (None from peers predating it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation: Option<i64>,
+    /// `used` property, bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used: Option<u64>,
 }
 
 /// One row in `GET /api/v1/events` (and the proxied

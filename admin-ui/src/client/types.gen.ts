@@ -238,6 +238,14 @@ export type PeerSnapshotEntry = {
      */
     guid: string;
     createtxg: number;
+    /**
+     * `creation` property, unix seconds (None from peers predating it).
+     */
+    creation?: number | null;
+    /**
+     * `used` property, bytes.
+     */
+    used?: number | null;
 };
 
 /**
@@ -964,6 +972,48 @@ export type ListPeerDatasetsResponses = {
 };
 
 export type ListPeerDatasetsResponse = ListPeerDatasetsResponses[keyof ListPeerDatasetsResponses];
+
+export type ListPeerSnapshotHoldsData = {
+    body?: never;
+    path: {
+        /**
+         * Peer name from [[peers]]
+         */
+        peer: string;
+        /**
+         * Dataset on the peer (URL-encode `/` as %2F)
+         */
+        name: string;
+        /**
+         * Snapshot tag (the part after `@`)
+         */
+        snapshot: string;
+    };
+    query?: never;
+    url: '/api/v1/peers/{peer}/datasets/{name}/snapshots/{snapshot}/holds';
+};
+
+export type ListPeerSnapshotHoldsErrors = {
+    /**
+     * No such peer / snapshot
+     */
+    404: ApiErrorBody;
+    /**
+     * Peer not currently connected
+     */
+    503: ApiErrorBody;
+};
+
+export type ListPeerSnapshotHoldsError = ListPeerSnapshotHoldsErrors[keyof ListPeerSnapshotHoldsErrors];
+
+export type ListPeerSnapshotHoldsResponses = {
+    /**
+     * Holds on the peer's snapshot, oldest first
+     */
+    200: Array<SnapshotHold>;
+};
+
+export type ListPeerSnapshotHoldsResponse = ListPeerSnapshotHoldsResponses[keyof ListPeerSnapshotHoldsResponses];
 
 export type StreamPeerEventsData = {
     body?: never;

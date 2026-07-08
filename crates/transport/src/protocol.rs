@@ -81,6 +81,12 @@ pub enum Request {
     /// client never sees datasets outside its subtree. Drives the
     /// sender-side UI's receiver dataset browser.
     ListDatasets,
+    /// List user holds on one snapshot (`dataset@tag`), root_fs-scoped.
+    /// The browser shows a lock before the operator tries a destroy
+    /// instead of discovering the hold via the failure.
+    ListHolds {
+        snapshot: String,
+    },
     DestroySnapshot {
         name: String,
     },
@@ -127,6 +133,9 @@ pub enum Response {
     },
     ListDatasetsOk {
         datasets: Vec<DatasetWire>,
+    },
+    ListHoldsOk {
+        holds: Vec<HoldWire>,
     },
     DestroySnapshotOk,
     DiscardPartialRecvOk,
@@ -259,6 +268,13 @@ pub struct SnapshotEntry {
     pub name: String,
     pub guid: u64,
     pub createtxg: u64,
+    /// `creation` property, unix seconds. Optional so the planner path
+    /// and older peers stay wire-compatible; the UI browser renders it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation: Option<i64>,
+    /// `used` property, bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used: Option<u64>,
 }
 
 /// One receiver dataset row for `Response::ListDatasetsOk`. Slim on
@@ -274,6 +290,18 @@ pub struct DatasetWire {
     /// available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub used: Option<String>,
+    /// `usedbysnapshots` property value in bytes-as-string — the "what
+    /// do this dataset's snapshots cost" signal the browser surfaces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usedbysnapshots: Option<String>,
+}
+
+/// One user hold on a snapshot, for `Response::ListHoldsOk`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HoldWire {
+    pub tag: String,
+    /// Unix seconds the hold was placed.
+    pub timestamp: u64,
 }
 
 /// Compile a `prefix_regex` string from a `Request::ListSnapshots`.
@@ -501,6 +529,34 @@ mod tests {
     }
 
     #[test]
+    fn request_list_holds_roundtrip() {
+        check_request_roundtrip(Request::ListHolds {
+            snapshot: "tank/backups/laptop@s1".into(),
+        });
+    }
+
+    #[test]
+    fn response_list_holds_roundtrip() {
+        check_response_roundtrip(Response::ListHoldsOk {
+            holds: vec![HoldWire {
+                tag: "arctern_last_J_backup".into(),
+                timestamp: 1783539652,
+            }],
+        });
+        check_response_roundtrip(Response::ListHoldsOk { holds: vec![] });
+    }
+
+    /// Old peers omit the new optional SnapshotEntry fields; the JSON
+    /// without them must still parse (serde defaults).
+    #[test]
+    fn snapshot_entry_without_new_fields_still_parses() {
+        let legacy = r#"{"name":"s1","guid":42,"createtxg":8}"#;
+        let e: SnapshotEntry = serde_json::from_str(legacy).unwrap();
+        assert_eq!(e.creation, None);
+        assert_eq!(e.used, None);
+    }
+
+    #[test]
     fn response_list_datasets_roundtrip() {
         check_response_roundtrip(Response::ListDatasetsOk {
             datasets: vec![
@@ -508,11 +564,13 @@ mod tests {
                     name: "tank/backups/laptop".into(),
                     kind: "filesystem".into(),
                     used: Some("482000000000".into()),
+                    usedbysnapshots: Some("1024".into()),
                 },
                 DatasetWire {
                     name: "tank/backups/laptop/vol".into(),
                     kind: "volume".into(),
                     used: None,
+                    usedbysnapshots: None,
                 },
             ],
         });
@@ -592,6 +650,8 @@ mod tests {
                 name: "s1".into(),
                 guid: 11587258101628135412,
                 createtxg: 8,
+                creation: Some(1783539652),
+                used: Some(160 * 1024),
             }],
             receive_resume_token: Some("1-deadbeef".into()),
         });
@@ -743,6 +803,8 @@ mod tests {
             name: "zrepl_001".into(),
             guid: 11587258101628135412,
             createtxg: 8,
+            creation: None,
+            used: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let back: SnapshotEntry = serde_json::from_str(&json).unwrap();

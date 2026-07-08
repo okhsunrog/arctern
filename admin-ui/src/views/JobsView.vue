@@ -3,6 +3,7 @@ import { computed, h, resolveComponent } from 'vue'
 import type { TableColumn } from '@nuxt/ui'
 import { useJobs } from '../composables/useJobs'
 import { formatNextRun, formatRelative } from '../utils/format'
+import { formatLastSync, formatNextSync } from '../utils/pushTimes'
 import { jobStatus } from '../utils/status'
 import type { JobStatus } from '../client'
 
@@ -66,14 +67,24 @@ const columns = computed<TableColumn<JobStatus>[]>(() => [
     },
   },
   {
+    // For push jobs the run columns carry sync semantics — the
+    // scheduler tick is invisible to the operator.
     accessorKey: 'last_run',
-    header: 'Last run',
-    cell: ({ row }) => formatRelative(row.original.last_run),
+    header: 'Last',
+    cell: ({ row }) =>
+      row.original.kind === 'push'
+        ? `synced ${formatLastSync(row.original)}`
+        : formatRelative(row.original.last_run),
   },
   {
     accessorKey: 'next_run',
-    header: 'Next run',
-    cell: ({ row }) => formatNextRun(row.original.next_run, row.original.running),
+    header: 'Next',
+    cell: ({ row }) =>
+      row.original.kind === 'push'
+        ? row.original.running
+          ? 'replicating now'
+          : formatNextSync(row.original)
+        : formatNextRun(row.original.next_run, row.original.running),
   },
   {
     id: 'actions',

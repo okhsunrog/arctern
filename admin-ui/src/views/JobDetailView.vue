@@ -5,6 +5,7 @@ import type { TableColumn } from '@nuxt/ui'
 import { useJobs } from '../composables/useJobs'
 import { useJobRuns } from '../composables/useJobRuns'
 import { formatBytes, formatTimestamp } from '../utils/format'
+import { formatLastSync, formatNextSync } from '../utils/pushTimes'
 import { jobStatus, runStatus } from '../utils/status'
 import RunsCharts from '../components/RunsCharts.vue'
 import TransferPanel from '../components/TransferPanel.vue'
@@ -100,10 +101,18 @@ const tableColumns = computed<TableColumn<JobRun>[]>(() => [
               <dl class="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1 text-sm">
                 <dt class="text-muted">Kind</dt>
                 <dd class="font-mono">{{ job.kind }}</dd>
-                <dt class="text-muted">Last run</dt>
-                <dd>{{ formatTimestamp(job.last_run) }}</dd>
-                <dt class="text-muted">Next run</dt>
-                <dd>{{ formatTimestamp(job.next_run) }}</dd>
+                <template v-if="job.kind === 'push'">
+                  <dt class="text-muted">Last sync</dt>
+                  <dd>{{ formatLastSync(job) }}</dd>
+                  <dt class="text-muted">Next sync</dt>
+                  <dd>{{ job.running ? 'replicating now' : formatNextSync(job) }}</dd>
+                </template>
+                <template v-else>
+                  <dt class="text-muted">Last run</dt>
+                  <dd>{{ formatTimestamp(job.last_run) }}</dd>
+                  <dt class="text-muted">Next run</dt>
+                  <dd>{{ formatTimestamp(job.next_run) }}</dd>
+                </template>
                 <template v-if="job.last_error">
                   <dt class="text-muted">Last error</dt>
                   <dd class="text-error break-all">{{ job.last_error }}</dd>

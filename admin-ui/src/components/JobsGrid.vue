@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { JobStatus } from '../client'
 import { formatNextRun, formatRelative } from '../utils/format'
+import { formatLastSync, formatNextSync } from '../utils/pushTimes'
 import { jobStatus } from '../utils/status'
 import TransferPanel from './TransferPanel.vue'
 
@@ -38,15 +39,29 @@ defineProps<{
           </UBadge>
         </div>
       </template>
+      <!-- Push jobs live on their per-target sync schedule; the 15m
+           scheduler tick is noise, so their card talks about syncs. -->
       <dl class="text-sm space-y-1">
-        <div class="flex justify-between">
-          <dt class="text-muted">Last run</dt>
-          <dd>{{ formatRelative(j.last_run) }}</dd>
-        </div>
-        <div class="flex justify-between">
-          <dt class="text-muted">Next run</dt>
-          <dd>{{ formatNextRun(j.next_run, j.running) }}</dd>
-        </div>
+        <template v-if="j.kind === 'push'">
+          <div class="flex justify-between">
+            <dt class="text-muted">Last sync</dt>
+            <dd>{{ formatLastSync(j) }}</dd>
+          </div>
+          <div class="flex justify-between">
+            <dt class="text-muted">Next sync</dt>
+            <dd>{{ j.running ? 'replicating now' : formatNextSync(j) }}</dd>
+          </div>
+        </template>
+        <template v-else>
+          <div class="flex justify-between">
+            <dt class="text-muted">Last run</dt>
+            <dd>{{ formatRelative(j.last_run) }}</dd>
+          </div>
+          <div class="flex justify-between">
+            <dt class="text-muted">Next run</dt>
+            <dd>{{ formatNextRun(j.next_run, j.running) }}</dd>
+          </div>
+        </template>
         <div v-if="j.last_error" class="text-error text-xs mt-2 truncate" :title="j.last_error">
           {{ j.last_error }}
         </div>

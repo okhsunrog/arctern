@@ -519,6 +519,8 @@ async fn plan_one_filesystem(
             name: String::new(),
             guid,
             createtxg: 0,
+            creation: None,
+            used: None,
         })
         .collect();
     let decoded = match token.as_deref() {
@@ -963,6 +965,17 @@ impl PushJob {
         s.last_run = Some(now);
         s.next_run = Some(now + time::Duration::try_from(interval).unwrap_or(time::Duration::ZERO));
         s.last_error = last_error;
+        s.running = false;
+    }
+
+    /// A tick where nothing was due. Only `next_run` moves — `last_run`
+    /// keeps meaning "last cycle that actually replicated" and
+    /// `last_error` must survive idle ticks (overwriting it here would
+    /// silently clear a real failure 15 minutes later).
+    fn record_idle_tick(&self, interval: StdDuration) {
+        let mut s = self.status.lock().unwrap();
+        let now = OffsetDateTime::now_utc();
+        s.next_run = Some(now + time::Duration::try_from(interval).unwrap_or(time::Duration::ZERO));
         s.running = false;
     }
 
@@ -1454,7 +1467,7 @@ impl PushJob {
         // otherwise a 15m cycle against a 1d auto_interval writes 96
         // no-op rows a day into the history.
         if selected.is_empty() && errors.is_empty() {
-            self.record_cycle(None, interval);
+            self.record_idle_tick(interval);
             return;
         }
         self.mark_running();
@@ -1513,6 +1526,8 @@ mod tests {
             name: name.into(),
             guid,
             createtxg,
+            creation: None,
+            used: None,
         }
     }
 

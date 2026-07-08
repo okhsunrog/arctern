@@ -287,10 +287,14 @@ pub async fn list_peer_datasets(
                 .map(|d| arctern_api::DatasetSummary {
                     name: d.name,
                     dataset_type: d.kind,
-                    properties: d
-                        .used
-                        .map(|u| [("used".to_string(), u)].into_iter().collect())
-                        .unwrap_or_default(),
+                    properties: [
+                        d.used.map(|u| ("used".to_string(), u)),
+                        d.usedbysnapshots
+                            .map(|u| ("usedbysnapshots".to_string(), u)),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect(),
                 })
                 .collect(),
         )),
@@ -346,9 +350,58 @@ pub async fn list_peer_snapshots(
                     name: s.name,
                     guid: s.guid.to_string(),
                     createtxg: s.createtxg,
+                    creation: s.creation,
+                    used: s.used,
                 })
                 .collect(),
         )),
+        Response::Error { code, message } => Err(map_response_error(code, message)),
+        other => Err(map_response_error(
+            ErrorCode::Internal,
+            format!("unexpected response: {other:?}"),
+        )),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/peers/{peer}/datasets/{name}/snapshots/{snapshot}/holds",
+    tag = "peers",
+    params(
+        ("peer" = String, Path, description = "Peer name from [[peers]]"),
+        ("name" = String, Path, description = "Dataset on the peer (URL-encode `/` as %2F)"),
+        ("snapshot" = String, Path, description = "Snapshot tag (the part after `@`)"),
+    ),
+    responses(
+        (status = 200, description = "Holds on the peer's snapshot, oldest first",
+         body = Vec<arctern_api::SnapshotHold>),
+        (status = 404, description = "No such peer / snapshot", body = ApiErrorBody),
+        (status = 503, description = "Peer not currently connected", body = ApiErrorBody),
+    ),
+)]
+pub async fn list_peer_snapshot_holds(
+    State(state): State<AppState>,
+    Path((peer, name, snapshot)): Path<(String, String, String)>,
+) -> Result<Json<Vec<arctern_api::SnapshotHold>>, (StatusCode, HeaderMap, Json<ApiErrorBody>)> {
+    let link = require_link(&state, &peer).await?;
+    let resp = link
+        .rpc(Request::ListHolds {
+            snapshot: format!("{name}@{snapshot}"),
+        })
+        .await
+        .map_err(|e| rpc_error_to_http(format!("{e}")))?;
+    match resp {
+        Response::ListHoldsOk { holds } => {
+            let mut out: Vec<arctern_api::SnapshotHold> = holds
+                .into_iter()
+                .map(|h| arctern_api::SnapshotHold {
+                    tag: h.tag,
+                    timestamp: h.timestamp,
+                })
+                .collect();
+            out.sort_by_key(|h| h.timestamp);
+            Ok(Json(out))
+        }
         Response::Error { code, message } => Err(map_response_error(code, message)),
         other => Err(map_response_error(
             ErrorCode::Internal,

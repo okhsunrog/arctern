@@ -241,6 +241,12 @@ async fn dispatch(
             }
             handle_list_datasets(runner, acl).await
         }
+        Request::ListHolds { snapshot } => {
+            if let Err(r) = enforce_control_acl(acl, "control:list_holds", true) {
+                return r;
+            }
+            handle_list_holds(runner, acl, &snapshot).await
+        }
         Request::DestroySnapshot { name } => {
             if let Err(r) = enforce_control_acl(acl, "control:destroy_snapshot", false) {
                 return r;
@@ -421,7 +427,10 @@ async fn collect_receiver_snapshots(
         recursive: false,
         types: vec![DatasetType::Snapshot],
         roots: vec![dataset.to_string()],
-        properties: vec!["guid".into()],
+        // creation/used ride along for the UI browser; the planner path
+        // (ListReceiverGuids) ignores them and two extra columns on one
+        // `zfs list` are noise-level cost.
+        properties: vec!["guid".into(), "creation".into(), "used".into()],
         ..ListOptions::default()
     };
     let entries = match palimpsest::dataset::list(runner, &opts).await {
@@ -453,6 +462,14 @@ async fn collect_receiver_snapshots(
                 name: snap_name,
                 guid,
                 createtxg,
+                creation: e
+                    .properties
+                    .get("creation")
+                    .and_then(|p| p.value.parse::<i64>().ok()),
+                used: e
+                    .properties
+                    .get("used")
+                    .and_then(|p| p.value.parse::<u64>().ok()),
             })
         })
         .collect();
@@ -480,7 +497,7 @@ async fn handle_list_datasets(runner: &dyn CommandRunner, acl: &AllowedClient) -
         recursive: true,
         types: vec![DatasetType::Filesystem, DatasetType::Volume],
         roots: vec![root.to_string()],
-        properties: vec!["used".into()],
+        properties: vec!["used".into(), "usedbysnapshots".into()],
         ..ListOptions::default()
     };
     let entries = match palimpsest::dataset::list(runner, &opts).await {
@@ -501,10 +518,48 @@ async fn handle_list_datasets(runner: &dyn CommandRunner, acl: &AllowedClient) -
             .into_iter()
             .map(|e| arctern_transport::DatasetWire {
                 used: e.properties.get("used").map(|p| p.value.clone()),
+                usedbysnapshots: e.properties.get("usedbysnapshots").map(|p| p.value.clone()),
                 kind: e.kind.cli_name().to_string(),
                 name: e.name,
             })
             .collect(),
+    }
+}
+
+/// User holds on one snapshot, root_fs-scoped through the dataset part
+/// of the target.
+async fn handle_list_holds(
+    runner: &dyn CommandRunner,
+    acl: &AllowedClient,
+    snapshot: &str,
+) -> Response {
+    let target = match parse_snapshot_target(snapshot) {
+        Ok(t) => t,
+        Err(e) => {
+            return Response::Error {
+                code: ErrorCode::BadRequest,
+                message: format!("invalid snapshot target {snapshot:?}: {e}"),
+            };
+        }
+    };
+    if let Err(r) = enforce_root_fs(acl, target.dataset) {
+        return r;
+    }
+    match palimpsest::hold::list_holds(runner, snapshot).await {
+        Ok(holds) => Response::ListHoldsOk {
+            holds: holds
+                .into_iter()
+                .map(|h| arctern_transport::HoldWire {
+                    tag: h.tag,
+                    timestamp: h.timestamp,
+                })
+                .collect(),
+        },
+        Err(ZfsError::DatasetNotFound { .. }) => Response::ListHoldsOk { holds: vec![] },
+        Err(e) => Response::Error {
+            code: zfs_error_code(&e),
+            message: format!("holds {snapshot}: {e}"),
+        },
     }
 }
 
@@ -696,7 +751,7 @@ mod tests {
                 "-t",
                 "snapshot",
                 "-o",
-                "guid",
+                "guid,creation,used",
                 "tank/missing",
             ]),
             Vec::new(),
@@ -734,7 +789,7 @@ mod tests {
                 "-t",
                 "snapshot",
                 "-o",
-                "guid",
+                "guid,creation,used",
                 "tank/missing",
             ]),
             Vec::new(),
@@ -811,7 +866,7 @@ mod tests {
                 "-t",
                 "snapshot",
                 "-o",
-                "guid",
+                "guid,creation,used",
                 "tank/backups/laptop",
             ]),
             Vec::new(),
@@ -1012,7 +1067,7 @@ mod tests {
                 "-t",
                 "snapshot",
                 "-o",
-                "guid",
+                "guid,creation,used",
                 "tank/backups/laptop",
             ]),
             Vec::new(),

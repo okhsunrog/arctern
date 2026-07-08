@@ -65,6 +65,7 @@ fn openapi_router() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::peers::wakeup_peer_job))
         .routes(routes!(handlers::peers::list_peer_datasets))
         .routes(routes!(handlers::peers::list_peer_snapshots))
+        .routes(routes!(handlers::peers::list_peer_snapshot_holds))
         .routes(routes!(handlers::peers::destroy_peer_snapshot))
         .routes(routes!(handlers::peers::stream_peer_events))
         .routes(routes!(handlers::events::stream_events))

@@ -35,7 +35,14 @@ export function jobStatus(j: JobStatus): StatusView {
   if (j.paused) return view('neutral', 'i-lucide-circle-pause', 'paused')
   if (j.running) return view('info', 'i-lucide-loader', 'running', true)
   if (j.last_error) return view('error', 'i-lucide-circle-x', 'error')
-  if (j.last_run) return view('success', 'i-lucide-circle-check', 'ok')
+  const targets = j.targets ?? []
+  // Push jobs: per-target history survives daemon restarts (SQLite),
+  // while last_run is in-memory — a freshly restarted daemon must not
+  // demote a healthy job to "idle".
+  if (targets.some((t) => t.last_error)) return view('error', 'i-lucide-circle-x', 'error')
+  if (j.last_run || targets.some((t) => t.last_success != null)) {
+    return view('success', 'i-lucide-circle-check', 'ok')
+  }
   return view('neutral', 'i-lucide-circle-dashed', 'idle')
 }
 

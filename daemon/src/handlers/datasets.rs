@@ -23,7 +23,13 @@ use crate::error::ApiError;
 pub async fn list_datasets(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<DatasetSummary>>, ApiError> {
-    let entries = palimpsest::dataset::list(state.runner.as_ref(), &ListOptions::default()).await?;
+    // usedbysnapshots rides along so the browser can answer "what do
+    // this dataset's snapshots cost" without a per-dataset query.
+    let opts = ListOptions {
+        properties: vec!["used".into(), "usedbysnapshots".into(), "referenced".into()],
+        ..ListOptions::default()
+    };
+    let entries = palimpsest::dataset::list(state.runner.as_ref(), &opts).await?;
     let summaries: Vec<DatasetSummary> = entries.into_iter().map(DatasetSummary::from).collect();
     Ok(Json(summaries))
 }

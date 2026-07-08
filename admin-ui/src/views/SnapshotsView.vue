@@ -1,12 +1,15 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { localSource } from '../composables/snapshotSources'
+import { useHost } from '../composables/useHost'
+import { hostSource } from '../composables/snapshotSources'
 import SnapshotBrowser from '../components/SnapshotBrowser.vue'
 
 const route = useRoute()
 const router = useRouter()
-const source = localSource()
+const { host, baseUrl } = useHost()
+const source = computed(() => hostSource(baseUrl.value, host.value ?? ''))
+const title = computed(() => (host.value ? `${host.value} · Snapshots` : 'Snapshots'))
 
 const dataset = ref('')
 
@@ -23,11 +26,11 @@ watch(dataset, (d) => {
 <template>
   <UDashboardPanel id="snapshots">
     <template #header>
-      <UDashboardNavbar title="Snapshots" />
+      <UDashboardNavbar :title="title" />
     </template>
     <template #body>
       <div class="mx-auto w-full max-w-7xl">
-        <SnapshotBrowser v-model:dataset="dataset" :source="source" />
+        <SnapshotBrowser :key="host ?? ''" v-model:dataset="dataset" :source="source" />
       </div>
     </template>
   </UDashboardPanel>

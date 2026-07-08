@@ -156,7 +156,11 @@ function targetLine(tg: {
             >Send now</UButton
           >
         </div>
+        <!-- For single-target jobs the card-level Last/Next sync rows
+             already say this; repeat per-target only when there is more
+             than one target or something is wrong. -->
         <div
+          v-if="(job.targets?.length ?? 0) > 1 || tg.last_error || (tg.connected && !tg.route_auto)"
           class="text-xs ml-4 truncate"
           :class="tg.last_error ? 'text-error' : 'text-muted'"
           :title="tg.last_error ?? targetLine(tg)"

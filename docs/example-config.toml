@@ -143,6 +143,12 @@ jobs = ["push_to_nas"]
 operations = ["control", "control:discard_partial_recv", "recv"]
 # Add "control:destroy_snapshot" only if this client should be allowed
 # to remotely delete snapshots inside root_fs.
+# Add "control:proxy_admin" to let the client's console MANAGE this
+# host like its own (wakeup/pause jobs, scrub pools, create/destroy
+# snapshots host-wide via the generic API proxy). Read-only proxying
+# (dashboards, pools, ARC, events, config) rides the plain "control"
+# scope. Grant proxy_admin only to a peer you fully trust — it is
+# root-equivalent administration of this host.
 root_fs = "okdata/backups/laptop"
 
 # Per-client recv tuning. Maps zrepl's `recv.properties.inherit` and

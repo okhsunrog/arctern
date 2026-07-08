@@ -466,6 +466,40 @@
         }
       }
     },
+    "/api/v1/events/recent": {
+      "get": {
+        "tags": ["events"],
+        "summary": "JSON tail of the event log. The SSE stream carries live data; this\nendpoint exists for backlog replay — in particular the peer-events\nbridge fetches it through the generic proxy so a freshly opened\npeer console shows context instead of an empty feed.",
+        "operationId": "recent_events",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum rows, newest kept, returned oldest-first. Default 100.",
+            "required": false,
+            "schema": {
+              "type": ["integer", "null"],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Most recent log events, oldest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LogEvent"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/jobs": {
       "get": {
         "tags": ["jobs"],

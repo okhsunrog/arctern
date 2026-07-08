@@ -9,21 +9,21 @@ function errMessage(e: unknown): string {
   return String(e)
 }
 
-export function useArc(refreshMs = 5000, includeHistory = false, limit = 120) {
+export function useArc(refreshMs = 5000, includeHistory = false, limit = 120, baseUrl = '') {
   const arc = ref<ArcStats | null>(null)
   const history = ref<ArcHistoryPoint[]>([])
   const error = ref<string | null>(null)
   const loading = ref(true)
 
   async function refresh() {
-    const a = await getArc()
+    const a = await getArc({ baseUrl })
     if (a.error) error.value = errMessage(a.error)
     else {
       arc.value = a.data ?? null
       error.value = null
     }
     if (includeHistory) {
-      const h = await getArcHistory({ query: { limit } })
+      const h = await getArcHistory({ query: { limit }, baseUrl })
       if (h.error) error.value = errMessage(h.error)
       else history.value = h.data ?? []
     }

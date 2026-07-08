@@ -69,14 +69,23 @@ pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// (shell errors, panics) deserves attention.
 fn emit_remote_stderr(peer: &str, channel: &'static str, raw: &str) {
     let line = strip_ansi(raw);
-    let level = line.split_whitespace().nth(1).unwrap_or("");
+    let mut parts = line.splitn(3, char::is_whitespace);
+    let _ts = parts.next().unwrap_or("");
+    let level = parts.next().unwrap_or("");
+    // Drop the remote fmt layer's own `timestamp LEVEL target:` prefix —
+    // re-logging it verbatim reads as line noise in the event feed. The
+    // remainder after "target: " is the actual message.
+    let rest = parts.next().unwrap_or("").trim_start();
+    let msg = rest.split_once(": ").map(|(_, m)| m).unwrap_or(rest);
     match level {
-        "TRACE" => tracing::trace!(peer = %peer, "{channel} stderr: {line}"),
-        "DEBUG" => tracing::debug!(peer = %peer, "{channel} stderr: {line}"),
-        "INFO" => tracing::info!(peer = %peer, "{channel} stderr: {line}"),
-        "WARN" => tracing::warn!(peer = %peer, "{channel} stderr: {line}"),
-        "ERROR" => tracing::error!(peer = %peer, "{channel} stderr: {line}"),
-        _ => tracing::warn!(peer = %peer, "{channel} stderr: {line}"),
+        "TRACE" => tracing::trace!(peer = %peer, "{peer} {channel}: {msg}"),
+        "DEBUG" => tracing::debug!(peer = %peer, "{peer} {channel}: {msg}"),
+        "INFO" => tracing::info!(peer = %peer, "{peer} {channel}: {msg}"),
+        "WARN" => tracing::warn!(peer = %peer, "{peer} {channel}: {msg}"),
+        "ERROR" => tracing::error!(peer = %peer, "{peer} {channel}: {msg}"),
+        // Not a tracing-formatted line (shell error, panic) — keep it
+        // whole and loud.
+        _ => tracing::warn!(peer = %peer, "{peer} {channel}: {line}"),
     }
 }
 
@@ -192,8 +201,11 @@ impl PeerLink {
                 // broadcast on every fresh link. Live-only is what the
                 // SSE bridge wants; history stays queryable via
                 // GetLogCursor-style RPCs if ever needed.
+                // Anchor slightly behind the cursor: a fresh subscriber
+                // gets a ~100-row tail for context instead of a blank
+                // feed, without the old full-day replay.
                 let since = match self.control.send(Request::GetLogCursor).await {
-                    Ok(Response::GetLogCursorOk { id }) => Some(id),
+                    Ok(Response::GetLogCursorOk { id }) => Some(id.saturating_sub(100)),
                     _ => None,
                 };
                 match self

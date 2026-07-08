@@ -715,6 +715,27 @@ export type StreamEventsResponses = {
     200: unknown;
 };
 
+export type RecentEventsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Maximum rows, newest kept, returned oldest-first. Default 100.
+         */
+        limit?: number | null;
+    };
+    url: '/api/v1/events/recent';
+};
+
+export type RecentEventsResponses = {
+    /**
+     * Most recent log events, oldest first
+     */
+    200: Array<LogEvent>;
+};
+
+export type RecentEventsResponse = RecentEventsResponses[keyof RecentEventsResponses];
+
 export type ListJobsData = {
     body?: never;
     path?: never;

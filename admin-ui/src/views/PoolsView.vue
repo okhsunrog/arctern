@@ -1,16 +1,20 @@
 <script setup lang="ts">
+import { computed } from 'vue'
+import { useHost } from '../composables/useHost'
 import { usePools } from '../composables/usePools'
 import { poolUsedPercent } from '../utils/pool'
 import { poolStatus, scanStatus } from '../utils/status'
 import { formatRelative } from '../utils/format'
 
-const { pools, error, loading } = usePools()
+const { host, baseUrl, prefix } = useHost()
+const { pools, error, loading } = usePools(5000, baseUrl.value)
+const title = computed(() => (host.value ? `${host.value} · Pools` : 'Pools'))
 </script>
 
 <template>
   <UDashboardPanel id="pools">
     <template #header>
-      <UDashboardNavbar title="Pools" />
+      <UDashboardNavbar :title="title" />
     </template>
     <template #body>
       <div class="mx-auto w-full max-w-7xl space-y-4">
@@ -26,7 +30,7 @@ const { pools, error, loading } = usePools()
             <template #header>
               <div class="flex items-center justify-between">
                 <RouterLink
-                  :to="`/pools/${encodeURIComponent(p.name)}`"
+                  :to="`${prefix}/pools/${encodeURIComponent(p.name)}`"
                   class="font-mono font-semibold text-lg hover:underline"
                 >
                   {{ p.name }}

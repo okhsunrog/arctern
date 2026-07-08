@@ -210,12 +210,12 @@ where
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         let mut visitor = MessageVisitor::default();
         event.record(&mut visitor);
-        let message = visitor.message.unwrap_or_else(|| {
-            // No `message` field — fall back to the event target so the
+        let (job_name, mut message) = visitor.render();
+        if message.is_empty() {
+            // No fields at all — fall back to the event target so the
             // row is still useful for forensic queries.
-            event.metadata().target().to_string()
-        });
-        let job_name = visitor.job_name;
+            message = event.metadata().target().to_string();
+        }
         let level = event.metadata().level().to_string();
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -246,29 +246,48 @@ where
     }
 }
 
+/// Captures `message`, the job name, AND every other structured field
+/// as `key=value` — "creating snapshot" with the dataset/snapshot
+/// fields dropped told the operator nothing.
 #[derive(Default)]
 struct MessageVisitor {
     message: Option<String>,
     job_name: Option<String>,
+    fields: Vec<(String, String)>,
+}
+
+impl MessageVisitor {
+    fn record_any(&mut self, field: &Field, value: String) {
+        match field.name() {
+            "message" => self.message = Some(value),
+            "job_name" | "name" => self.job_name = Some(value),
+            other => self.fields.push((other.to_string(), value)),
+        }
+    }
+
+    /// `message key=value key=value`, fields in emission order.
+    fn render(self) -> (Option<String>, String) {
+        let mut out = self.message.unwrap_or_default();
+        for (k, v) in &self.fields {
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(k);
+            out.push('=');
+            out.push_str(v);
+        }
+        (self.job_name, out)
+    }
 }
 
 impl Visit for MessageVisitor {
     fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "message" {
-            self.message = Some(value.to_string());
-        } else if field.name() == "job_name" || field.name() == "name" {
-            self.job_name = Some(value.to_string());
-        }
+        self.record_any(field, value.to_string());
     }
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "message" {
-            self.message = Some(format!("{value:?}"));
-        } else if field.name() == "job_name" || field.name() == "name" {
-            // Strip surrounding quotes that Debug formatting adds for &str.
-            let s = format!("{value:?}");
-            let stripped = s.trim_matches('"').to_string();
-            self.job_name = Some(stripped);
-        }
+        // Strip surrounding quotes that Debug formatting adds for &str.
+        let s = format!("{value:?}");
+        self.record_any(field, s.trim_matches('"').to_string());
     }
 }
 

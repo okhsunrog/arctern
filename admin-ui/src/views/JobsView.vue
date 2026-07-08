@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import { computed, h, resolveComponent } from 'vue'
 import type { TableColumn } from '@nuxt/ui'
+import { useHost } from '../composables/useHost'
 import { useJobs } from '../composables/useJobs'
 import { formatNextRun, formatRelative } from '../utils/format'
 import { formatLastSync, formatNextSync } from '../utils/pushTimes'
 import { jobStatus } from '../utils/status'
 import type { JobStatus } from '../client'
 
-const { jobs, error, loading, wake, cancel, pause, resume } = useJobs()
+const { host, baseUrl } = useHost()
+const { jobs, error, loading, wake, cancel, pause, resume } = useJobs(5000, baseUrl.value)
+const title = computed(() => (host.value ? `${host.value} · Jobs` : 'Jobs'))
 
 const UButton = resolveComponent('UButton')
 const UBadge = resolveComponent('UBadge')
@@ -21,7 +24,7 @@ const columns = computed<TableColumn<JobStatus>[]>(() => [
       h(
         resolveComponent('RouterLink'),
         {
-          to: `/jobs/${row.original.name}`,
+          to: `${host ? `/h/${host}` : ''}/jobs/${row.original.name}`,
           class: 'font-mono font-medium text-primary hover:underline',
         },
         () => row.original.name,
@@ -123,7 +126,7 @@ const columns = computed<TableColumn<JobStatus>[]>(() => [
 <template>
   <UDashboardPanel id="jobs">
     <template #header>
-      <UDashboardNavbar title="Jobs" />
+      <UDashboardNavbar :title="title" />
     </template>
     <template #body>
       <div class="mx-auto w-full max-w-7xl space-y-4">

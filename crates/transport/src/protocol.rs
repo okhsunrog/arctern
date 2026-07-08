@@ -112,6 +112,22 @@ pub enum Request {
         since: Option<u64>,
     },
     GetLogCursor,
+    /// Generic passthrough into the receiver's local daemon HTTP API
+    /// (over its UNIX socket). This is what makes managing a peer
+    /// IDENTICAL to managing the local host: the sender's UI reuses its
+    /// own endpoints with a per-peer base path instead of growing a
+    /// bespoke (and always poorer) RPC per feature. `GET` is gated by
+    /// the read scope; mutating methods require the explicit
+    /// `control:proxy_admin` ACL operation.
+    Proxy {
+        /// `GET` | `POST` | `DELETE` (uppercase).
+        method: String,
+        /// Absolute local API path, must start with `/api/v1/`.
+        path: String,
+        /// JSON request body for POST.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+    },
     Shutdown,
 }
 
@@ -148,6 +164,12 @@ pub enum Response {
     WakeupJobOk,
     GetLogCursorOk {
         id: u64,
+    },
+    /// Proxy passthrough result: the local daemon's HTTP status and
+    /// raw body (JSON or empty).
+    ProxyOk {
+        status: u16,
+        body: String,
     },
     /// Recv-channel terminal response. Same shape on the control channel
     /// is reserved for "operation succeeded with no payload" replies
@@ -625,6 +647,28 @@ mod tests {
     #[test]
     fn request_get_log_cursor_roundtrip() {
         check_request_roundtrip(Request::GetLogCursor);
+    }
+
+    #[test]
+    fn request_proxy_roundtrip() {
+        check_request_roundtrip(Request::Proxy {
+            method: "GET".into(),
+            path: "/api/v1/pools".into(),
+            body: None,
+        });
+        check_request_roundtrip(Request::Proxy {
+            method: "POST".into(),
+            path: "/api/v1/pools/tank/scrub".into(),
+            body: Some(r#"{"action":"start"}"#.into()),
+        });
+    }
+
+    #[test]
+    fn response_proxy_roundtrip() {
+        check_response_roundtrip(Response::ProxyOk {
+            status: 200,
+            body: r#"[{"name":"tank"}]"#.into(),
+        });
     }
 
     #[test]

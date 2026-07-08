@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useHost } from '../composables/useHost'
 import { useJobs } from '../composables/useJobs'
 import { useEvents } from '../composables/useEvents'
 import { useArc } from '../composables/useArc'
@@ -10,11 +11,18 @@ import { peerStatus, poolStatus } from '../utils/status'
 import JobsGrid from '../components/JobsGrid.vue'
 import EventsLog from '../components/EventsLog.vue'
 
-const { jobs, error, loading, wake, cancel, pause, resume, pushTo } = useJobs()
-const { events, connected } = useEvents({ cap: 200 })
-const { arc } = useArc(5000)
-const { pools } = usePools()
+const { host, baseUrl, prefix } = useHost()
+const { jobs, error, loading, wake, cancel, pause, resume, pushTo } = useJobs(5000, baseUrl.value)
+const { events, connected } = useEvents({
+  cap: 200,
+  peer: computed(() => host.value ?? undefined),
+})
+const { arc } = useArc(5000, false, 120, baseUrl.value)
+const { pools } = usePools(5000, baseUrl.value)
+// The peer tiles describe THIS host's outbound links; inside a peer's
+// console they would show the peer's own (usually empty) peer list.
 const { peers } = usePeers()
+const title = computed(() => (host.value ? `${host.value} · Dashboard` : 'Dashboard'))
 
 const tail = computed(() => events.value.slice(-50))
 
@@ -33,7 +41,7 @@ const jobsSummary = computed(() => {
 <template>
   <UDashboardPanel id="dashboard">
     <template #header>
-      <UDashboardNavbar title="Dashboard">
+      <UDashboardNavbar :title="title">
         <template #right>
           <UBadge
             :color="connected ? 'success' : 'neutral'"
@@ -57,7 +65,7 @@ const jobsSummary = computed(() => {
             :class="poolStatus(p.state).rail"
             :ui="{ body: 'p-4 sm:p-4' }"
           >
-            <RouterLink :to="`/pools/${encodeURIComponent(p.name)}`" class="block">
+            <RouterLink :to="`${prefix}/pools/${encodeURIComponent(p.name)}`" class="block">
               <div class="microlabel mb-1">pool · {{ p.state }}</div>
               <div class="font-mono font-semibold truncate">{{ p.name }}</div>
               <div class="mt-2 flex items-center gap-2">
@@ -74,7 +82,7 @@ const jobsSummary = computed(() => {
           </UCard>
 
           <UCard :ui="{ body: 'p-4 sm:p-4' }" class="rail rail-info">
-            <RouterLink to="/arc" class="block">
+            <RouterLink :to="`${prefix}/arc`" class="block">
               <div class="microlabel mb-1">arc hit ratio</div>
               <div class="text-2xl font-semibold font-mono">
                 <template v-if="arcRatio != null">{{ arcRatio }}%</template>
@@ -90,7 +98,7 @@ const jobsSummary = computed(() => {
             :ui="{ body: 'p-4 sm:p-4' }"
             :class="jobsSummary.failing ? 'rail rail-err' : 'rail rail-ok'"
           >
-            <RouterLink to="/jobs" class="block">
+            <RouterLink :to="`${prefix}/jobs`" class="block">
               <div class="microlabel mb-1">jobs</div>
               <div class="text-2xl font-semibold font-mono">{{ jobsSummary.total }}</div>
               <div class="text-xs mt-1" :class="jobsSummary.failing ? 'text-error' : 'text-muted'">
@@ -100,12 +108,12 @@ const jobsSummary = computed(() => {
           </UCard>
 
           <UCard
-            v-for="p in peers"
+            v-for="p in host ? [] : peers"
             :key="p.name"
             :ui="{ body: 'p-4 sm:p-4' }"
             :class="peerStatus(p.reachability).rail"
           >
-            <RouterLink :to="`/peers/${encodeURIComponent(p.name)}/jobs`" class="block">
+            <RouterLink :to="`/h/${encodeURIComponent(p.name)}/dashboard`" class="block">
               <div class="microlabel mb-1">peer · {{ peerStatus(p.reachability).label }}</div>
               <div class="font-mono font-semibold truncate">{{ p.name }}</div>
               <div class="text-xs text-muted mt-1 truncate">

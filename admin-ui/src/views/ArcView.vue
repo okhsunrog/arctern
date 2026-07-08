@@ -11,6 +11,7 @@ import {
   Tooltip,
 } from 'chart.js'
 import { Line } from 'vue-chartjs'
+import { useHost } from '../composables/useHost'
 import { useArc } from '../composables/useArc'
 import { formatBytes } from '../utils/format'
 import ArcGauge from '../components/ArcGauge.vue'
@@ -25,7 +26,9 @@ ChartJS.register(
   Legend,
 )
 
-const { arc, history, error, loading } = useArc(5000, true, 720)
+const { host, baseUrl } = useHost()
+const { arc, history, error, loading } = useArc(5000, true, 720, baseUrl.value)
+const title = computed(() => (host.value ? `${host.value} · ARC` : 'ARC'))
 
 // Reverse so the chart goes oldest → newest.
 const ordered = computed(() => [...history.value].reverse())
@@ -128,7 +131,7 @@ const rateOpts = {
 <template>
   <UDashboardPanel id="arc">
     <template #header>
-      <UDashboardNavbar title="ARC" />
+      <UDashboardNavbar :title="title" />
     </template>
     <template #body>
       <div class="mx-auto w-full max-w-7xl space-y-4">

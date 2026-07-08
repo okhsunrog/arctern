@@ -444,6 +444,67 @@ pub async fn destroy_peer_snapshot(
     }
 }
 
+/// Any-method passthrough `/api/v1/peers/{peer}/proxy/{*rest}` → the
+/// peer's local daemon API. The UI reuses its own generated client
+/// with a per-peer base path, so a peer's console IS the local console
+/// pointed elsewhere. Registered as a plain axum route (wildcards
+/// don't fit the OpenAPI codegen; the client never needs a schema for
+/// its own mirrored endpoints). SSE is excluded — events keep their
+/// dedicated streaming path.
+pub async fn proxy_any(
+    State(state): State<AppState>,
+    Path((peer, rest)): Path<(String, String)>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let method = request.method().as_str().to_uppercase();
+    let query = request
+        .uri()
+        .query()
+        .map(|q| format!("?{q}"))
+        .unwrap_or_default();
+    let path = format!("/api/v1/{rest}{query}");
+    let body = match axum::body::to_bytes(request.into_body(), 1 << 20).await {
+        Ok(b) if b.is_empty() => None,
+        Ok(b) => Some(String::from_utf8_lossy(&b).into_owned()),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiErrorBody {
+                    error: "bad_request".into(),
+                    message: format!("read body: {e}"),
+                }),
+            )
+                .into_response();
+        }
+    };
+    let link = match require_link(&state, &peer).await {
+        Ok(l) => l,
+        Err(e) => return e.into_response(),
+    };
+    let resp = match link.rpc(Request::Proxy { method, path, body }).await {
+        Ok(r) => r,
+        Err(e) => return rpc_error_to_http(format!("{e}")).into_response(),
+    };
+    match resp {
+        Response::ProxyOk { status, body } => {
+            let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+            (
+                code,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                body,
+            )
+                .into_response()
+        }
+        Response::Error { code, message } => map_response_error(code, message).into_response(),
+        other => map_response_error(
+            ErrorCode::Internal,
+            format!("unexpected response: {other:?}"),
+        )
+        .into_response(),
+    }
+}
+
 /// `GET /api/v1/peers/{peer}/events` — proxied SSE. Sends
 /// SubscribeEvents to the peer's control channel and yields each
 /// pushed Event frame as an SSE frame.
@@ -480,15 +541,43 @@ pub async fn stream_peer_events(
         .subscribe_events()
         .await
         .map_err(|e| rpc_error_to_http(format!("{e}")))?;
+    // Backlog: the broadcast only carries frames pushed after the FIRST
+    // subscriber attached; every later EventSource would start blank.
+    // Pull a JSON tail through the generic proxy so each fresh page
+    // gets context, then dedup live frames by id.
+    let backlog: Vec<LogEvent> = match link
+        .rpc(Request::Proxy {
+            method: "GET".into(),
+            path: "/api/v1/events/recent?limit=100".into(),
+            body: None,
+        })
+        .await
+    {
+        Ok(Response::ProxyOk { status: 200, body }) => {
+            serde_json::from_str(&body).unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
+    let last_backlog_id = backlog.last().map(|e| e.id).unwrap_or(0);
     // End the stream when the broadcast closes — which happens when the
     // peer link is torn down on reconnect. Ending it (rather than
     // swallowing the error and stalling) lets the browser's EventSource
     // auto-reconnect and re-subscribe against the new link. Lagged frames
     // are skipped so a slow consumer doesn't kill the stream.
-    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+    let backlog_frames: Vec<Result<Event, std::convert::Infallible>> = backlog
+        .iter()
+        .map(|ev| {
+            let payload = serde_json::to_string(ev).unwrap_or_else(|_| "{}".into());
+            Ok(Event::default().id(ev.id.to_string()).data(payload))
+        })
+        .collect();
+    let live = futures_util::stream::unfold(rx, move |mut rx| async move {
         loop {
             match rx.recv().await {
                 Ok(ev) => {
+                    if ev.id <= last_backlog_id {
+                        continue;
+                    }
                     let api_ev = LogEvent {
                         id: ev.id,
                         timestamp: ev.timestamp,
@@ -505,6 +594,7 @@ pub async fn stream_peer_events(
             }
         }
     });
+    let stream = futures_util::StreamExt::chain(futures_util::stream::iter(backlog_frames), live);
     // End on daemon shutdown so graceful drain can complete.
     let stream =
         futures_util::StreamExt::take_until(stream, state.shutdown.clone().cancelled_owned());

@@ -9,13 +9,13 @@ function errMessage(e: unknown): string {
   return String(e)
 }
 
-export function usePools(refreshMs = 5000) {
+export function usePools(refreshMs = 5000, baseUrl = '') {
   const pools = ref<PoolSummary[]>([])
   const error = ref<string | null>(null)
   const loading = ref(true)
 
   async function refresh() {
-    const r = await listPools()
+    const r = await listPools({ baseUrl })
     if (r.error) error.value = errMessage(r.error)
     else {
       pools.value = r.data ?? []
@@ -31,13 +31,13 @@ export function usePools(refreshMs = 5000) {
   return { pools, error, loading, refresh }
 }
 
-export function usePool(name: string, refreshMs = 3000) {
+export function usePool(name: string, refreshMs = 3000, baseUrl = '') {
   const pool = ref<PoolStatus | null>(null)
   const error = ref<string | null>(null)
   const loading = ref(true)
 
   async function refresh() {
-    const r = await getPool({ path: { name } })
+    const r = await getPool({ path: { name }, baseUrl })
     if (r.error) error.value = errMessage(r.error)
     else {
       pool.value = r.data ?? null
@@ -48,7 +48,7 @@ export function usePool(name: string, refreshMs = 3000) {
 
   /// Returns the raw call result so callers can toast the outcome.
   async function scrub(action: ScrubRequest['action']): Promise<{ error?: unknown }> {
-    const r = await poolScrub({ path: { name }, body: { action } })
+    const r = await poolScrub({ path: { name }, body: { action }, baseUrl })
     if (r.error) error.value = errMessage(r.error)
     await refresh()
     return { error: r.error }

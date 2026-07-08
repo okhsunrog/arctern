@@ -1,9 +1,14 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { useHost } from '../composables/useHost'
 import { useEvents } from '../composables/useEvents'
 import EventsLog from '../components/EventsLog.vue'
 
-const { events, connected, error, paused, togglePause, clear } = useEvents()
+const { host } = useHost()
+const { events, connected, error, paused, togglePause, clear } = useEvents({
+  peer: computed(() => host.value ?? undefined),
+})
+const title = computed(() => (host.value ? `${host.value} · Events` : 'Events'))
 
 const levelFilter = ref<string>('')
 const jobFilter = ref<string>('')
@@ -19,7 +24,7 @@ const jobOptions = computed(() => {
 <template>
   <UDashboardPanel id="events">
     <template #header>
-      <UDashboardNavbar title="Events">
+      <UDashboardNavbar :title="title">
         <template #right>
           <UBadge
             :color="connected ? 'success' : 'error'"

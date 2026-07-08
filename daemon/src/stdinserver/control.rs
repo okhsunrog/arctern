@@ -312,6 +312,9 @@ async fn dispatch(
                 None => Response::GetLogCursorOk { id: 0 },
             }
         }
+        Request::Proxy { method, path, body } => {
+            handle_proxy(config, acl, &method, &path, body).await
+        }
         Request::Shutdown => unreachable!("handled in run()"),
     }
 }
@@ -641,6 +644,61 @@ fn zfs_error_code(e: &ZfsError) -> ErrorCode {
     match e {
         ZfsError::DatasetNotFound { .. } => ErrorCode::NotFound,
         _ => ErrorCode::Zfs,
+    }
+}
+
+/// Generic passthrough to the local daemon's HTTP API. GET rides the
+/// read scope (legacy `control` allowed); mutating methods require the
+/// explicit `control:proxy_admin` grant — that single line in the
+/// receiver's config is the switch between "sender may watch this
+/// host" and "sender may manage this host like its own".
+async fn handle_proxy(
+    config: &Config,
+    acl: &AllowedClient,
+    method: &str,
+    path: &str,
+    body: Option<String>,
+) -> Response {
+    let read_only = method == "GET";
+    let gate = if read_only {
+        enforce_control_acl(acl, "control:proxy_read", true)
+    } else if method == "POST" || method == "DELETE" {
+        enforce_control_acl(acl, "control:proxy_admin", false)
+    } else {
+        return Response::Error {
+            code: ErrorCode::BadRequest,
+            message: format!("unsupported proxy method {method:?}"),
+        };
+    };
+    if let Err(r) = gate {
+        return r;
+    }
+    // Absolute API paths only — no scheme/host smuggling, no traversal.
+    if !path.starts_with("/api/v1/") || path.contains("..") {
+        return Response::Error {
+            code: ErrorCode::BadRequest,
+            message: format!("proxy path must be under /api/v1/: {path:?}"),
+        };
+    }
+    match arctern_client::raw(
+        &daemon_socket(config),
+        method,
+        path,
+        body.map(String::into_bytes),
+    )
+    .await
+    {
+        Ok((status, bytes)) => Response::ProxyOk {
+            status,
+            body: String::from_utf8_lossy(&bytes).into_owned(),
+        },
+        Err(e) => Response::Error {
+            code: ErrorCode::Internal,
+            message: format!(
+                "local daemon unreachable at {}: {e}",
+                daemon_socket(config).display()
+            ),
+        },
     }
 }
 

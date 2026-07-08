@@ -10,14 +10,14 @@ import {
 import type { JobStatus } from '../client'
 import { apiErrorMessage, useMutation } from './useMutation'
 
-export function useJobs(refreshMs = 5000) {
+export function useJobs(refreshMs = 5000, baseUrl = '') {
   const jobs = ref<JobStatus[]>([])
   const error = ref<string | null>(null)
   const loading = ref(true)
   const { mutate } = useMutation()
 
   async function refresh() {
-    const r = await listJobs()
+    const r = await listJobs({ baseUrl })
     if (r.error) {
       error.value = apiErrorMessage(r.error)
     } else {
@@ -32,29 +32,29 @@ export function useJobs(refreshMs = 5000) {
   onUnmounted(() => clearInterval(handle))
 
   async function wake(name: string) {
-    await mutate(`Woke up ${name}`, () => wakeup({ path: { name } }))
+    await mutate(`Woke up ${name}`, () => wakeup({ path: { name }, baseUrl }))
     void refresh()
   }
 
   async function cancel(name: string) {
-    await mutate(`Cancelled ${name}`, () => cancelJob({ path: { name } }), {
+    await mutate(`Cancelled ${name}`, () => cancelJob({ path: { name }, baseUrl }), {
       successDescription: 'Partial recv state on the receiver keeps the transfer resumable.',
     })
     void refresh()
   }
 
   async function pause(name: string) {
-    await mutate(`Paused ${name}`, () => pauseJob({ path: { name } }))
+    await mutate(`Paused ${name}`, () => pauseJob({ path: { name }, baseUrl }))
     void refresh()
   }
 
   async function resume(name: string) {
-    await mutate(`Resumed ${name}`, () => resumeJob({ path: { name } }))
+    await mutate(`Resumed ${name}`, () => resumeJob({ path: { name }, baseUrl }))
     void refresh()
   }
 
   async function pushTo(name: string, peer: string) {
-    await mutate(`Queued push to ${peer}`, () => pushToPeer({ path: { name, peer } }), {
+    await mutate(`Queued push to ${peer}`, () => pushToPeer({ path: { name, peer }, baseUrl }), {
       successDescription: `${name} will replicate to ${peer} within seconds.`,
     })
     void refresh()

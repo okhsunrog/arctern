@@ -97,6 +97,23 @@ pub async fn wakeup_job(socket: &Path, name: &str) -> Result<(), ClientError> {
     Ok(())
 }
 
+/// Raw passthrough for the stdinserver's generic proxy: forward one
+/// request to the daemon's UDS and return `(status, body)` verbatim.
+/// The caller owns method/path validation.
+pub async fn raw(
+    socket: &Path,
+    method: &str,
+    path: &str,
+    body: Option<Vec<u8>>,
+) -> Result<(u16, Bytes), ClientError> {
+    let method = Method::from_bytes(method.as_bytes()).map_err(|_| ClientError::Status {
+        code: 405,
+        body: format!("unsupported method {method:?}"),
+    })?;
+    let (status, bytes) = request(socket, method, path, body).await?;
+    Ok((status.as_u16(), bytes))
+}
+
 async fn request(
     socket: &Path,
     method: Method,

@@ -9,7 +9,7 @@ const { peers, error, loading } = usePeers()
 <template>
   <UDashboardPanel id="peers">
     <template #header>
-      <UDashboardNavbar title="Peers" />
+      <UDashboardNavbar title="Peer links" />
     </template>
     <template #body>
       <div class="mx-auto w-full max-w-7xl space-y-4">
@@ -26,7 +26,7 @@ const { peers, error, loading } = usePeers()
             <template #header>
               <div class="flex items-center justify-between">
                 <RouterLink
-                  :to="`/peers/${encodeURIComponent(p.name)}/jobs`"
+                  :to="`/h/${encodeURIComponent(p.name)}/dashboard`"
                   class="font-mono font-semibold hover:underline"
                 >
                   {{ p.name }}
@@ -96,20 +96,12 @@ const { peers, error, loading } = usePeers()
             <template #footer>
               <div class="flex gap-2">
                 <UButton
-                  :to="`/peers/${encodeURIComponent(p.name)}/jobs`"
+                  :to="`/h/${encodeURIComponent(p.name)}/dashboard`"
                   size="xs"
                   variant="soft"
-                  icon="i-lucide-list-checks"
+                  icon="i-lucide-square-arrow-out-up-right"
                 >
-                  Jobs
-                </UButton>
-                <UButton
-                  :to="`/peers/${encodeURIComponent(p.name)}/snapshots`"
-                  size="xs"
-                  variant="soft"
-                  icon="i-lucide-camera"
-                >
-                  Snapshots
+                  Open console
                 </UButton>
               </div>
             </template>

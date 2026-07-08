@@ -3,14 +3,18 @@ import { computed, onMounted, ref } from 'vue'
 import { getConfig } from '../client'
 import type { ConfigView as ConfigViewT } from '../client'
 import { apiErrorMessage } from '../composables/useMutation'
+import { useHost } from '../composables/useHost'
 
 const config = ref<ConfigViewT | null>(null)
 const error = ref<string | null>(null)
 const copied = ref(false)
 const raw = ref(false)
 
+const { host, baseUrl } = useHost()
+const title = computed(() => (host.value ? `${host.value} · Config` : 'Config'))
+
 async function refresh() {
-  const r = await getConfig()
+  const r = await getConfig({ baseUrl: baseUrl.value })
   if (r.error) {
     error.value = apiErrorMessage(r.error)
   } else {
@@ -93,7 +97,7 @@ const sections = computed<Section[]>(() => {
 <template>
   <UDashboardPanel id="config">
     <template #header>
-      <UDashboardNavbar title="Config">
+      <UDashboardNavbar :title="title">
         <template #right>
           <USwitch v-model="raw" label="Raw" size="sm" />
           <UButton icon="i-lucide-refresh-cw" variant="soft" size="xs" @click="refresh">

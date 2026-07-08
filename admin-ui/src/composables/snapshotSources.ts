@@ -1,18 +1,14 @@
-// One data-source interface behind the snapshot browser, so browsing
-// the local pool and browsing a peer are the SAME interaction — the
-// only differences are which endpoints answer and which capabilities
-// (create, hold management) the source exposes.
+// One data source behind the snapshot browser. Host scoping happens at
+// the transport level (`baseUrl` routes through the peer proxy), so a
+// peer exposes the SAME endpoints and the SAME capabilities as the
+// local host — no parallel lesser implementation for peers.
 
 import {
   createHold,
   createSnapshot,
-  destroyPeerSnapshot,
   destroySnapshot,
   listDatasets,
   listHolds,
-  listPeerDatasets,
-  listPeerSnapshotHolds,
-  listPeerSnapshots,
   listSnapshots,
   releaseHold,
 } from '../client'
@@ -25,9 +21,9 @@ export interface SnapshotRow {
   creation: number | null
   /** Bytes, when known. */
   used: number | null
-  /** ZFS GUID as string (peer sources; local zfs list omits it here). */
+  /** ZFS GUID as string, when known. */
   guid?: string
-  /** Full property map (local source only). */
+  /** Full property map. */
   properties?: Record<string, string>
 }
 
@@ -42,7 +38,6 @@ export interface SnapshotSource {
   listSnapshots(dataset: string): Promise<{ data?: SnapshotRow[]; error?: unknown }>
   listHolds(dataset: string, tag: string): Promise<{ data?: SnapshotHold[]; error?: unknown }>
   destroy(dataset: string, tag: string): Promise<CallResult>
-  /** Optional capabilities — absent means the UI hides the control. */
   create?(dataset: string, name: string, recursive: boolean): Promise<CallResult>
   holdCreate?(dataset: string, tag: string, holdTag: string): Promise<CallResult>
   holdRelease?(dataset: string, tag: string, holdTag: string): Promise<CallResult>
@@ -53,12 +48,12 @@ function tagOf(full: string): string {
   return at >= 0 ? full.slice(at + 1) : full
 }
 
-export function localSource(): SnapshotSource {
+export function hostSource(baseUrl = '', hostLabel = ''): SnapshotSource {
   return {
-    hostLabel: '',
-    listDatasets: () => listDatasets(),
+    hostLabel,
+    listDatasets: () => listDatasets({ baseUrl }),
     async listSnapshots(dataset) {
-      const r = await listSnapshots({ path: { name: dataset } })
+      const r = await listSnapshots({ path: { name: dataset }, baseUrl })
       if (r.error) return { error: r.error }
       return {
         data: (r.data ?? []).map((s) => ({
@@ -70,41 +65,19 @@ export function localSource(): SnapshotSource {
       }
     },
     async listHolds(dataset, tag) {
-      const r = await listHolds({ path: { name: dataset, snapshot: tag } })
+      const r = await listHolds({ path: { name: dataset, snapshot: tag }, baseUrl })
       return r.error ? { error: r.error } : { data: r.data ?? [] }
     },
-    destroy: (dataset, tag) => destroySnapshot({ path: { name: dataset, snapshot: tag } }),
+    destroy: (dataset, tag) => destroySnapshot({ path: { name: dataset, snapshot: tag }, baseUrl }),
     create: (dataset, name, recursive) =>
-      createSnapshot({ path: { name: dataset }, body: { snapshot_name: name, recursive } }),
+      createSnapshot({
+        path: { name: dataset },
+        body: { snapshot_name: name, recursive },
+        baseUrl,
+      }),
     holdCreate: (dataset, tag, holdTag) =>
-      createHold({ path: { name: dataset, snapshot: tag }, body: { tag: holdTag } }),
+      createHold({ path: { name: dataset, snapshot: tag }, body: { tag: holdTag }, baseUrl }),
     holdRelease: (dataset, tag, holdTag) =>
-      releaseHold({ path: { name: dataset, snapshot: tag, tag: holdTag } }),
-  }
-}
-
-export function peerSource(peer: string): SnapshotSource {
-  return {
-    hostLabel: peer,
-    listDatasets: () => listPeerDatasets({ path: { peer } }),
-    async listSnapshots(dataset) {
-      const r = await listPeerSnapshots({ path: { peer }, query: { dataset } })
-      if (r.error) return { error: r.error }
-      return {
-        data: (r.data ?? []).map((s) => ({
-          tag: s.name,
-          creation: s.creation ?? null,
-          used: s.used ?? null,
-          guid: s.guid,
-        })),
-      }
-    },
-    async listHolds(dataset, tag) {
-      const r = await listPeerSnapshotHolds({ path: { peer, name: dataset, snapshot: tag } })
-      return r.error ? { error: r.error } : { data: r.data ?? [] }
-    },
-    destroy: (dataset, tag) => destroyPeerSnapshot({ path: { peer, name: `${dataset}@${tag}` } }),
-    // No create / hold management on a peer: the receiver's snapshots
-    // are the sender's replicas, and the ACL surface stays minimal.
+      releaseHold({ path: { name: dataset, snapshot: tag, tag: holdTag }, baseUrl }),
   }
 }

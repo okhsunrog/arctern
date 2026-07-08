@@ -2,6 +2,7 @@
 import { computed, h, resolveComponent } from 'vue'
 import { useRoute } from 'vue-router'
 import type { TableColumn } from '@nuxt/ui'
+import { useHost } from '../composables/useHost'
 import { useJobs } from '../composables/useJobs'
 import { useJobRuns } from '../composables/useJobRuns'
 import { formatBytes, formatTimestamp } from '../utils/format'
@@ -14,10 +15,15 @@ import type { JobRun } from '../client'
 const route = useRoute()
 const name = computed(() => String(route.params.name))
 
-const { jobs, error: jobsError, wake, cancel, pause, resume, pushTo } = useJobs()
+const { host, baseUrl, prefix } = useHost()
+const { jobs, error: jobsError, wake, cancel, pause, resume, pushTo } = useJobs(5000, baseUrl.value)
 const job = computed(() => jobs.value.find((j) => j.name === name.value))
 
-const { runs, error: runsError, loading: runsLoading } = useJobRuns(name.value)
+const {
+  runs,
+  error: runsError,
+  loading: runsLoading,
+} = useJobRuns(name.value, 10_000, 100, baseUrl.value)
 
 const UBadge = resolveComponent('UBadge')
 
@@ -60,10 +66,10 @@ const tableColumns = computed<TableColumn<JobRun>[]>(() => [
 <template>
   <UDashboardPanel id="job-detail">
     <template #header>
-      <UDashboardNavbar :title="name">
+      <UDashboardNavbar :title="host ? `${host} · ${name}` : name">
         <template #leading>
           <UButton
-            to="/jobs"
+            :to="`${prefix}/jobs`"
             icon="i-lucide-arrow-left"
             variant="ghost"
             color="neutral"

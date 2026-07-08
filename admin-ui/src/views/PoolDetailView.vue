@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
+import { useHost } from '../composables/useHost'
 import { usePool } from '../composables/usePools'
 import type { ScrubRequest } from '../client'
 import { parseZpoolSize } from '../utils/pool'
@@ -11,7 +12,8 @@ import VdevTree from '../components/VdevTree.vue'
 
 const route = useRoute()
 const name = computed(() => String(route.params.name))
-const { pool, error, scrub } = usePool(name.value)
+const { host, baseUrl, prefix } = useHost()
+const { pool, error, scrub } = usePool(name.value, 3000, baseUrl.value)
 const { mutate } = useMutation()
 
 async function scrubAction(action: ScrubRequest['action']) {
@@ -57,10 +59,10 @@ const scrubPct = computed(() => {
 <template>
   <UDashboardPanel id="pool-detail">
     <template #header>
-      <UDashboardNavbar :title="name">
+      <UDashboardNavbar :title="host ? `${host} · ${name}` : name">
         <template #leading>
           <UButton
-            to="/pools"
+            :to="`${prefix}/pools`"
             icon="i-lucide-arrow-left"
             variant="ghost"
             color="neutral"

@@ -1,9 +1,12 @@
 <script setup lang="ts">
+import { useHost } from '../composables/useHost'
 import type { JobStatus } from '../client'
 import { formatNextRun, formatRelative } from '../utils/format'
 import { formatLastSync, formatNextSync } from '../utils/pushTimes'
 import { jobStatus } from '../utils/status'
 import TransferPanel from './TransferPanel.vue'
+
+const { prefix } = useHost()
 
 defineProps<{
   jobs: JobStatus[]
@@ -22,7 +25,7 @@ defineProps<{
         <div class="flex items-center justify-between">
           <div class="min-w-0">
             <RouterLink
-              :to="`/jobs/${j.name}`"
+              :to="`${prefix}/jobs/${j.name}`"
               class="font-semibold font-mono hover:underline truncate block"
             >
               {{ j.name }}

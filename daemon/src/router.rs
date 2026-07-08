@@ -69,6 +69,7 @@ fn openapi_router() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::peers::destroy_peer_snapshot))
         .routes(routes!(handlers::peers::stream_peer_events))
         .routes(routes!(handlers::events::stream_events))
+        .routes(routes!(handlers::events::recent_events))
         .routes(routes!(handlers::config::get_config))
         .routes(routes!(handlers::pools::list_pools))
         .routes(routes!(handlers::pools::get_pool))
@@ -83,11 +84,18 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
 }
 
 fn build_api_router(state: AppState) -> Router {
-    let (router, api) = openapi_router().with_state(state).split_for_parts();
-    router.route(
-        "/api-docs/openapi.json",
-        get(move || async move { Json(api.clone()) }),
-    )
+    let (router, api) = openapi_router().with_state(state.clone()).split_for_parts();
+    router
+        .route(
+            "/api-docs/openapi.json",
+            get(move || async move { Json(api.clone()) }),
+        )
+        // Wildcard passthrough for host-scoped peer management; plain
+        // axum route — the OpenAPI surface stays the mirrored local API.
+        .route(
+            "/api/v1/peers/{peer}/proxy/api/v1/{*rest}",
+            axum::routing::any(handlers::peers::proxy_any).with_state(state),
+        )
 }
 
 /// Router for the UNIX-socket bind. Same-UID middleware is applied to

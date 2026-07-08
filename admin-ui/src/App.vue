@@ -3,11 +3,13 @@ import { computed } from 'vue'
 import { RouterView, useRouter } from 'vue-router'
 import { useColorMode } from '@vueuse/core'
 import type { NavigationMenuItem } from '@nuxt/ui'
+import { useHost } from './composables/useHost'
 import { useJobs } from './composables/useJobs'
 import { usePeers } from './composables/usePeers'
 import { usePools } from './composables/usePools'
 
 const router = useRouter()
+const { host, prefix } = useHost()
 const mode = useColorMode({ initialValue: 'dark' })
 
 // Shell-level polling doubles as the command palette's data source and
@@ -19,51 +21,70 @@ const { pools } = usePools(15_000)
 const failingJobs = computed(() => jobs.value.filter((j) => j.last_error).length)
 const runningJobs = computed(() => jobs.value.filter((j) => j.running).length)
 const sickPools = computed(() => pools.value.filter((p) => p.state !== 'ONLINE').length)
-const connectedPeers = computed(
-  () => peers.value.filter((p) => p.reachability.kind === 'connected').length,
-)
-
 function chip(count: number, color: 'error' | 'info'): NavigationMenuItem['badge'] {
   return count > 0 ? { label: String(count), color, variant: 'subtle', size: 'sm' } : undefined
 }
 
-const nav = computed<NavigationMenuItem[]>(() => [
-  { label: 'Overview', type: 'label' },
-  { label: 'Dashboard', to: '/', icon: 'i-lucide-layout-dashboard' },
-  { label: 'Replication', type: 'label' },
+// The hosts group makes scope switching a first-class navigation act:
+// the local daemon and every peer are equal entries, and the section
+// nav below always talks about the SELECTED host.
+const hostsNav = computed<NavigationMenuItem[]>(() => [
+  { label: 'Hosts', type: 'label' },
   {
-    label: 'Jobs',
-    to: '/jobs',
-    icon: 'i-lucide-list-checks',
-    badge: chip(failingJobs.value, 'error') ?? chip(runningJobs.value, 'info'),
+    label: 'this host',
+    to: '/dashboard',
+    icon: 'i-lucide-house',
+    active: host.value === null,
   },
-  {
-    label: 'Peers',
-    to: '/peers',
+  ...peers.value.map((p) => ({
+    label: p.name,
+    to: `/h/${encodeURIComponent(p.name)}/dashboard`,
     icon: 'i-lucide-radio-tower',
-    badge:
-      peers.value.length > 0
-        ? {
-            label: `${connectedPeers.value}/${peers.value.length}`,
-            color: connectedPeers.value > 0 ? 'success' : 'neutral',
-            variant: 'subtle',
-            size: 'sm',
-          }
-        : undefined,
-  },
-  { label: 'Snapshots', to: '/snapshots', icon: 'i-lucide-camera' },
-  { label: 'Storage', type: 'label' },
-  {
-    label: 'Pools',
-    to: '/pools',
-    icon: 'i-lucide-hard-drive',
-    badge: chip(sickPools.value, 'error'),
-  },
-  { label: 'ARC', to: '/arc', icon: 'i-lucide-zap' },
-  { label: 'System', type: 'label' },
-  { label: 'Events', to: '/events', icon: 'i-lucide-activity' },
-  { label: 'Config', to: '/config', icon: 'i-lucide-file-code-2' },
+    active: host.value === p.name,
+    badge: {
+      label: p.reachability.kind === 'connected' ? (p.active_route ?? 'up') : 'down',
+      color: (p.reachability.kind === 'connected' ? 'success' : 'error') as 'success' | 'error',
+      variant: 'subtle' as const,
+      size: 'sm' as const,
+    },
+  })),
+  ...(host.value === null
+    ? [
+        {
+          label: 'Peer links',
+          to: '/peers',
+          icon: 'i-lucide-waypoints',
+        } satisfies NavigationMenuItem,
+      ]
+    : []),
 ])
+
+const nav = computed<NavigationMenuItem[]>(() => {
+  const pre = prefix.value
+  const local = host.value === null
+  return [
+    { label: host.value ?? 'this host', type: 'label' },
+    { label: 'Dashboard', to: `${pre}/dashboard`, icon: 'i-lucide-layout-dashboard' },
+    {
+      label: 'Jobs',
+      to: `${pre}/jobs`,
+      icon: 'i-lucide-list-checks',
+      badge: local
+        ? (chip(failingJobs.value, 'error') ?? chip(runningJobs.value, 'info'))
+        : undefined,
+    },
+    { label: 'Snapshots', to: `${pre}/snapshots`, icon: 'i-lucide-camera' },
+    {
+      label: 'Pools',
+      to: `${pre}/pools`,
+      icon: 'i-lucide-hard-drive',
+      badge: local ? chip(sickPools.value, 'error') : undefined,
+    },
+    { label: 'ARC', to: `${pre}/arc`, icon: 'i-lucide-zap' },
+    { label: 'Events', to: `${pre}/events`, icon: 'i-lucide-activity' },
+    { label: 'Config', to: `${pre}/config`, icon: 'i-lucide-file-code-2' },
+  ]
+})
 
 // ⌘K palette: navigation + live quick actions.
 const searchGroups = computed(() => [
@@ -111,10 +132,10 @@ const searchGroups = computed(() => [
     id: 'peers',
     label: 'Peers',
     items: peers.value.map((p) => ({
-      label: `${p.name} — open`,
+      label: `${p.name} — open console`,
       suffix: p.reachability.kind,
       icon: 'i-lucide-radio-tower',
-      onSelect: () => router.push(`/peers/${encodeURIComponent(p.name)}/jobs`),
+      onSelect: () => router.push(`/h/${encodeURIComponent(p.name)}/dashboard`),
     })),
   },
   {
@@ -156,6 +177,13 @@ function toggleMode() {
 
         <template #default="{ collapsed }">
           <UDashboardSearchButton :collapsed="collapsed" class="mb-2" />
+          <UNavigationMenu
+            :collapsed="collapsed"
+            :items="hostsNav"
+            orientation="vertical"
+            highlight
+          />
+          <USeparator class="my-2" />
           <UNavigationMenu :collapsed="collapsed" :items="nav" orientation="vertical" highlight />
         </template>
 

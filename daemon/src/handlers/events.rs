@@ -71,6 +71,47 @@ pub async fn stream_events(
     )
 }
 
+#[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
+pub struct RecentEventsQuery {
+    /// Maximum rows, newest kept, returned oldest-first. Default 100.
+    pub limit: Option<i64>,
+}
+
+/// JSON tail of the event log. The SSE stream carries live data; this
+/// endpoint exists for backlog replay — in particular the peer-events
+/// bridge fetches it through the generic proxy so a freshly opened
+/// peer console shows context instead of an empty feed.
+#[utoipa::path(
+    get,
+    path = "/api/v1/events/recent",
+    tag = "events",
+    params(RecentEventsQuery),
+    responses(
+        (status = 200, description = "Most recent log events, oldest first",
+         body = Vec<LogEvent>),
+    ),
+)]
+pub async fn recent_events(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<RecentEventsQuery>,
+) -> axum::Json<Vec<LogEvent>> {
+    let limit = q.limit.unwrap_or(100).clamp(1, 1000);
+    let rows = crate::state::log_events::recent(&state.state, limit)
+        .await
+        .unwrap_or_default();
+    axum::Json(
+        rows.into_iter()
+            .map(|row| LogEvent {
+                id: row.id as u64,
+                timestamp: row.timestamp,
+                level: row.level,
+                job_name: row.job_name,
+                message: row.message,
+            })
+            .collect(),
+    )
+}
+
 fn serialise(ev: &LogEvent) -> Event {
     let payload = serde_json::to_string(ev).unwrap_or_else(|_| "{}".into());
     Event::default().id(ev.id.to_string()).data(payload)

@@ -109,51 +109,6 @@ pub async fn cursor(pool: &SqlitePool) -> Result<i64, StateError> {
     Ok(v.unwrap_or(0))
 }
 
-/// Spawn a background task that polls `log_events` every 500ms and
-/// broadcasts each new row as `arctern_api::LogEvent` to subscribers.
-/// Stops when `cancel` fires.
-pub fn spawn_poller(
-    pool: Arc<SqlitePool>,
-    sender: tokio::sync::broadcast::Sender<arctern_api::LogEvent>,
-    cancel: tokio_util::sync::CancellationToken,
-) -> tokio::task::JoinHandle<()> {
-    use std::time::Duration;
-    tokio::spawn(async move {
-        // Start from the current cursor — the broadcast is for live
-        // events; backlog replay is the SSE handler's job (it queries
-        // `since` directly before subscribing).
-        let mut cursor = cursor(&pool).await.unwrap_or(0);
-        let interval = Duration::from_millis(500);
-        loop {
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => return,
-                _ = tokio::time::sleep(interval) => {}
-            }
-            let rows = match since(&pool, cursor, 256).await {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("log_events poller: {e}");
-                    continue;
-                }
-            };
-            for row in rows {
-                cursor = row.id;
-                let ev = arctern_api::LogEvent {
-                    id: row.id as u64,
-                    timestamp: row.timestamp,
-                    level: row.level,
-                    job_name: row.job_name,
-                    message: row.message,
-                };
-                // Best-effort send; if there are no subscribers the
-                // broadcast::Sender swallows the value harmlessly.
-                let _ = sender.send(ev);
-            }
-        }
-    })
-}
-
 /// Trim rows older than `cutoff_unix_seconds` (typically `now - 24h`).
 pub async fn trim_older_than(
     pool: &SqlitePool,
@@ -175,17 +130,61 @@ pub struct LogRow {
     pub message: String,
 }
 
-/// `tracing` Layer that mirrors INFO+ events into the SQLite log table.
-/// Writes happen via `tokio::spawn(async move { ... })` so the calling
-/// task is never blocked on the DB; failures are logged to stderr (not
-/// recursively traced — that would be a feedback loop).
+/// One event captured by the tracing layer, before it has an id.
+#[derive(Debug)]
+struct PendingEvent {
+    timestamp: i64,
+    level: String,
+    job_name: Option<String>,
+    message: String,
+}
+
+/// `tracing` Layer that mirrors INFO+ events into the event pipeline:
+/// layer → mpsc → single writer task → SQLite insert (assigns the id)
+/// → in-process broadcast. The broadcast is the PRIMARY live channel
+/// (SSE and the peer event stream read it); SQLite is a subscriber
+/// that provides durability and backlog replay — never a bus to poll.
 pub struct SqliteLogLayer {
-    pool: Arc<SqlitePool>,
+    tx: tokio::sync::mpsc::Sender<PendingEvent>,
 }
 
 impl SqliteLogLayer {
-    pub fn new(pool: Arc<SqlitePool>) -> Self {
-        Self { pool }
+    /// Build the layer plus its writer task. Events flow to `events_tx`
+    /// with their SQLite rowid as `id`, microseconds after emission —
+    /// the 500ms poll latency this replaces is gone. `events_tx` may
+    /// have zero subscribers (stdinserver processes); sends are
+    /// best-effort.
+    pub fn with_writer(
+        pool: Arc<SqlitePool>,
+        events_tx: tokio::sync::broadcast::Sender<arctern_api::LogEvent>,
+    ) -> (Self, tokio::task::JoinHandle<()>) {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<PendingEvent>(1024);
+        let writer = tokio::spawn(async move {
+            while let Some(ev) = rx.recv().await {
+                match insert(
+                    pool.as_ref(),
+                    ev.timestamp,
+                    &ev.level,
+                    ev.job_name.as_deref(),
+                    &ev.message,
+                )
+                .await
+                {
+                    Ok(id) => {
+                        let _ = events_tx.send(arctern_api::LogEvent {
+                            id: id as u64,
+                            timestamp: ev.timestamp,
+                            level: ev.level,
+                            job_name: ev.job_name,
+                            message: ev.message,
+                        });
+                    }
+                    // Bypass tracing to avoid a feedback loop on DB failure.
+                    Err(e) => eprintln!("SqliteLogLayer insert failed: {e}"),
+                }
+            }
+        });
+        (Self { tx }, writer)
     }
 
     /// Per-layer filter that gates this layer alone: INFO and above,
@@ -221,28 +220,18 @@ where
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let pool = self.pool.clone();
-        // tracing events can fire from non-runtime threads; `spawn`
-        // there would panic inside the subscriber. Drop the row instead
-        // — stderr still carries it via the fmt layer.
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            eprintln!("SqliteLogLayer: no tokio runtime; dropping log event: {message}");
-            return;
-        };
-        handle.spawn(async move {
-            if let Err(e) = insert(
-                pool.as_ref(),
-                timestamp,
-                &level,
-                job_name.as_deref(),
-                &message,
-            )
-            .await
-            {
-                // Bypass tracing to avoid a feedback loop on DB failure.
-                eprintln!("SqliteLogLayer insert failed: {e}");
-            }
-        });
+        // try_send: the layer must never block the emitting task; a
+        // full queue (1024 pending inserts) means SQLite is wedged and
+        // dropping the mirror copy is the right failure mode — stderr
+        // still carries the event via the fmt layer.
+        if let Err(e) = self.tx.try_send(PendingEvent {
+            timestamp,
+            level,
+            job_name,
+            message,
+        }) {
+            eprintln!("SqliteLogLayer: event queue full/closed; dropping: {e}");
+        }
     }
 }
 
@@ -323,7 +312,9 @@ mod tests {
     async fn layer_writes_info_events_and_skips_debug() {
         use tracing_subscriber::Layer as _;
         let pool = Arc::new(open_in_memory().await.unwrap());
-        let layer = SqliteLogLayer::new(pool.clone()).with_filter(SqliteLogLayer::filter());
+        let (events_tx, mut events_rx) = tokio::sync::broadcast::channel(16);
+        let (layer, _writer) = SqliteLogLayer::with_writer(pool.clone(), events_tx);
+        let layer = layer.with_filter(SqliteLogLayer::filter());
         let subscriber = Registry::default().with(layer);
         let _guard = subscriber.set_default();
 
@@ -347,5 +338,10 @@ mod tests {
         assert_eq!(rows[0].message, "cycle ok");
         assert_eq!(rows[0].level, "INFO");
         assert_eq!(rows[0].job_name.as_deref(), Some("backup"));
+
+        // The broadcast half saw the same event, with the SQLite id.
+        let live = events_rx.try_recv().expect("event on the bus");
+        assert_eq!(live.id as i64, rows[0].id);
+        assert_eq!(live.message, "cycle ok");
     }
 }

@@ -127,8 +127,12 @@ async fn run_stdinserver_dispatch(identity: String, config: PathBuf) -> eyre::Re
         .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal());
     if let Some(p) = pool.clone() {
-        let sqlite_layer = state::log_events::SqliteLogLayer::new(p)
-            .with_filter(state::log_events::SqliteLogLayer::filter());
+        // No in-process subscribers here — the broadcast half exists so
+        // the writer task has a uniform signature; the daemon is the
+        // one who fans events out.
+        let (events_tx, _) = tokio::sync::broadcast::channel(16);
+        let (layer, _writer) = state::log_events::SqliteLogLayer::with_writer(p, events_tx);
+        let sqlite_layer = layer.with_filter(state::log_events::SqliteLogLayer::filter());
         tracing_subscriber::registry()
             .with(filter)
             .with(fmt_layer)
@@ -234,8 +238,13 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal());
-    let sqlite_layer = state::log_events::SqliteLogLayer::new(pool.clone())
-        .with_filter(state::log_events::SqliteLogLayer::filter());
+    // Event bus: tracing layer → writer task (SQLite assigns ids) →
+    // this broadcast. SSE handlers subscribe directly; there is no
+    // polling anywhere in the daemon-side pipeline.
+    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<arctern_api::LogEvent>(256);
+    let (sqlite_layer, _events_writer) =
+        state::log_events::SqliteLogLayer::with_writer(pool.clone(), events_tx.clone());
+    let sqlite_layer = sqlite_layer.with_filter(state::log_events::SqliteLogLayer::filter());
     tracing_subscriber::registry()
         .with(env_filter)
         .with(fmt_layer)
@@ -291,12 +300,6 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
     let trim_cancel = tokio_util::sync::CancellationToken::new();
     let trim_sweeper = state::spawn_trim_sweeper(pool.clone(), trim_cancel.clone());
 
-    // Local SSE broadcast: a poller drains new log_events rows every
-    // 500ms and fans them out to subscribed handlers.
-    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<arctern_api::LogEvent>(256);
-    let events_cancel = tokio_util::sync::CancellationToken::new();
-    let events_poller =
-        state::log_events::spawn_poller(pool.clone(), events_tx.clone(), events_cancel.clone());
     let shutdown_token = tokio_util::sync::CancellationToken::new();
     let app_state = app_state::AppState {
         manager: manager.clone(),
@@ -368,8 +371,6 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
     for h in reconnect_handles {
         let _ = h.await;
     }
-    events_cancel.cancel();
-    let _ = events_poller.await;
     arc_cancel.cancel();
     let _ = arc_sweeper.await;
     trim_cancel.cancel();

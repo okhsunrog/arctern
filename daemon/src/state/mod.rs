@@ -19,6 +19,7 @@ pub mod arcstats;
 pub mod job_runs;
 pub mod log_events;
 pub mod push_syncs;
+pub mod recv_transfers;
 
 #[derive(Debug, Error)]
 pub enum StateError {
@@ -105,6 +106,22 @@ async fn migrate(pool: &SqlitePool) -> Result<(), StateError> {
     .await
     .map_err(StateError::Migrate)?;
     sqlx::query(
+        "CREATE TABLE IF NOT EXISTS recv_transfers (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            completed_at  INTEGER NOT NULL,
+            job           TEXT NOT NULL,
+            identity      TEXT NOT NULL,
+            dataset       TEXT NOT NULL,
+            to_snapshot   TEXT NOT NULL,
+            from_snapshot TEXT,
+            bytes         INTEGER NOT NULL,
+            duration_ms   INTEGER NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(StateError::Migrate)?;
+    sqlx::query(
         "CREATE TABLE IF NOT EXISTS arcstats_history (
             timestamp INTEGER PRIMARY KEY,
             size      INTEGER NOT NULL,
@@ -148,6 +165,11 @@ pub fn spawn_trim_sweeper(
                 log_events::trim_older_than(&pool, now - LOG_EVENTS_RETENTION_SECONDS).await
             {
                 tracing::warn!(error = %e, "log_events trim failed");
+            }
+            if let Err(e) =
+                recv_transfers::trim_older_than(&pool, now - JOB_RUNS_RETENTION_SECONDS).await
+            {
+                tracing::warn!(error = %e, "recv_transfers trim failed");
             }
         }
     })

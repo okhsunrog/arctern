@@ -33,7 +33,7 @@ pub async fn list_jobs(State(state): State<AppState>) -> Json<Vec<JobStatus>> {
             last_error: s.last_error,
             running: s.running,
             paused: s.paused,
-            transfer: s.transfer,
+            transfers: s.transfers,
             targets: s.targets,
         })
         .collect();

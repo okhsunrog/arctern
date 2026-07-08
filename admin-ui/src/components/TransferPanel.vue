@@ -1,67 +1,14 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
 import type { JobStatus } from '../client'
-import { formatBytes } from '../utils/format'
+import TransferSlot from './TransferSlot.vue'
 
-const props = defineProps<{
+defineProps<{
   job: JobStatus
   onCancel?: (name: string) => void
   onPause?: (name: string) => void
   onResume?: (name: string) => void
   onPushTo?: (name: string, peer: string) => void
 }>()
-
-// Speed: seeded from the server's `started_at` (whole-transfer average,
-// meaningful even on the first poll), then EMA-refined from bytes_sent
-// deltas between polls.
-const lastSample = ref<{ bytes: number; at: number } | null>(null)
-const rate = ref<number | null>(null)
-
-watch(
-  () => props.job.transfer?.bytes_sent,
-  (bytes) => {
-    const now = Date.now()
-    const t = props.job.transfer
-    if (bytes == null || !t) {
-      lastSample.value = null
-      rate.value = null
-      return
-    }
-    if (rate.value == null && t.started_at) {
-      const elapsed = now / 1000 - t.started_at
-      if (elapsed > 2 && bytes > 0) rate.value = bytes / elapsed
-    }
-    if (lastSample.value && bytes >= lastSample.value.bytes) {
-      const dt = (now - lastSample.value.at) / 1000
-      if (dt > 0.5) {
-        const inst = (bytes - lastSample.value.bytes) / dt
-        rate.value = rate.value == null ? inst : rate.value * 0.6 + inst * 0.4
-        lastSample.value = { bytes, at: now }
-      }
-    } else {
-      lastSample.value = { bytes, at: now }
-    }
-  },
-  { immediate: true },
-)
-
-const t = computed(() => props.job.transfer)
-const pct = computed(() => {
-  if (!t.value?.total_bytes) return null
-  return Math.min(100, (t.value.bytes_sent / t.value.total_bytes) * 100)
-})
-const eta = computed(() => {
-  if (!t.value?.total_bytes || !rate.value || rate.value < 1) return null
-  const left = (t.value.total_bytes - t.value.bytes_sent) / rate.value
-  if (left < 90) return `${Math.round(left)}s`
-  if (left < 5400) return `${Math.round(left / 60)}m`
-  return `${(left / 3600).toFixed(1)}h`
-})
-const elapsed = computed(() => {
-  if (!t.value?.started_at) return null
-  const s = Math.max(0, Math.floor(Date.now() / 1000) - t.value.started_at)
-  return fmtIn(s)
-})
 
 function age(unixSec?: number | null): string {
   if (!unixSec) return 'never'
@@ -101,22 +48,13 @@ function targetLine(tg: {
 
 <template>
   <div class="space-y-3">
-    <!-- In-flight transfer -->
-    <div v-if="t" class="space-y-1">
-      <div class="flex items-center justify-between text-sm">
-        <span class="font-mono truncate" :title="t.dataset">
-          {{ t.dataset }} <span class="text-muted">→ {{ t.peer }} ({{ t.kind }})</span>
-        </span>
-        <span class="text-muted shrink-0 ml-2 font-mono text-xs">
-          {{ formatBytes(t.bytes_sent)
-          }}<template v-if="t.total_bytes"> / {{ formatBytes(t.total_bytes) }}</template>
-          <template v-if="rate"> · {{ formatBytes(rate) }}/s</template>
-          <template v-if="eta"> · ~{{ eta }} left</template>
-          <template v-else-if="elapsed"> · {{ elapsed }} elapsed</template>
-        </span>
-      </div>
-      <UProgress v-if="pct != null" :model-value="pct" size="sm" />
-      <UProgress v-else size="sm" animation="carousel" />
+    <!-- In-flight transfers, one row per parallel send slot -->
+    <div v-if="job.transfers?.length" class="space-y-2">
+      <TransferSlot
+        v-for="t in job.transfers"
+        :key="`${t.peer}:${t.dataset}`"
+        :transfer="t"
+      />
     </div>
 
     <!-- Per-target policy + manual trigger -->

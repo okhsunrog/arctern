@@ -9,7 +9,10 @@
 //!   6. Advance the last-received hold (`arctern_last_J_<job>`) to the
 //!      just-received snapshot so a receiver-side prune job cannot
 //!      destroy the last common snapshot between syncs.
-//!   7. Write a single `ResponseFrame` (Ok / Error) to stdout.
+//!   7. Record the completed transfer (bytes, duration) in
+//!      `recv_transfers` and emit a structured completion event —
+//!      receiver-side visibility for the "Incoming" panel.
+//!   8. Write a single `ResponseFrame` (Ok / Error) to stdout.
 
 use std::sync::Arc;
 
@@ -22,6 +25,7 @@ use palimpsest::dataset::ListOptions;
 use palimpsest::models::DatasetType;
 use palimpsest::recv::{RecvArgs, recv as zfs_recv};
 use palimpsest::runner::CommandRunner;
+use sqlx::SqlitePool;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Drive one recv channel from start to finish. Errors are surfaced as
@@ -31,6 +35,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub async fn run<R, W>(
     runner: Arc<dyn CommandRunner>,
     acl: AllowedClient,
+    pool: Option<Arc<SqlitePool>>,
     job: &str,
     mut reader: R,
     mut writer: W,
@@ -54,8 +59,9 @@ where
             return Ok(());
         }
     };
+    let started = std::time::Instant::now();
     let outcome = drive(&runner, &acl, &header, &mut reader).await;
-    if outcome.is_ok() {
+    if let Ok(bytes) = outcome {
         advance_last_hold(
             runner.as_ref(),
             job,
@@ -63,11 +69,12 @@ where
             &header.send.to_snap.name,
         )
         .await;
+        report_transfer(pool.as_deref(), job, &acl.identity, &header, bytes, started).await;
     }
     let resp = ResponseFrame {
         request_id: None,
         body: match outcome {
-            Ok(()) => Response::Ok,
+            Ok(_) => Response::Ok,
             Err((code, message)) => Response::Error { code, message },
         },
     };
@@ -136,7 +143,7 @@ async fn drive<R>(
     acl: &AllowedClient,
     header: &RecvHeader,
     reader: &mut R,
-) -> Result<(), (ErrorCode, String)>
+) -> Result<u64, (ErrorCode, String)>
 where
     R: AsyncRead + Unpin,
 {
@@ -203,6 +210,7 @@ where
         let _ = child_stderr.read_to_end(&mut buf).await;
         buf
     });
+    // `copy` returns the byte count — that IS the transfer size report.
     let copy_res = tokio::io::copy(reader, &mut child_stdin).await;
     let _ = child_stdin.shutdown().await;
     drop(child_stdin);
@@ -229,7 +237,45 @@ where
             ),
         ));
     }
-    Ok(())
+    Ok(copy_res.unwrap_or(0))
+}
+
+/// Persist + announce one completed transfer. Best-effort on both
+/// counts: the stream has already landed, so a reporting failure must
+/// never fail the replication step.
+async fn report_transfer(
+    pool: Option<&SqlitePool>,
+    job: &str,
+    identity: &str,
+    header: &RecvHeader,
+    bytes: u64,
+    started: std::time::Instant,
+) {
+    let duration_ms = started.elapsed().as_millis() as i64;
+    let from = header.send.from_snap.as_ref().map(|s| s.name.as_str());
+    tracing::info!(
+        dataset = %header.target_dataset,
+        snapshot = %header.send.to_snap.name,
+        bytes,
+        duration_ms,
+        "recv: transfer complete"
+    );
+    let Some(pool) = pool else { return };
+    if let Err(e) = crate::state::recv_transfers::record(
+        pool,
+        time::OffsetDateTime::now_utc().unix_timestamp(),
+        job,
+        identity,
+        &header.target_dataset,
+        &header.send.to_snap.name,
+        from,
+        bytes as i64,
+        duration_ms,
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "recv: transfer record failed");
+    }
 }
 
 fn validate_header(header: &RecvHeader) -> Result<(), (ErrorCode, String)> {

@@ -30,8 +30,9 @@ pub struct JobStatusInner {
     /// True while the job is paused (current transfer aborted resumably,
     /// scheduled cycles suspended).
     pub paused: bool,
-    /// In-flight transfer progress (push jobs only).
-    pub transfer: Option<arctern_api::TransferInfo>,
+    /// In-flight transfer progress (push jobs only), one entry per
+    /// parallel send slot.
+    pub transfers: Vec<arctern_api::TransferInfo>,
     /// Per-target replication policy + last outcome (push jobs only).
     pub targets: Vec<arctern_api::TargetStatus>,
 }

@@ -125,7 +125,7 @@ const tableColumns = computed<TableColumn<JobRun>[]>(() => [
                 </template>
               </dl>
             </div>
-            <div v-if="job.transfer || job.targets?.length || job.paused" class="mt-4">
+            <div v-if="job.transfers?.length || job.targets?.length || job.paused" class="mt-4">
               <TransferPanel
                 :job="job"
                 :on-cancel="cancel"

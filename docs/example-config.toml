@@ -106,8 +106,12 @@ targets = ["nas", "nas-remote"]
 # target is due and wakes on Send now / peer connectivity changes.
 # `interval` is optional and only bounds the blind sleep (default 15m).
 # interval = "15m"
-# Cap outgoing replication bandwidth (per second); unset = unthrottled.
+# Cap outgoing replication bandwidth (per second); shared across
+# parallel sends. Unset = unthrottled.
 # bandwidth_limit = "10MiB"
+# Filesystems replicated concurrently per target peer (own recv channel
+# each). 1..=4; default 1 (sequential).
+# parallel = 2
 dry_run = true # first-run safety: plan and log actions without sending
 filesystems = { "novafs/arch0/" = true, "novafs/arch0" = false, "novafs/arch0/data" = false }
 [jobs.target]

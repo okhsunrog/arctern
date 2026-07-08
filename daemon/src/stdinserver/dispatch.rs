@@ -86,7 +86,7 @@ pub async fn run_with(
             tracing::info!(identity, job, "stdinserver recv: opening channel");
             let stdin = tokio::io::stdin();
             let stdout = tokio::io::stdout();
-            super::recv::run(runner, acl, &job, stdin, stdout)
+            super::recv::run(runner, acl, pool, &job, stdin, stdout)
                 .await
                 .map_err(|e| eyre::eyre!("recv channel: {e}"))?;
             Ok(())

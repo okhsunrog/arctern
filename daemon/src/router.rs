@@ -62,6 +62,7 @@ fn openapi_router() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::peers::stream_peer_events))
         .routes(routes!(handlers::events::stream_events))
         .routes(routes!(handlers::events::recent_events))
+        .routes(routes!(handlers::transfers::recent_transfers))
         .routes(routes!(handlers::config::get_config))
         .routes(routes!(handlers::pools::list_pools))
         .routes(routes!(handlers::pools::get_pool))

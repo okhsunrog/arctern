@@ -2,6 +2,7 @@
 import { computed, h, resolveComponent } from 'vue'
 import type { TableColumn } from '@nuxt/ui'
 import { useHost } from '../composables/useHost'
+import IncomingTransfers from '../components/IncomingTransfers.vue'
 import { useJobs } from '../composables/useJobs'
 import { formatNextRun, formatRelative } from '../utils/format'
 import { formatLastSync, formatNextSync } from '../utils/pushTimes'
@@ -137,6 +138,7 @@ const columns = computed<TableColumn<JobStatus>[]>(() => [
           :loading="loading && jobs.length === 0"
           class="rounded-md border border-default bg-default"
         />
+        <IncomingTransfers :base-url="baseUrl" />
       </div>
     </template>
   </UDashboardPanel>

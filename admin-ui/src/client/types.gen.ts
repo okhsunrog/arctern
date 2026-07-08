@@ -157,7 +157,11 @@ export type JobStatus = {
      * (resumably) and scheduled cycles are suspended until resumed.
      */
     paused?: boolean;
-    transfer?: null | TransferInfo;
+    /**
+     * In-flight transfers, one per parallel send slot. UI derives
+     * speed from `bytes_sent` deltas between polls.
+     */
+    transfers?: Array<TransferInfo>;
     /**
      * Push jobs: per-target replication policy + last outcome.
      * Empty for snap/prune jobs.
@@ -272,6 +276,31 @@ export type PoolSummary = {
     alloc_space: string;
     total_space: string;
     scan?: null | ScanSummary;
+};
+
+/**
+ * One completed inbound transfer, as recorded by the recv channel on
+ * this host. `GET /api/v1/transfers/recent`.
+ */
+export type RecvTransfer = {
+    id: number;
+    /**
+     * Unix seconds.
+     */
+    completed_at: number;
+    /**
+     * Receiver-side job name the sender addressed.
+     */
+    job: string;
+    /**
+     * Sender identity from `[[allowed_clients]]`.
+     */
+    identity: string;
+    dataset: string;
+    to_snapshot: string;
+    from_snapshot?: string | null;
+    bytes: number;
+    duration_ms: number;
 };
 
 export type ScanSummary = {
@@ -1113,3 +1142,24 @@ export type GetArcHistoryResponses = {
 };
 
 export type GetArcHistoryResponse = GetArcHistoryResponses[keyof GetArcHistoryResponses];
+
+export type RecentTransfersData = {
+    body?: never;
+    path?: never;
+    query?: {
+        /**
+         * Maximum rows, newest first. Default 50.
+         */
+        limit?: number | null;
+    };
+    url: '/api/v1/transfers/recent';
+};
+
+export type RecentTransfersResponses = {
+    /**
+     * Most recent completed inbound transfers, newest first
+     */
+    200: Array<RecvTransfer>;
+};
+
+export type RecentTransfersResponse = RecentTransfersResponses[keyof RecentTransfersResponses];

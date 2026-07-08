@@ -585,6 +585,50 @@ async fn maybe_bookmark_fallback(
     }
 }
 
+/// Shared token bucket for one job's outgoing bandwidth. Debt-based:
+/// each stream may overshoot by one chunk and then sleeps off the
+/// debt, so N parallel sends still sum to `rate`. Burst credit is
+/// capped at half a second of rate — absorbs scheduler jitter without
+/// letting an idle gap turn into an unthrottled surge.
+pub struct RateLimiter {
+    rate: f64,
+    burst: f64,
+    inner: Mutex<(tokio::time::Instant, f64)>,
+}
+
+impl RateLimiter {
+    pub fn new(rate: u64) -> Self {
+        let rate = rate as f64;
+        let burst = (rate * 0.5).max(256.0 * 1024.0);
+        Self {
+            rate,
+            burst,
+            inner: Mutex::new((tokio::time::Instant::now(), burst)),
+        }
+    }
+
+    /// Account `n` sent bytes; sleeps whatever is needed to keep the
+    /// aggregate under the configured rate.
+    pub async fn throttle(&self, n: u64) {
+        let wait = {
+            let mut g = self.inner.lock().unwrap();
+            let now = tokio::time::Instant::now();
+            let dt = now.duration_since(g.0).as_secs_f64();
+            g.0 = now;
+            g.1 = (g.1 + dt * self.rate).min(self.burst);
+            g.1 -= n as f64;
+            if g.1 < 0.0 {
+                StdDuration::from_secs_f64(-g.1 / self.rate)
+            } else {
+                StdDuration::ZERO
+            }
+        };
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
+    }
+}
+
 /// Open a recv channel for one plan, spawn `zfs send` locally, copy
 /// stdout into the channel, await the receiver's terminal Response.
 /// Cancellation: the `cancel` token races against the bulk copy loop;
@@ -599,9 +643,10 @@ async fn execute_one_plan(
     target_dataset: &str,
     sender_dataset: &str,
     flags: &SendFlagsConfig,
-    bandwidth_limit: Option<u64>,
+    limiter: Option<&RateLimiter>,
     cancel: &CancellationToken,
-    transfer: &Mutex<Option<TransferInfo>>,
+    transfers: &Mutex<HashMap<String, TransferInfo>>,
+    transfer_key: &str,
 ) -> Result<(), String> {
     let Some(send_header) = build_send_header(plan, flags) else {
         return Err("build_send_header returned None for non-Nothing plan".into());
@@ -650,7 +695,6 @@ async fn execute_one_plan(
         let mut buf = vec![0u8; 256 * 1024];
         let mut copied: u64 = 0;
         let mut last_published: u64 = 0;
-        let throttle_start = tokio::time::Instant::now();
         loop {
             let step = async {
                 let n = child_stdout.read(&mut buf).await?;
@@ -670,24 +714,20 @@ async fn execute_one_plan(
                 break;
             }
             copied += n as u64;
-            // Token-bucket-by-arithmetic: if we are ahead of the
-            // configured rate, sleep off the surplus. Chunk-grained
-            // (256 KiB) which is plenty smooth at network scales.
-            if let Some(rate) = bandwidth_limit {
-                let expected = StdDuration::from_secs_f64(copied as f64 / rate as f64);
-                let elapsed = throttle_start.elapsed();
-                if expected > elapsed {
-                    tokio::time::sleep(expected - elapsed).await;
-                }
+            // Chunk-grained (256 KiB) throttling, plenty smooth at
+            // network scales. The bucket is shared job-wide so
+            // parallel sends stay under the aggregate limit.
+            if let Some(l) = limiter {
+                l.throttle(n as u64).await;
             }
             if copied - last_published >= 8 * 1024 * 1024 {
                 last_published = copied;
-                if let Some(t) = transfer.lock().unwrap().as_mut() {
+                if let Some(t) = transfers.lock().unwrap().get_mut(transfer_key) {
                     t.bytes_sent = copied;
                 }
             }
         }
-        if let Some(t) = transfer.lock().unwrap().as_mut() {
+        if let Some(t) = transfers.lock().unwrap().get_mut(transfer_key) {
             t.bytes_sent = copied;
         }
         Ok(copied)
@@ -746,9 +786,10 @@ async fn run_one_filesystem(
     plan: &SnapshotPlan,
     sender_snaps: &[SnapshotRef],
     flags: &SendFlagsConfig,
-    bandwidth_limit: Option<u64>,
+    limiter: Option<&RateLimiter>,
     cancel: &CancellationToken,
-    transfer: &Mutex<Option<TransferInfo>>,
+    transfers: &Mutex<HashMap<String, TransferInfo>>,
+    transfer_key: &str,
 ) -> Result<(), String> {
     let to_hold_target: Option<(String, u64)> = match plan {
         SnapshotPlan::Full { to, .. }
@@ -791,9 +832,10 @@ async fn run_one_filesystem(
         target_dataset,
         sender_dataset,
         flags,
-        bandwidth_limit,
+        limiter,
         cancel,
-        transfer,
+        transfers,
+        transfer_key,
     )
     .await?;
 
@@ -895,8 +937,11 @@ const BLOCKED_RETRY: StdDuration = StdDuration::from_secs(5 * 60);
 
 pub struct PushJob {
     config: PushJobConfig,
-    /// Parsed `bandwidth_limit`, bytes per second.
-    bandwidth_limit: Option<u64>,
+    /// Shared token bucket built from `bandwidth_limit`; all parallel
+    /// sends of this job draw from the same bucket.
+    limiter: Option<Arc<RateLimiter>>,
+    /// Filesystems replicated concurrently per target peer.
+    parallel: usize,
     /// Bumped by the reconnect tasks on any peer state change so the
     /// scheduler re-evaluates due-ness the moment a link appears.
     peers_changed: Option<tokio::sync::watch::Receiver<u64>>,
@@ -909,8 +954,9 @@ pub struct PushJob {
     /// here so that a reconnect performed by the background task takes
     /// effect on the next cycle without restarting the job.
     peers: Option<PeersState>,
-    /// In-flight transfer progress, mirrored into `status()`.
-    transfer: Arc<Mutex<Option<TransferInfo>>>,
+    /// In-flight transfer progress, mirrored into `status()`. Keyed by
+    /// `peer:dataset` — one entry per parallel send slot.
+    transfers: Arc<Mutex<HashMap<String, TransferInfo>>>,
     /// Pause = abort the current transfer (resumable) + suspend
     /// scheduled cycles until `resume`.
     paused: AtomicBool,
@@ -934,10 +980,12 @@ impl PushJob {
     ) -> Result<Self, regex::Error> {
         let filter = CompiledFilter::from_config(config.snapshot_filter())?;
         // Validated at config load; a parse failure here is unreachable.
-        let bandwidth_limit = config
+        let limiter = config
             .bandwidth_limit
             .as_deref()
-            .and_then(|s| arctern_config::parse_bytes_per_sec(s).ok());
+            .and_then(|s| arctern_config::parse_bytes_per_sec(s).ok())
+            .map(|rate| Arc::new(RateLimiter::new(rate)));
+        let parallel = config.parallel.unwrap_or(1).clamp(1, 4) as usize;
         let peer_configs = all_peer_configs
             .iter()
             .filter(|p| config.targets.contains(&p.name))
@@ -945,14 +993,15 @@ impl PushJob {
             .collect();
         Ok(Self {
             config,
-            bandwidth_limit,
+            limiter,
+            parallel,
             peers_changed,
             peer_configs,
             filter,
             status: Mutex::new(JobStatusInner::default()),
             wakeup: Arc::new(tokio::sync::Notify::new()),
             peers,
-            transfer: Arc::new(Mutex::new(None)),
+            transfers: Arc::new(Mutex::new(HashMap::new())),
             paused: AtomicBool::new(false),
             manual_requests: Mutex::new(BTreeSet::new()),
             cycle_cancel: Mutex::new(None),
@@ -1208,7 +1257,6 @@ impl PushJob {
         errors: &mut Vec<String>,
     ) -> u64 {
         let runner = ctx.runner.as_ref();
-        let mut cycle_bytes: u64 = 0;
         let sender_paths = match self.expand_filesystems(runner).await {
             Ok(p) => p,
             Err(e) => {
@@ -1216,136 +1264,178 @@ impl PushJob {
                 return 0;
             }
         };
-        for sender_path in &sender_paths {
-            if cancel.is_cancelled() {
-                break;
-            }
-            // FR-005: literal concat — target = root_fs/sender_path.
-            let target = format!("{}/{}", self.config.target.root_fs, sender_path);
-            tracing::info!(sender = %sender_path, target = %target, "push: planning");
-            let (plan, sender_snaps) = match plan_one_filesystem(
-                runner,
-                peer.as_ref(),
-                sender_path,
-                &target,
-                &self.filter,
-            )
-            .await
+        // Up to `parallel` filesystems replicate concurrently, each on
+        // its own recv channel. The futures run on this task (no
+        // spawn), so borrowing &self is fine; the shared RateLimiter
+        // keeps the aggregate under bandwidth_limit.
+        let errs = tokio::sync::Mutex::new(Vec::new());
+        let cycle_bytes = std::sync::atomic::AtomicU64::new(0);
+        futures_util::StreamExt::for_each_concurrent(
+            futures_util::stream::iter(sender_paths.iter()),
+            self.parallel,
+            |sender_path| {
+                let errs = &errs;
+                let cycle_bytes = &cycle_bytes;
+                async move {
+                    if cancel.is_cancelled() {
+                        return;
+                    }
+                    let (bytes, err) = self
+                        .replicate_one(ctx, cancel, peer_name, peer, sender_path)
+                        .await;
+                    cycle_bytes.fetch_add(bytes, Ordering::Relaxed);
+                    if let Some(e) = err {
+                        errs.lock().await.push(e);
+                    }
+                }
+            },
+        )
+        .await;
+        errors.extend(errs.into_inner());
+        cycle_bytes.into_inner()
+    }
+
+    /// Plan + execute one filesystem against one peer. Returns bytes
+    /// actually sent and at most one error message.
+    async fn replicate_one(
+        &self,
+        ctx: &JobContext,
+        cancel: &CancellationToken,
+        peer_name: &str,
+        peer: &Arc<PeerLink>,
+        sender_path: &str,
+    ) -> (u64, Option<String>) {
+        let runner = ctx.runner.as_ref();
+        // FR-005: literal concat — target = root_fs/sender_path.
+        let target = format!("{}/{}", self.config.target.root_fs, sender_path);
+        tracing::info!(sender = %sender_path, target = %target, "push: planning");
+        let (plan, sender_snaps) =
+            match plan_one_filesystem(runner, peer.as_ref(), sender_path, &target, &self.filter)
+                .await
             {
                 Ok(p) => p,
                 Err(e) => {
                     let msg = format!("plan {sender_path}: {e}");
                     warn!(error = %msg);
-                    errors.push(msg);
-                    continue;
+                    return (0, Some(msg));
                 }
             };
-            // If the planner picked discard, send the explicit Request
-            // before opening the recv channel — it's idempotent and
-            // makes the recv channel's first action a fresh, clean recv.
-            let needs_discard = matches!(
-                plan,
-                SnapshotPlan::Full {
-                    discard_partial_recv: true,
-                    ..
-                } | SnapshotPlan::Incremental {
-                    discard_partial_recv: true,
-                    ..
-                } | SnapshotPlan::IncrementalFromBookmark {
-                    discard_partial_recv: true,
-                    ..
-                }
-            );
-            if needs_discard {
-                if self.config.dry_run {
-                    tracing::info!(target = %target, "push: dry-run would discard partial receive state");
-                } else if let Err(e) = peer.discard_partial_recv(target.clone()).await {
-                    warn!(target = %target, error = %e, "discard_partial_recv RPC failed");
-                }
+        // If the planner picked discard, send the explicit RPC before
+        // opening the recv channel — it's idempotent and makes the recv
+        // channel's first action a fresh, clean recv.
+        let needs_discard = matches!(
+            plan,
+            SnapshotPlan::Full {
+                discard_partial_recv: true,
+                ..
+            } | SnapshotPlan::Incremental {
+                discard_partial_recv: true,
+                ..
+            } | SnapshotPlan::IncrementalFromBookmark {
+                discard_partial_recv: true,
+                ..
             }
-            match &plan {
-                SnapshotPlan::Nothing => {
-                    tracing::info!(sender = %sender_path, "push: nothing to do");
-                    continue;
-                }
-                SnapshotPlan::Full { to, .. } => {
-                    tracing::info!(sender = %sender_path, to = %to.name, "push: full send");
-                }
-                SnapshotPlan::Incremental { from, to, .. } => {
-                    tracing::info!(
-                        sender = %sender_path, from = %from.name, to = %to.name,
-                        "push: incremental send"
-                    );
-                }
-                SnapshotPlan::IncrementalFromBookmark { from, to, .. } => {
-                    tracing::info!(
-                        sender = %sender_path, from_bookmark = %from.name, to = %to.name,
-                        "push: incremental send from bookmark"
-                    );
-                }
-                SnapshotPlan::Resume { decoded, .. } => {
-                    tracing::info!(
-                        sender = %sender_path,
-                        to = %decoded.to_name,
-                        bytes = decoded.bytes_received,
-                        "push: resuming from token"
-                    );
-                }
-            }
+        );
+        if needs_discard {
             if self.config.dry_run {
-                tracing::info!(sender = %sender_path, target = %target, "push: dry-run skipping execution");
-                continue;
+                tracing::info!(target = %target, "push: dry-run would discard partial receive state");
+            } else if let Err(e) = peer.discard_partial_recv(target.clone()).await {
+                warn!(target = %target, error = %e, "discard_partial_recv RPC failed");
             }
-            // Publish transfer info for the UI. Total is a dry-run
-            // estimate; resume streams have no cheap estimate.
-            let kind = match &plan {
-                SnapshotPlan::Full { .. } => "full",
-                SnapshotPlan::Incremental { .. } | SnapshotPlan::IncrementalFromBookmark { .. } => {
-                    "incremental"
-                }
-                SnapshotPlan::Resume { .. } => "resume",
-                SnapshotPlan::Nothing => unreachable!("filtered above"),
-            };
-            let total = match build_send_args(&plan, sender_path, &self.config.send) {
-                Some(args) if kind != "resume" => palimpsest::send::dry_run(runner, &args)
-                    .await
-                    .ok()
-                    .map(|d| d.total_bytes),
-                _ => None,
-            };
-            *self.transfer.lock().unwrap() = Some(TransferInfo {
-                dataset: sender_path.clone(),
+        }
+        match &plan {
+            SnapshotPlan::Nothing => {
+                tracing::info!(sender = %sender_path, "push: nothing to do");
+                return (0, None);
+            }
+            SnapshotPlan::Full { to, .. } => {
+                tracing::info!(sender = %sender_path, to = %to.name, "push: full send");
+            }
+            SnapshotPlan::Incremental { from, to, .. } => {
+                tracing::info!(
+                    sender = %sender_path, from = %from.name, to = %to.name,
+                    "push: incremental send"
+                );
+            }
+            SnapshotPlan::IncrementalFromBookmark { from, to, .. } => {
+                tracing::info!(
+                    sender = %sender_path, from_bookmark = %from.name, to = %to.name,
+                    "push: incremental send from bookmark"
+                );
+            }
+            SnapshotPlan::Resume { decoded, .. } => {
+                tracing::info!(
+                    sender = %sender_path,
+                    to = %decoded.to_name,
+                    bytes = decoded.bytes_received,
+                    "push: resuming from token"
+                );
+            }
+        }
+        if self.config.dry_run {
+            tracing::info!(sender = %sender_path, target = %target, "push: dry-run skipping execution");
+            return (0, None);
+        }
+        // Publish transfer info for the UI. Total is a dry-run
+        // estimate; resume streams have no cheap estimate.
+        let kind = match &plan {
+            SnapshotPlan::Full { .. } => "full",
+            SnapshotPlan::Incremental { .. } | SnapshotPlan::IncrementalFromBookmark { .. } => {
+                "incremental"
+            }
+            SnapshotPlan::Resume { .. } => "resume",
+            SnapshotPlan::Nothing => unreachable!("filtered above"),
+        };
+        let total = match build_send_args(&plan, sender_path, &self.config.send) {
+            Some(args) if kind != "resume" => palimpsest::send::dry_run(runner, &args)
+                .await
+                .ok()
+                .map(|d| d.total_bytes),
+            _ => None,
+        };
+        let key = format!("{peer_name}:{sender_path}");
+        self.transfers.lock().unwrap().insert(
+            key.clone(),
+            TransferInfo {
+                dataset: sender_path.to_string(),
                 peer: peer_name.to_string(),
                 kind: kind.to_string(),
                 bytes_sent: 0,
                 total_bytes: total,
                 started_at: OffsetDateTime::now_utc().unix_timestamp(),
-            });
-            let res = run_one_filesystem(
-                runner,
-                peer.as_ref(),
-                &self.config.name,
-                peer_name,
-                sender_path,
-                &target,
-                &plan,
-                &sender_snaps,
-                &self.config.send,
-                self.bandwidth_limit,
-                cancel,
-                &self.transfer,
-            )
-            .await;
-            if let Some(t) = self.transfer.lock().unwrap().take() {
-                cycle_bytes += t.bytes_sent;
-            }
-            if let Err(e) = res {
+            },
+        );
+        let res = run_one_filesystem(
+            runner,
+            peer.as_ref(),
+            &self.config.name,
+            peer_name,
+            sender_path,
+            &target,
+            &plan,
+            &sender_snaps,
+            &self.config.send,
+            self.limiter.as_deref(),
+            cancel,
+            &self.transfers,
+            &key,
+        )
+        .await;
+        let bytes = self
+            .transfers
+            .lock()
+            .unwrap()
+            .remove(&key)
+            .map(|t| t.bytes_sent)
+            .unwrap_or(0);
+        match res {
+            Ok(()) => (bytes, None),
+            Err(e) => {
                 let msg = format!("execute {sender_path}: {e}");
                 warn!(error = %msg);
-                errors.push(msg);
+                (bytes, Some(msg))
             }
         }
-        cycle_bytes
     }
 }
 
@@ -1359,7 +1449,12 @@ impl Job for PushJob {
     fn status(&self) -> JobStatusInner {
         let mut s = self.status.lock().unwrap().clone();
         s.paused = self.paused.load(Ordering::Relaxed);
-        s.transfer = self.transfer.lock().unwrap().clone();
+        s.transfers = {
+            let g = self.transfers.lock().unwrap();
+            let mut v: Vec<TransferInfo> = g.values().cloned().collect();
+            v.sort_by(|a, b| (a.started_at, &a.dataset).cmp(&(b.started_at, &b.dataset)));
+            v
+        };
         // Best-effort snapshot via try_read: status() is sync and the
         // peers map is an async RwLock; a missed read shows the peer as
         // disconnected for one 5s poll — harmless.

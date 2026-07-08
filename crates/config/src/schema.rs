@@ -355,9 +355,13 @@ pub struct PushJobConfig {
     #[serde(default, with = "humantime_serde::option")]
     pub interval: Option<Duration>,
     /// Cap on outgoing replication bandwidth, e.g. "10MiB" (per second).
-    /// Applied inside the send copy loop; unset = unthrottled.
+    /// Shared across parallel sends; unset = unthrottled.
     #[serde(default)]
     pub bandwidth_limit: Option<String>,
+    /// Filesystems replicated concurrently per target peer, each on its
+    /// own recv channel. Clamped to 1..=4; default 1 (sequential).
+    #[serde(default)]
+    pub parallel: Option<u32>,
     #[serde(deserialize_with = "crate::filter::deserialize_filesystems")]
     pub filesystems: Vec<FilesystemFilter>,
     pub target: PushTarget,

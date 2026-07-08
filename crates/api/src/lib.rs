@@ -73,10 +73,10 @@ pub struct JobStatus {
     /// (resumably) and scheduled cycles are suspended until resumed.
     #[serde(default)]
     pub paused: bool,
-    /// The in-flight transfer, when one is running. UI derives speed
-    /// from `bytes_sent` deltas between polls.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transfer: Option<TransferInfo>,
+    /// In-flight transfers, one per parallel send slot. UI derives
+    /// speed from `bytes_sent` deltas between polls.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transfers: Vec<TransferInfo>,
     /// Push jobs: per-target replication policy + last outcome.
     /// Empty for snap/prune jobs.
     #[serde(default)]
@@ -376,6 +376,25 @@ pub struct PeerSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_route: Option<String>,
     pub routes: Vec<PeerRoute>,
+}
+
+/// One completed inbound transfer, as recorded by the recv channel on
+/// this host. `GET /api/v1/transfers/recent`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RecvTransfer {
+    pub id: i64,
+    /// Unix seconds.
+    pub completed_at: i64,
+    /// Receiver-side job name the sender addressed.
+    pub job: String,
+    /// Sender identity from `[[allowed_clients]]`.
+    pub identity: String,
+    pub dataset: String,
+    pub to_snapshot: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_snapshot: Option<String>,
+    pub bytes: i64,
+    pub duration_ms: i64,
 }
 
 /// One row in `GET /api/v1/events` (and the proxied

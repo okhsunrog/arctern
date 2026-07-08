@@ -11,7 +11,9 @@
   "paths": {
     "/api/v1/config": {
       "get": {
-        "tags": ["config"],
+        "tags": [
+          "config"
+        ],
         "operationId": "get_config",
         "responses": {
           "200": {
@@ -39,7 +41,9 @@
     },
     "/api/v1/datasets": {
       "get": {
-        "tags": ["datasets"],
+        "tags": [
+          "datasets"
+        ],
         "summary": "List datasets reachable through the daemon's shared `CommandRunner`\n(`AppState::runner`). RealRunner in production; SshCommandRunner\nonly when `PALIMPSEST_SSH_TARGET` is set for dev/test.",
         "operationId": "list_datasets",
         "responses": {
@@ -71,7 +75,9 @@
     },
     "/api/v1/datasets/{name}/snapshots": {
       "get": {
-        "tags": ["snapshots"],
+        "tags": [
+          "snapshots"
+        ],
         "summary": "List snapshots of `{name}` (one dataset, non-recursive). Properties\n`creation` and `used` come along so the UI can render age + size.",
         "operationId": "list_snapshots",
         "parameters": [
@@ -90,7 +96,10 @@
             "description": "Filter to snapshots whose tag (after the `@`) starts with this\nprefix. Useful to keep zrepl_-style snapshots out of the noise\nwhen manual snapshots also exist on the dataset.",
             "required": false,
             "schema": {
-              "type": ["string", "null"]
+              "type": [
+                "string",
+                "null"
+              ]
             }
           }
         ],
@@ -131,7 +140,9 @@
         }
       },
       "post": {
-        "tags": ["snapshots"],
+        "tags": [
+          "snapshots"
+        ],
         "summary": "Create a snapshot of `{name}` named `req.snapshot_name`.\n`palimpsest::ZfsError::SnapshotExists` maps to 409 — the caller\ndecides whether already-exists is fatal.",
         "operationId": "create_snapshot",
         "parameters": [
@@ -201,7 +212,9 @@
     },
     "/api/v1/datasets/{name}/snapshots/{snapshot}/destroy": {
       "post": {
-        "tags": ["snapshots"],
+        "tags": [
+          "snapshots"
+        ],
         "summary": "Destroy snapshot `{name}@{snapshot}`. Path-segment escaping: the\ndataset goes URL-encoded (`%2F` for `/`); the snapshot tag is the\npart after the `@`.",
         "operationId": "destroy_snapshot",
         "parameters": [
@@ -263,7 +276,9 @@
     },
     "/api/v1/datasets/{name}/snapshots/{snapshot}/holds": {
       "get": {
-        "tags": ["snapshots"],
+        "tags": [
+          "snapshots"
+        ],
         "summary": "`zfs holds <snapshot>` — list user holds blocking destroy. Empty\nvec means the snapshot is destroy-eligible (as far as holds are\nconcerned; sub-clones still block independently).",
         "operationId": "list_holds",
         "parameters": [
@@ -323,7 +338,9 @@
         }
       },
       "post": {
-        "tags": ["snapshots"],
+        "tags": [
+          "snapshots"
+        ],
         "summary": "Place a user hold on `{name}@{snapshot}`. Tags with the `arctern_`\nprefix are refused — they'd collide with the replication machinery's\nstep/last holds and be swept or misread by it.",
         "operationId": "create_hold",
         "parameters": [
@@ -395,7 +412,9 @@
     },
     "/api/v1/datasets/{name}/snapshots/{snapshot}/holds/{tag}": {
       "delete": {
-        "tags": ["snapshots"],
+        "tags": [
+          "snapshots"
+        ],
         "summary": "Release a user hold. `arctern_*` tags ARE allowed here — releasing\na stuck step hold from the UI is exactly the recovery path this\nendpoint exists for.",
         "operationId": "release_hold",
         "parameters": [
@@ -456,7 +475,9 @@
     },
     "/api/v1/events": {
       "get": {
-        "tags": ["events"],
+        "tags": [
+          "events"
+        ],
         "summary": "Subscribe to the daemon's log-event broadcast and yield each as an\nSSE frame, preceded by a replay of the most recent events so a\nfreshly opened page shows context instead of an empty feed until\nsomething new happens.",
         "operationId": "stream_events",
         "responses": {
@@ -468,7 +489,9 @@
     },
     "/api/v1/events/recent": {
       "get": {
-        "tags": ["events"],
+        "tags": [
+          "events"
+        ],
         "summary": "JSON tail of the event log. The SSE stream carries live data; this\nendpoint exists for backlog replay — in particular the peer-events\nbridge fetches it through the generic proxy so a freshly opened\npeer console shows context instead of an empty feed.",
         "operationId": "recent_events",
         "parameters": [
@@ -478,7 +501,10 @@
             "description": "Maximum rows, newest kept, returned oldest-first. Default 100.",
             "required": false,
             "schema": {
-              "type": ["integer", "null"],
+              "type": [
+                "integer",
+                "null"
+              ],
               "format": "int64"
             }
           }
@@ -502,7 +528,9 @@
     },
     "/api/v1/jobs": {
       "get": {
-        "tags": ["jobs"],
+        "tags": [
+          "jobs"
+        ],
         "operationId": "list_jobs",
         "responses": {
           "200": {
@@ -523,7 +551,9 @@
     },
     "/api/v1/jobs/{name}/cancel": {
       "post": {
-        "tags": ["jobs"],
+        "tags": [
+          "jobs"
+        ],
         "operationId": "cancel",
         "parameters": [
           {
@@ -551,7 +581,9 @@
     },
     "/api/v1/jobs/{name}/pause": {
       "post": {
-        "tags": ["jobs"],
+        "tags": [
+          "jobs"
+        ],
         "operationId": "pause",
         "parameters": [
           {
@@ -579,7 +611,9 @@
     },
     "/api/v1/jobs/{name}/push/{peer}": {
       "post": {
-        "tags": ["jobs"],
+        "tags": [
+          "jobs"
+        ],
         "operationId": "push_to_peer",
         "parameters": [
           {
@@ -623,7 +657,9 @@
     },
     "/api/v1/jobs/{name}/resume": {
       "post": {
-        "tags": ["jobs"],
+        "tags": [
+          "jobs"
+        ],
         "operationId": "resume",
         "parameters": [
           {
@@ -651,7 +687,9 @@
     },
     "/api/v1/jobs/{name}/runs": {
       "get": {
-        "tags": ["jobs"],
+        "tags": [
+          "jobs"
+        ],
         "operationId": "list_runs",
         "parameters": [
           {
@@ -669,7 +707,10 @@
             "description": "Unix-second cutoff; rows with `started_at >= since` are returned.",
             "required": false,
             "schema": {
-              "type": ["integer", "null"],
+              "type": [
+                "integer",
+                "null"
+              ],
               "format": "int64"
             }
           },
@@ -679,7 +720,10 @@
             "description": "Maximum number of rows to return. Defaults to 100, capped at 1000.",
             "required": false,
             "schema": {
-              "type": ["integer", "null"],
+              "type": [
+                "integer",
+                "null"
+              ],
               "format": "int64"
             }
           }
@@ -703,7 +747,9 @@
     },
     "/api/v1/jobs/{name}/wakeup": {
       "post": {
-        "tags": ["jobs"],
+        "tags": [
+          "jobs"
+        ],
         "operationId": "wakeup",
         "parameters": [
           {
@@ -728,7 +774,9 @@
     },
     "/api/v1/peers": {
       "get": {
-        "tags": ["peers"],
+        "tags": [
+          "peers"
+        ],
         "operationId": "list_peers",
         "responses": {
           "200": {
@@ -749,7 +797,9 @@
     },
     "/api/v1/peers/{peer}/events": {
       "get": {
-        "tags": ["peers"],
+        "tags": [
+          "peers"
+        ],
         "summary": "`GET /api/v1/peers/{peer}/events` — proxied SSE. Sends\nSubscribeEvents to the peer's control channel and yields each\npushed Event frame as an SSE frame.",
         "operationId": "stream_peer_events",
         "parameters": [
@@ -792,7 +842,9 @@
     },
     "/api/v1/pools": {
       "get": {
-        "tags": ["pools"],
+        "tags": [
+          "pools"
+        ],
         "operationId": "list_pools",
         "responses": {
           "200": {
@@ -823,7 +875,9 @@
     },
     "/api/v1/pools/{name}": {
       "get": {
-        "tags": ["pools"],
+        "tags": [
+          "pools"
+        ],
         "operationId": "get_pool",
         "parameters": [
           {
@@ -872,7 +926,9 @@
     },
     "/api/v1/pools/{name}/scrub": {
       "post": {
-        "tags": ["pools"],
+        "tags": [
+          "pools"
+        ],
         "operationId": "pool_scrub",
         "parameters": [
           {
@@ -924,7 +980,9 @@
     },
     "/api/v1/system/arc": {
       "get": {
-        "tags": ["system"],
+        "tags": [
+          "system"
+        ],
         "operationId": "get_arc",
         "responses": {
           "200": {
@@ -952,7 +1010,9 @@
     },
     "/api/v1/system/arc/history": {
       "get": {
-        "tags": ["system"],
+        "tags": [
+          "system"
+        ],
         "operationId": "get_arc_history",
         "parameters": [
           {
@@ -961,7 +1021,10 @@
             "description": "Unix-second cutoff; rows with `timestamp >= since` are returned.",
             "required": false,
             "schema": {
-              "type": ["integer", "null"],
+              "type": [
+                "integer",
+                "null"
+              ],
               "format": "int64"
             }
           },
@@ -971,7 +1034,10 @@
             "description": "Maximum rows to return. Default 1440 (24h at 1m resolution).",
             "required": false,
             "schema": {
-              "type": ["integer", "null"],
+              "type": [
+                "integer",
+                "null"
+              ],
               "format": "int64"
             }
           }
@@ -992,6 +1058,44 @@
           }
         }
       }
+    },
+    "/api/v1/transfers/recent": {
+      "get": {
+        "tags": [
+          "transfers"
+        ],
+        "operationId": "recent_transfers",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum rows, newest first. Default 50.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Most recent completed inbound transfers, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RecvTransfer"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -999,7 +1103,10 @@
       "ApiErrorBody": {
         "type": "object",
         "description": "Body shape for `4xx`/`5xx` responses from the daemon. `error` is a\nshort machine-readable category (`spawn`, `dataset_not_found`, …);\n`message` is a human-readable description.",
-        "required": ["error", "message"],
+        "required": [
+          "error",
+          "message"
+        ],
         "properties": {
           "error": {
             "type": "string"
@@ -1012,7 +1119,13 @@
       "ArcHistoryPoint": {
         "type": "object",
         "description": "One row of `GET /api/v1/system/arc/history`. Slim by design —\nonly the fields the dashboard chart consumes. Add more columns\n(and migrate `arcstats_history`) when a future view needs them.",
-        "required": ["timestamp", "size", "c", "hits", "misses"],
+        "required": [
+          "timestamp",
+          "size",
+          "c",
+          "hits",
+          "misses"
+        ],
         "properties": {
           "timestamp": {
             "type": "integer",
@@ -1186,7 +1299,10 @@
             "minimum": 0
           },
           "hit_ratio": {
-            "type": ["number", "null"],
+            "type": [
+              "number",
+              "null"
+            ],
             "format": "double",
             "description": "`hits / (hits + misses)`, `None` when the cache has had no\ntraffic yet (avoids leaking JSON `NaN`)."
           }
@@ -1195,7 +1311,10 @@
       "ConfigView": {
         "type": "object",
         "description": "Body of `GET /api/v1/config` — the on-disk TOML the daemon was\nstarted with, plus its absolute path. Read-only: there is no\nwrite-back endpoint, so this is a faithful echo of what's loaded,\nnot what the daemon may have parsed (you can spot drift by\ncomparing to the other endpoints).",
-        "required": ["path", "content_toml"],
+        "required": [
+          "path",
+          "content_toml"
+        ],
         "properties": {
           "path": {
             "type": "string"
@@ -1208,7 +1327,9 @@
       "CreateHoldRequest": {
         "type": "object",
         "description": "Body of `POST /api/v1/datasets/{name}/snapshots/{snapshot}/holds`.\n`arctern_*` tags are reserved for the replication machinery and\nrejected.",
-        "required": ["tag"],
+        "required": [
+          "tag"
+        ],
         "properties": {
           "tag": {
             "type": "string"
@@ -1218,7 +1339,9 @@
       "CreateSnapshotRequest": {
         "type": "object",
         "description": "Request body for `POST /api/v1/datasets/{name}/snapshots`. The path\nsegment carries the parent dataset; this struct carries everything\nelse. `recursive` and `properties` default so a minimal client can\npost `{\"snapshot_name\":\"…\"}` and get the common case.",
-        "required": ["snapshot_name"],
+        "required": [
+          "snapshot_name"
+        ],
         "properties": {
           "snapshot_name": {
             "type": "string"
@@ -1240,7 +1363,10 @@
       "DatasetSummary": {
         "type": "object",
         "description": "Slim projection of [`palimpsest::ZfsListEntry`] suitable for HTTP +\nOpenAPI. Native ZFS properties carry typed data (bytes, bool, …) but\n`BTreeMap<String, String>` serializes more cleanly through utoipa;\nconsumers parse property values as needed.",
-        "required": ["name", "dataset_type"],
+        "required": [
+          "name",
+          "dataset_type"
+        ],
         "properties": {
           "name": {
             "type": "string"
@@ -1263,24 +1389,36 @@
       "JobRun": {
         "type": "object",
         "description": "One row of `job_runs` returned by `GET /api/v1/jobs/{name}/runs`.\n`started_at` / `finished_at` are unix seconds; `bytes_sent` is set\nonly by push jobs that finished cleanly.",
-        "required": ["started_at", "status"],
+        "required": [
+          "started_at",
+          "status"
+        ],
         "properties": {
           "started_at": {
             "type": "integer",
             "format": "int64"
           },
           "finished_at": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64"
           },
           "status": {
             "type": "string"
           },
           "error_message": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "bytes_sent": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64"
           }
         }
@@ -1288,7 +1426,10 @@
       "JobStatus": {
         "type": "object",
         "description": "One entry in the response of `GET /api/v1/jobs`. RFC3339 timestamps\nare nullable: `last_run` is null until the job has completed at\nleast one cycle; `next_run` is set as soon as the loop knows when\nit will fire next; `last_error` is null when the most recent cycle\nfinished cleanly.",
-        "required": ["name", "kind"],
+        "required": [
+          "name",
+          "kind"
+        ],
         "properties": {
           "name": {
             "type": "string"
@@ -1297,13 +1438,22 @@
             "type": "string"
           },
           "last_run": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "next_run": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "last_error": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "running": {
             "type": "boolean",
@@ -1313,16 +1463,12 @@
             "type": "boolean",
             "description": "True while the job is paused: the current transfer was aborted\n(resumably) and scheduled cycles are suspended until resumed."
           },
-          "transfer": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/TransferInfo",
-                "description": "The in-flight transfer, when one is running. UI derives speed\nfrom `bytes_sent` deltas between polls."
-              }
-            ]
+          "transfers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TransferInfo"
+            },
+            "description": "In-flight transfers, one per parallel send slot. UI derives\nspeed from `bytes_sent` deltas between polls."
           },
           "targets": {
             "type": "array",
@@ -1336,7 +1482,12 @@
       "LogEvent": {
         "type": "object",
         "description": "One row in `GET /api/v1/events` (and the proxied\n`GET /api/v1/peers/{peer}/events`). Mirrors\n`arctern_transport::EventWire` but lives in the public API surface\nso clients don't pull in the transport crate.",
-        "required": ["id", "timestamp", "level", "message"],
+        "required": [
+          "id",
+          "timestamp",
+          "level",
+          "message"
+        ],
         "properties": {
           "id": {
             "type": "integer",
@@ -1352,7 +1503,10 @@
             "type": "string"
           },
           "job_name": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "message": {
             "type": "string"
@@ -1364,18 +1518,25 @@
           {
             "type": "object",
             "description": "SSH session is up and the control channel is responding.",
-            "required": ["kind"],
+            "required": [
+              "kind"
+            ],
             "properties": {
               "kind": {
                 "type": "string",
-                "enum": ["connected"]
+                "enum": [
+                  "connected"
+                ]
               }
             }
           },
           {
             "type": "object",
             "description": "Background task is between reconnect attempts.",
-            "required": ["since", "kind"],
+            "required": [
+              "since",
+              "kind"
+            ],
             "properties": {
               "since": {
                 "type": "string",
@@ -1383,14 +1544,20 @@
               },
               "kind": {
                 "type": "string",
-                "enum": ["reconnecting"]
+                "enum": [
+                  "reconnecting"
+                ]
               }
             }
           },
           {
             "type": "object",
             "description": "Last connect attempt failed; the loop is sleeping before retrying.",
-            "required": ["since", "last_error", "kind"],
+            "required": [
+              "since",
+              "last_error",
+              "kind"
+            ],
             "properties": {
               "since": {
                 "type": "string",
@@ -1401,7 +1568,9 @@
               },
               "kind": {
                 "type": "string",
-                "enum": ["failed"]
+                "enum": [
+                  "failed"
+                ]
               }
             }
           }
@@ -1411,7 +1580,12 @@
       "PeerRoute": {
         "type": "object",
         "description": "One network route of a peer, in priority order (first = preferred).",
-        "required": ["name", "ssh_target", "auto", "health"],
+        "required": [
+          "name",
+          "ssh_target",
+          "auto",
+          "health"
+        ],
         "properties": {
           "name": {
             "type": "string"
@@ -1428,10 +1602,16 @@
             "description": "`\"connected\" | \"failed\" | \"unknown\"` — last connect result for\nthis route. Lower-priority routes are only probed on failover /\nre-rank, so `unknown` is the common idle state."
           },
           "last_error": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "last_checked": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "RFC3339 timestamp of the last connect attempt, if any."
           }
         }
@@ -1439,7 +1619,11 @@
       "PeerSummary": {
         "type": "object",
         "description": "One row in `GET /api/v1/peers`.",
-        "required": ["name", "reachability", "routes"],
+        "required": [
+          "name",
+          "reachability",
+          "routes"
+        ],
         "properties": {
           "name": {
             "type": "string"
@@ -1448,7 +1632,10 @@
             "$ref": "#/components/schemas/PeerReachability"
           },
           "active_route": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Name of the route the live link currently runs over."
           },
           "routes": {
@@ -1462,7 +1649,14 @@
       "PoolStatus": {
         "type": "object",
         "description": "`GET /api/v1/pools/{name}` — full status: scrub + recursive vdev tree.",
-        "required": ["name", "state", "error_count", "pool_guid", "txg", "vdevs"],
+        "required": [
+          "name",
+          "state",
+          "error_count",
+          "pool_guid",
+          "txg",
+          "vdevs"
+        ],
         "properties": {
           "name": {
             "type": "string"
@@ -1500,7 +1694,13 @@
       "PoolSummary": {
         "type": "object",
         "description": "One pool's slot in `GET /api/v1/pools`. Numeric fields are\n`zpool`-formatted strings (e.g. `\"608G\"`, `\"1.48T\"`) rather than\nraw bytes because that's what `zpool` emits and round-tripping\nthrough bytes risks rounding mismatches in the UI.",
-        "required": ["name", "state", "error_count", "alloc_space", "total_space"],
+        "required": [
+          "name",
+          "state",
+          "error_count",
+          "alloc_space",
+          "total_space"
+        ],
         "properties": {
           "name": {
             "type": "string"
@@ -1532,9 +1732,65 @@
           }
         }
       },
+      "RecvTransfer": {
+        "type": "object",
+        "description": "One completed inbound transfer, as recorded by the recv channel on\nthis host. `GET /api/v1/transfers/recent`.",
+        "required": [
+          "id",
+          "completed_at",
+          "job",
+          "identity",
+          "dataset",
+          "to_snapshot",
+          "bytes",
+          "duration_ms"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "completed_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix seconds."
+          },
+          "job": {
+            "type": "string",
+            "description": "Receiver-side job name the sender addressed."
+          },
+          "identity": {
+            "type": "string",
+            "description": "Sender identity from `[[allowed_clients]]`."
+          },
+          "dataset": {
+            "type": "string"
+          },
+          "to_snapshot": {
+            "type": "string"
+          },
+          "from_snapshot": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "bytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "duration_ms": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "ScanSummary": {
         "type": "object",
-        "required": ["function", "state"],
+        "required": [
+          "function",
+          "state"
+        ],
         "properties": {
           "function": {
             "type": "string",
@@ -1545,35 +1801,61 @@
             "description": "`\"SCANNING\"`, `\"FINISHED\"`, `\"CANCELED\"`."
           },
           "start_time": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "end_time": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "to_examine": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "examined": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "errors": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "pass_start": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "scrub_pause": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "issued": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
       "ScrubRequest": {
         "type": "object",
         "description": "Body of `POST /api/v1/pools/{name}/scrub`.",
-        "required": ["action"],
+        "required": [
+          "action"
+        ],
         "properties": {
           "action": {
             "type": "string",
@@ -1584,7 +1866,10 @@
       "SnapshotHold": {
         "type": "object",
         "description": "One hold entry returned by\n`GET /api/v1/datasets/{name}/snapshots/{snapshot}/holds`.\n`timestamp` is unix seconds.",
-        "required": ["tag", "timestamp"],
+        "required": [
+          "tag",
+          "timestamp"
+        ],
         "properties": {
           "tag": {
             "type": "string"
@@ -1599,7 +1884,11 @@
       "TargetStatus": {
         "type": "object",
         "description": "One replication target of a push job.",
-        "required": ["peer", "mode", "connected"],
+        "required": [
+          "peer",
+          "mode",
+          "connected"
+        ],
         "properties": {
           "peer": {
             "type": "string"
@@ -1612,7 +1901,10 @@
             "type": "boolean"
           },
           "route": {
-            "type": ["string", "null"],
+            "type": [
+              "string",
+              "null"
+            ],
             "description": "Active route name while connected (e.g. `\"lan\"`)."
           },
           "route_auto": {
@@ -1620,25 +1912,40 @@
             "description": "Whether the active route permits scheduled replication."
           },
           "auto_interval_secs": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
             "description": "For auto mode: the configured `auto_interval` in seconds. The\nnext auto sync is `last_success + auto_interval_secs` (or the\nnext planner tick when unset/no history).",
             "minimum": 0
           },
           "last_success": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
             "description": "Unix seconds of the last successful sync to this peer."
           },
           "last_error": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
       "TransferInfo": {
         "type": "object",
         "description": "Progress of an in-flight `zfs send` stream.",
-        "required": ["dataset", "peer", "kind", "bytes_sent", "started_at"],
+        "required": [
+          "dataset",
+          "peer",
+          "kind",
+          "bytes_sent",
+          "started_at"
+        ],
         "properties": {
           "dataset": {
             "type": "string"
@@ -1656,7 +1963,10 @@
             "minimum": 0
           },
           "total_bytes": {
-            "type": ["integer", "null"],
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
             "description": "Dry-run estimate. None for resume sends (no estimate available).",
             "minimum": 0
@@ -1708,7 +2018,10 @@
             "type": "string"
           },
           "path": {
-            "type": ["string", "null"]
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "children": {
             "type": "array",

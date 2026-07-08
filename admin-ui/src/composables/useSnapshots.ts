@@ -1,5 +1,5 @@
 import { onUnmounted, ref } from 'vue'
-import { destroySnapshot, listHolds, listSnapshots } from '../client'
+import { createSnapshot, destroySnapshot, listHolds, listSnapshots } from '../client'
 import type { DatasetSummary, SnapshotHold } from '../client'
 
 export function useSnapshots() {
@@ -60,6 +60,26 @@ export function useSnapshots() {
     holdsCache.value.set(snapshotName, r.data ?? [])
   }
 
+  async function create(snapshotName: string, recursive: boolean): Promise<boolean> {
+    if (!dataset.value) return false
+    const r = await createSnapshot({
+      path: { name: dataset.value },
+      body: { snapshot_name: snapshotName, recursive },
+    })
+    if (r.error) {
+      const body = r.error as { error?: string } | null
+      if (body?.error === 'snapshot_exists') {
+        setError(`Snapshot ${dataset.value}@${snapshotName} already exists.`)
+      } else {
+        setError(r.error)
+      }
+      return false
+    }
+    error.value = null
+    await refresh()
+    return true
+  }
+
   async function destroy(snapshotName: string) {
     const parts = splitName(snapshotName)
     if (!parts) {
@@ -101,6 +121,7 @@ export function useSnapshots() {
     error,
     loading,
     refresh,
+    create,
     destroy,
     loadHolds,
     holdsCache,

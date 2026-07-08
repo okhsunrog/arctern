@@ -307,6 +307,7 @@ pub fn pick_plan_with_token(
     receiver: &[SnapshotEntry],
     token: Option<&str>,
     decoded: Option<&palimpsest::resume_token::ResumeToken>,
+    sender_bookmarks: &[BookmarkRef],
 ) -> SnapshotPlan {
     let (Some(token), Some(decoded)) = (token, decoded) else {
         return pick_plan(sender, receiver);
@@ -314,9 +315,14 @@ pub fn pick_plan_with_token(
     use std::collections::BTreeSet;
     let sender_guids: BTreeSet<u64> = sender.iter().map(|s| s.guid).collect();
     let to_live = sender_guids.contains(&decoded.to_guid);
+    // The `from` base of an interrupted send is a BOOKMARK guid
+    // whenever the send was cursor-based — which is the normal daily
+    // case once the retention grid has thinned the sender's copy of
+    // the receiver's newest snapshot. Checking snapshots alone here
+    // discarded perfectly resumable partial receives.
     let from_live = decoded
         .from_guid
-        .map(|g| sender_guids.contains(&g))
+        .map(|g| sender_guids.contains(&g) || sender_bookmarks.iter().any(|b| b.guid == g))
         .unwrap_or(true);
     if to_live && from_live {
         SnapshotPlan::Resume {
@@ -537,7 +543,23 @@ async fn plan_one_filesystem(
         },
         None => None,
     };
-    let plan = pick_plan_with_token(&sender, &receiver, token.as_deref(), decoded.as_ref());
+    // Bookmarks participate in resume validation; list them once here
+    // (only when a token is in play — the common no-token path pays
+    // nothing extra; the fallback path lists lazily as before).
+    let bookmarks = if decoded.is_some() {
+        list_sender_bookmarks(runner, sender_dataset)
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let plan = pick_plan_with_token(
+        &sender,
+        &receiver,
+        token.as_deref(),
+        decoded.as_ref(),
+        &bookmarks,
+    );
     let plan = maybe_bookmark_fallback(runner, sender_dataset, plan, &receiver).await;
     Ok((plan, sender))
 }
@@ -562,7 +584,8 @@ async fn maybe_bookmark_fallback(
                 tracing::info!(
                     dataset = %sender_dataset,
                     bookmark = %from.name,
-                    "push: no common snapshot; falling back to incremental from bookmark"
+                    "push: incremental base is the cursor bookmark (sender's copy of the \
+                     receiver's newest snapshot already pruned — expected between syncs)"
                 );
             }
             plan
@@ -1717,6 +1740,55 @@ mod tests {
         assert!(is_cursor_bookmark_leaf(leaf, "backup", "home"));
         assert!(!is_cursor_bookmark_leaf(leaf, "backup", "other"));
         assert!(!is_cursor_bookmark_leaf(leaf, "other", "home"));
+    }
+
+    #[test]
+    fn resume_token_with_bookmark_base_stays_resume() {
+        // Interrupted cursor-based send: the token's from_guid is the
+        // BOOKMARK guid, absent from the snapshot list. The plan must
+        // stay Resume instead of discarding the partial receive.
+        let decoded = palimpsest::resume_token::ResumeToken {
+            token: "1-abc".into(),
+            to_name: "tank/data@zrepl_new".into(),
+            to_guid: 42,
+            from_guid: Some(777),
+            bytes_received: 4096,
+        };
+        let sender = vec![s("zrepl_new", 42)];
+        let receiver = vec![e("old", 1, 1)];
+        let bookmarks = vec![BookmarkRef {
+            leaf: "arctern_cursor_G_309_J_push_P_mira".into(),
+            guid: 777,
+            createtxg: 10,
+        }];
+        let got = pick_plan_with_token(
+            &sender,
+            &receiver,
+            Some("1-abc"),
+            Some(&decoded),
+            &bookmarks,
+        );
+        assert!(matches!(got, SnapshotPlan::Resume { .. }), "got {got:?}");
+    }
+
+    #[test]
+    fn resume_token_with_vanished_base_discards() {
+        // Neither a snapshot nor a bookmark carries the token's
+        // from_guid — the partial is genuinely unresumable.
+        let decoded = palimpsest::resume_token::ResumeToken {
+            token: "1-abc".into(),
+            to_name: "tank/data@zrepl_new".into(),
+            to_guid: 42,
+            from_guid: Some(777),
+            bytes_received: 4096,
+        };
+        let sender = vec![s("zrepl_new", 42)];
+        let receiver = vec![e("zrepl_new", 42, 9)];
+        let got = pick_plan_with_token(&sender, &receiver, Some("1-abc"), Some(&decoded), &[]);
+        assert!(
+            !matches!(got, SnapshotPlan::Resume { .. }),
+            "must not resume, got {got:?}"
+        );
     }
 
     #[test]

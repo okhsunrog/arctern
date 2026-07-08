@@ -1,13 +1,25 @@
 <script setup lang="ts">
 import type { JobStatus } from '../client'
 import { formatRelative } from '../utils/format'
+import TransferPanel from './TransferPanel.vue'
 
 defineProps<{
   jobs: JobStatus[]
   onWake?: (name: string) => void
+  onCancel?: (name: string) => void
+  onPause?: (name: string) => void
+  onResume?: (name: string) => void
+  onPushTo?: (name: string, peer: string) => void
 }>()
 
-function statusBadge(j: JobStatus): { label: string; color: 'success' | 'error' | 'neutral' } {
+function statusBadge(j: JobStatus): {
+  label: string
+  color: 'success' | 'error' | 'neutral' | 'info'
+} {
+  // running/paused win: last_error/last_run describe the previous
+  // cycle and are stale while a long send is in flight.
+  if (j.paused) return { label: 'paused', color: 'neutral' }
+  if (j.running) return { label: 'running', color: 'info' }
   if (j.last_error) return { label: 'error', color: 'error' }
   if (j.last_run) return { label: 'ok', color: 'success' }
   return { label: 'idle', color: 'neutral' }
@@ -41,6 +53,15 @@ function statusBadge(j: JobStatus): { label: string; color: 'success' | 'error' 
           {{ j.last_error }}
         </div>
       </dl>
+      <div v-if="j.transfer || j.targets.length || j.paused" class="mt-3">
+        <TransferPanel
+          :job="j"
+          :on-cancel="onCancel"
+          :on-pause="onPause"
+          :on-resume="onResume"
+          :on-push-to="onPushTo"
+        />
+      </div>
       <template #footer>
         <UButton size="xs" variant="soft" icon="i-lucide-zap" @click="onWake?.(j.name)"
           >Wakeup</UButton

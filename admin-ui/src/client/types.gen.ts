@@ -138,6 +138,22 @@ export type JobStatus = {
     last_run?: string | null;
     next_run?: string | null;
     last_error?: string | null;
+    /**
+     * True while a cycle is currently executing (e.g. a multi-hour
+     * full send). `last_*` fields describe the previous cycle.
+     */
+    running?: boolean;
+    /**
+     * True while the job is paused: the current transfer was aborted
+     * (resumably) and scheduled cycles are suspended until resumed.
+     */
+    paused?: boolean;
+    transfer?: null | TransferInfo;
+    /**
+     * Push jobs: per-target replication policy + last outcome.
+     * Empty for snap/prune jobs.
+     */
+    targets?: Array<TargetStatus>;
 };
 
 /**
@@ -272,6 +288,44 @@ export type ScrubRequest = {
 export type SnapshotHold = {
     tag: string;
     timestamp: number;
+};
+
+/**
+ * One replication target of a push job.
+ */
+export type TargetStatus = {
+    peer: string;
+    /**
+     * `"auto" | "manual"`.
+     */
+    mode: string;
+    connected: boolean;
+    /**
+     * Unix seconds of the last successful sync to this peer.
+     */
+    last_success?: number | null;
+    last_error?: string | null;
+};
+
+/**
+ * Progress of an in-flight `zfs send` stream.
+ */
+export type TransferInfo = {
+    dataset: string;
+    peer: string;
+    /**
+     * `"full" | "incremental" | "resume"`.
+     */
+    kind: string;
+    bytes_sent: number;
+    /**
+     * Dry-run estimate. None for resume sends (no estimate available).
+     */
+    total_bytes?: number | null;
+    /**
+     * Unix seconds.
+     */
+    started_at: number;
 };
 
 /**
@@ -536,6 +590,140 @@ export type ListJobsResponses = {
 };
 
 export type ListJobsResponse = ListJobsResponses[keyof ListJobsResponses];
+
+export type CancelData = {
+    body?: never;
+    path: {
+        /**
+         * Job name
+         */
+        name: string;
+    };
+    query?: never;
+    url: '/api/v1/jobs/{name}/cancel';
+};
+
+export type CancelErrors = {
+    /**
+     * No such job
+     */
+    404: unknown;
+    /**
+     * Job kind does not support cancel
+     */
+    409: unknown;
+};
+
+export type CancelResponses = {
+    /**
+     * In-flight transfer aborted (partial recv state on the receiver keeps it resumable)
+     */
+    204: void;
+};
+
+export type CancelResponse = CancelResponses[keyof CancelResponses];
+
+export type PauseData = {
+    body?: never;
+    path: {
+        /**
+         * Job name
+         */
+        name: string;
+    };
+    query?: never;
+    url: '/api/v1/jobs/{name}/pause';
+};
+
+export type PauseErrors = {
+    /**
+     * No such job
+     */
+    404: unknown;
+    /**
+     * Job kind does not support pause
+     */
+    409: unknown;
+};
+
+export type PauseResponses = {
+    /**
+     * Transfer aborted resumably; scheduled cycles suspended
+     */
+    204: void;
+};
+
+export type PauseResponse = PauseResponses[keyof PauseResponses];
+
+export type PushToPeerData = {
+    body?: never;
+    path: {
+        /**
+         * Job name
+         */
+        name: string;
+        /**
+         * Target peer name from the job's targets
+         */
+        peer: string;
+    };
+    query?: never;
+    url: '/api/v1/jobs/{name}/push/{peer}';
+};
+
+export type PushToPeerErrors = {
+    /**
+     * Peer is not a target of this job
+     */
+    400: ApiErrorBody;
+    /**
+     * No such job
+     */
+    404: unknown;
+};
+
+export type PushToPeerError = PushToPeerErrors[keyof PushToPeerErrors];
+
+export type PushToPeerResponses = {
+    /**
+     * Manual replication to the peer queued
+     */
+    204: void;
+};
+
+export type PushToPeerResponse = PushToPeerResponses[keyof PushToPeerResponses];
+
+export type ResumeData = {
+    body?: never;
+    path: {
+        /**
+         * Job name
+         */
+        name: string;
+    };
+    query?: never;
+    url: '/api/v1/jobs/{name}/resume';
+};
+
+export type ResumeErrors = {
+    /**
+     * No such job
+     */
+    404: unknown;
+    /**
+     * Job kind does not support resume
+     */
+    409: unknown;
+};
+
+export type ResumeResponses = {
+    /**
+     * Job unpaused; the next cycle resumes the partial transfer
+     */
+    204: void;
+};
+
+export type ResumeResponse = ResumeResponses[keyof ResumeResponses];
 
 export type ListRunsData = {
     body?: never;

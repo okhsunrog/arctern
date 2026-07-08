@@ -7,7 +7,7 @@ import JobsGrid from '../components/JobsGrid.vue'
 import EventsLog from '../components/EventsLog.vue'
 import ArcGauge from '../components/ArcGauge.vue'
 
-const { jobs, error, loading, wake } = useJobs()
+const { jobs, error, loading, wake, cancel, pause, resume, pushTo } = useJobs()
 const { events, connected } = useEvents({ cap: 200 })
 const { arc } = useArc(5000)
 
@@ -25,7 +25,15 @@ const tail = computed(() => events.value.slice(-50))
       <h2 class="text-lg font-semibold mb-2">Jobs</h2>
       <div v-if="loading && jobs.length === 0" class="text-gray-500">Loading…</div>
       <div v-else-if="jobs.length === 0" class="text-gray-500">No jobs configured.</div>
-      <JobsGrid v-else :jobs="jobs" :on-wake="wake" />
+      <JobsGrid
+        v-else
+        :jobs="jobs"
+        :on-wake="wake"
+        :on-cancel="cancel"
+        :on-pause="pause"
+        :on-resume="resume"
+        :on-push-to="pushTo"
+      />
     </div>
     <div>
       <div class="flex items-center justify-between mb-2">

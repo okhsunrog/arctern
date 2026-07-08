@@ -5,12 +5,13 @@ import { useJobs } from '../composables/useJobs'
 import { useJobRuns } from '../composables/useJobRuns'
 import { formatBytes, formatTimestamp } from '../utils/format'
 import RunsCharts from '../components/RunsCharts.vue'
+import TransferPanel from '../components/TransferPanel.vue'
 import type { JobRun } from '../client'
 
 const route = useRoute()
 const name = computed(() => String(route.params.name))
 
-const { jobs, error: jobsError, wake } = useJobs()
+const { jobs, error: jobsError, wake, cancel, pause, resume, pushTo } = useJobs()
 const job = computed(() => jobs.value.find((j) => j.name === name.value))
 
 const { runs, error: runsError, loading: runsLoading } = useJobRuns(name.value)
@@ -75,6 +76,15 @@ const tableColumns = computed(() => [
         </div>
         <UButton icon="i-lucide-zap" @click="wake(job.name)">Wakeup</UButton>
       </div>
+      <UCard v-if="job.transfer || job.targets.length || job.paused">
+        <TransferPanel
+          :job="job"
+          :on-cancel="cancel"
+          :on-pause="pause"
+          :on-resume="resume"
+          :on-push-to="pushTo"
+        />
+      </UCard>
       <UCard>
         <dl class="grid grid-cols-2 gap-y-3 text-sm">
           <dt class="text-gray-500">Last run</dt>

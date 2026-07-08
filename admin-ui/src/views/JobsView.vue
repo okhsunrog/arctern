@@ -26,8 +26,24 @@ const columns = computed(() => [
     header: 'Status',
     cell: ({ row }: { row: { original: JobStatus } }) => {
       const j = row.original
-      const color = j.last_error ? 'error' : j.last_run ? 'success' : 'neutral'
-      const label = j.last_error ? 'error' : j.last_run ? 'ok' : 'idle'
+      const color = j.paused
+        ? 'neutral'
+        : j.running
+          ? 'info'
+          : j.last_error
+            ? 'error'
+            : j.last_run
+              ? 'success'
+              : 'neutral'
+      const label = j.paused
+        ? 'paused'
+        : j.running
+          ? 'running'
+          : j.last_error
+            ? 'error'
+            : j.last_run
+              ? 'ok'
+              : 'idle'
       return h(UBadge, { color, variant: 'subtle' }, () => label)
     },
   },

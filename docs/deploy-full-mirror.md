@@ -98,7 +98,11 @@ Append:
 [[allowed_clients]]
 identity = "laptop_nova"     # matches the argv to stdinserver-dispatch
 jobs = ["push_to_home_trial"]
-operations = ["control", "recv"]
+# control:discard_partial_recv lets the sender clear stale partial-recv
+# state over RPC before opening a fresh recv channel; without it the
+# discard still happens (the recv header carries the same directive),
+# but every stale-token cycle logs an Unauthorized warning first.
+operations = ["control", "control:discard_partial_recv", "recv"]
 root_fs = "okdata/backups/arctern_trial/laptop"
 ```
 

@@ -1712,6 +1712,12 @@
           "connected": {
             "type": "boolean"
           },
+          "auto_interval_secs": {
+            "type": ["integer", "null"],
+            "format": "int64",
+            "description": "For auto mode: the configured `auto_interval` in seconds. The\nnext auto sync is `last_success + auto_interval_secs` (or the\nnext planner tick when unset/no history).",
+            "minimum": 0
+          },
           "last_success": {
             "type": ["integer", "null"],
             "format": "int64",

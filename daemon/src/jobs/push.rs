@@ -1320,6 +1320,7 @@ impl Job for PushJob {
                         PeerMode::Manual => "manual".into(),
                     },
                     connected: connected.get(name).copied().unwrap_or(false),
+                    auto_interval_secs: self.peer_auto_interval(name).map(|d| d.as_secs()),
                     last_success,
                     last_error,
                 }

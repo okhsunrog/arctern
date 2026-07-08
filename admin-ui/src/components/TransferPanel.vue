@@ -58,6 +58,25 @@ function age(unixSec?: number | null): string {
   if (s < 129600) return `${Math.round(s / 3600)}h ago`
   return `${Math.round(s / 86400)}d ago`
 }
+
+function fmtIn(s: number): string {
+  if (s < 90) return `${Math.max(1, Math.round(s))}s`
+  if (s < 5400) return `${Math.round(s / 60)}m`
+  if (s < 129600) return `${Math.round(s / 3600)}h`
+  return `${Math.round(s / 86400)}d`
+}
+
+/** For auto targets: when the next automatic sync becomes due. */
+function dueLabel(tg: {
+  mode: string
+  auto_interval_secs?: number | null
+  last_success?: number | null
+}): string | null {
+  if (tg.mode !== 'auto') return null
+  if (!tg.auto_interval_secs || !tg.last_success) return 'auto: every cycle'
+  const due = tg.last_success + tg.auto_interval_secs - Math.floor(Date.now() / 1000)
+  return due <= 0 ? 'auto: due now' : `auto: due in ~${fmtIn(due)}`
+}
 </script>
 
 <template>
@@ -93,9 +112,15 @@ function age(unixSec?: number | null): string {
             :title="tg.connected ? 'reachable' : 'unreachable'"
           />
           <span class="truncate">{{ tg.peer }}</span>
-          <UBadge variant="subtle" size="xs" :color="tg.mode === 'auto' ? 'info' : 'neutral'">
+          <UBadge
+            variant="subtle"
+            size="xs"
+            :color="tg.mode === 'auto' ? 'info' : 'neutral'"
+            :title="dueLabel(tg) ?? 'manual: Send now only'"
+          >
             {{ tg.mode }}
           </UBadge>
+          <span v-if="dueLabel(tg)" class="text-xs text-gray-500 truncate">{{ dueLabel(tg) }}</span>
         </div>
         <div class="flex items-center gap-2 shrink-0">
           <span

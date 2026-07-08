@@ -301,6 +301,12 @@ export type TargetStatus = {
     mode: string;
     connected: boolean;
     /**
+     * For auto mode: the configured `auto_interval` in seconds. The
+     * next auto sync is `last_success + auto_interval_secs` (or the
+     * next planner tick when unset/no history).
+     */
+    auto_interval_secs?: number | null;
+    /**
      * Unix seconds of the last successful sync to this peer.
      */
     last_success?: number | null;

@@ -105,6 +105,11 @@ pub struct TargetStatus {
     /// `"auto" | "manual"`.
     pub mode: String,
     pub connected: bool,
+    /// For auto mode: the configured `auto_interval` in seconds. The
+    /// next auto sync is `last_success + auto_interval_secs` (or the
+    /// next planner tick when unset/no history).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_interval_secs: Option<u64>,
     /// Unix seconds of the last successful sync to this peer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_success: Option<i64>,

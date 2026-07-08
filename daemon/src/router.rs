@@ -27,7 +27,6 @@ use crate::{auth, handlers};
         arctern_api::PeerSummary,
         arctern_api::PeerRoute,
         arctern_api::PeerReachability,
-        arctern_api::PeerSnapshotEntry,
         arctern_api::LogEvent,
         arctern_api::ConfigView,
         arctern_api::PoolSummary,
@@ -60,13 +59,6 @@ fn openapi_router() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::jobs::push_to_peer))
         .routes(routes!(handlers::jobs::list_runs))
         .routes(routes!(handlers::peers::list_peers))
-        .routes(routes!(handlers::peers::list_peer_jobs))
-        .routes(routes!(handlers::peers::get_peer_job))
-        .routes(routes!(handlers::peers::wakeup_peer_job))
-        .routes(routes!(handlers::peers::list_peer_datasets))
-        .routes(routes!(handlers::peers::list_peer_snapshots))
-        .routes(routes!(handlers::peers::list_peer_snapshot_holds))
-        .routes(routes!(handlers::peers::destroy_peer_snapshot))
         .routes(routes!(handlers::peers::stream_peer_events))
         .routes(routes!(handlers::events::stream_events))
         .routes(routes!(handlers::events::recent_events))

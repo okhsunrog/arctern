@@ -58,11 +58,6 @@ pub struct ResponseFrame {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Request {
-    ListSnapshots {
-        dataset: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        prefix_regex: Option<String>,
-    },
     /// Planner-only variant of `ListSnapshots`: returns just the receiver
     /// GUIDs (the only field the GUID-intersection planner consumes),
     /// keeping the response ~4x smaller than full `SnapshotEntry` rows so
@@ -73,36 +68,12 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prefix_regex: Option<String>,
     },
-    GetReceiveResumeToken {
-        dataset: String,
-    },
-    /// List the receiver's filesystems/volumes under the client's
-    /// configured `root_fs` — the ACL scope IS the listing root, so a
-    /// client never sees datasets outside its subtree. Drives the
-    /// sender-side UI's receiver dataset browser.
-    ListDatasets,
-    /// List user holds on one snapshot (`dataset@tag`), root_fs-scoped.
-    /// The browser shows a lock before the operator tries a destroy
-    /// instead of discovering the hold via the failure.
-    ListHolds {
-        snapshot: String,
-    },
-    DestroySnapshot {
-        name: String,
-    },
     /// Sender-driven cleanup: invoke `palimpsest::recv::abort_partial`
     /// on `dataset` before the next recv channel opens. Used when the
     /// planner picked Full / Incremental + discard against a stale
     /// receiver token.
     DiscardPartialRecv {
         dataset: String,
-    },
-    ListJobs,
-    GetJobStatus {
-        name: String,
-    },
-    WakeupJob {
-        name: String,
     },
     /// Subscribe to event broadcasts. `since` is the last-seen
     /// `log_events.id` (see daemon::state::log_events); the server
@@ -134,34 +105,12 @@ pub enum Request {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Response {
-    ListSnapshotsOk {
-        snapshots: Vec<SnapshotEntry>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        receive_resume_token: Option<String>,
-    },
     ListReceiverGuidsOk {
         guids: Vec<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         receive_resume_token: Option<String>,
     },
-    GetReceiveResumeTokenOk {
-        token: Option<String>,
-    },
-    ListDatasetsOk {
-        datasets: Vec<DatasetWire>,
-    },
-    ListHoldsOk {
-        holds: Vec<HoldWire>,
-    },
-    DestroySnapshotOk,
     DiscardPartialRecvOk,
-    ListJobsOk {
-        jobs: Vec<JobStatusWire>,
-    },
-    GetJobStatusOk {
-        job: JobStatusWire,
-    },
-    WakeupJobOk,
     GetLogCursorOk {
         id: u64,
     },
@@ -199,19 +148,6 @@ pub enum ErrorCode {
     NotFound,
     /// Catch-all for I/O / serialization failures inside the handler.
     Internal,
-}
-
-/// Mirror of `arctern_api::JobStatus` but defined here so the transport
-/// crate stays leaf (no dependency on `arctern_api` / `utoipa`).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct JobStatusWire {
-    pub name: String,
-    pub kind: String,
-    pub last_run: Option<String>,
-    pub next_run: Option<String>,
-    pub last_error: Option<String>,
-    #[serde(default)]
-    pub running: bool,
 }
 
 /// One log event surfaced over the SSE bridge. Mirrors the
@@ -290,40 +226,6 @@ pub struct SnapshotEntry {
     pub name: String,
     pub guid: u64,
     pub createtxg: u64,
-    /// `creation` property, unix seconds. Optional so the planner path
-    /// and older peers stay wire-compatible; the UI browser renders it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub creation: Option<i64>,
-    /// `used` property, bytes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub used: Option<u64>,
-}
-
-/// One receiver dataset row for `Response::ListDatasetsOk`. Slim on
-/// purpose — name, kind and the `used` property are what the sender's
-/// dataset browser renders; anything more can be added compatibly
-/// (serde default) later.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DatasetWire {
-    pub name: String,
-    /// `"filesystem" | "volume"` — mirrors `zfs list -t`.
-    pub kind: String,
-    /// `used` property value in bytes-as-string (zfs `-p` output), when
-    /// available.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub used: Option<String>,
-    /// `usedbysnapshots` property value in bytes-as-string — the "what
-    /// do this dataset's snapshots cost" signal the browser surfaces.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usedbysnapshots: Option<String>,
-}
-
-/// One user hold on a snapshot, for `Response::ListHoldsOk`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HoldWire {
-    pub tag: String,
-    /// Unix seconds the hold was placed.
-    pub timestamp: u64,
 }
 
 /// Compile a `prefix_regex` string from a `Request::ListSnapshots`.
@@ -522,14 +424,14 @@ mod tests {
     }
 
     #[test]
-    fn request_list_snapshots_roundtrip() {
-        check_request_roundtrip(Request::ListSnapshots {
-            dataset: "tank/backups/laptop/data".into(),
-            prefix_regex: Some("^zrepl_".into()),
+    fn response_list_receiver_guids_roundtrip() {
+        check_response_roundtrip(Response::ListReceiverGuidsOk {
+            guids: vec![11587258101628135412, 1711743136468914064],
+            receive_resume_token: Some("1-deadbeef".into()),
         });
-        check_request_roundtrip(Request::ListSnapshots {
-            dataset: "tank/data".into(),
-            prefix_regex: None,
+        check_response_roundtrip(Response::ListReceiverGuidsOk {
+            guids: vec![],
+            receive_resume_token: None,
         });
     }
 
@@ -545,96 +447,13 @@ mod tests {
         });
     }
 
-    #[test]
-    fn request_list_datasets_roundtrip() {
-        check_request_roundtrip(Request::ListDatasets);
-    }
-
-    #[test]
-    fn request_list_holds_roundtrip() {
-        check_request_roundtrip(Request::ListHolds {
-            snapshot: "tank/backups/laptop@s1".into(),
-        });
-    }
-
-    #[test]
-    fn response_list_holds_roundtrip() {
-        check_response_roundtrip(Response::ListHoldsOk {
-            holds: vec![HoldWire {
-                tag: "arctern_last_J_backup".into(),
-                timestamp: 1783539652,
-            }],
-        });
-        check_response_roundtrip(Response::ListHoldsOk { holds: vec![] });
-    }
-
     /// Old peers omit the new optional SnapshotEntry fields; the JSON
     /// without them must still parse (serde defaults).
-    #[test]
-    fn snapshot_entry_without_new_fields_still_parses() {
-        let legacy = r#"{"name":"s1","guid":42,"createtxg":8}"#;
-        let e: SnapshotEntry = serde_json::from_str(legacy).unwrap();
-        assert_eq!(e.creation, None);
-        assert_eq!(e.used, None);
-    }
-
-    #[test]
-    fn response_list_datasets_roundtrip() {
-        check_response_roundtrip(Response::ListDatasetsOk {
-            datasets: vec![
-                DatasetWire {
-                    name: "tank/backups/laptop".into(),
-                    kind: "filesystem".into(),
-                    used: Some("482000000000".into()),
-                    usedbysnapshots: Some("1024".into()),
-                },
-                DatasetWire {
-                    name: "tank/backups/laptop/vol".into(),
-                    kind: "volume".into(),
-                    used: None,
-                    usedbysnapshots: None,
-                },
-            ],
-        });
-    }
-
-    #[test]
-    fn request_get_receive_resume_token_roundtrip() {
-        check_request_roundtrip(Request::GetReceiveResumeToken {
-            dataset: "tank/backups/laptop/data".into(),
-        });
-    }
-
-    #[test]
-    fn request_destroy_snapshot_roundtrip() {
-        check_request_roundtrip(Request::DestroySnapshot {
-            name: "tank/backups@old".into(),
-        });
-    }
 
     #[test]
     fn request_discard_partial_recv_roundtrip() {
         check_request_roundtrip(Request::DiscardPartialRecv {
             dataset: "tank/backups/laptop/data".into(),
-        });
-    }
-
-    #[test]
-    fn request_list_jobs_roundtrip() {
-        check_request_roundtrip(Request::ListJobs);
-    }
-
-    #[test]
-    fn request_get_job_status_roundtrip() {
-        check_request_roundtrip(Request::GetJobStatus {
-            name: "backup".into(),
-        });
-    }
-
-    #[test]
-    fn request_wakeup_job_roundtrip() {
-        check_request_roundtrip(Request::WakeupJob {
-            name: "backup".into(),
         });
     }
 
@@ -688,80 +507,8 @@ mod tests {
     }
 
     #[test]
-    fn response_list_snapshots_roundtrip() {
-        check_response_roundtrip(Response::ListSnapshotsOk {
-            snapshots: vec![SnapshotEntry {
-                name: "s1".into(),
-                guid: 11587258101628135412,
-                createtxg: 8,
-                creation: Some(1783539652),
-                used: Some(160 * 1024),
-            }],
-            receive_resume_token: Some("1-deadbeef".into()),
-        });
-        check_response_roundtrip(Response::ListReceiverGuidsOk {
-            guids: vec![11587258101628135412, 1711743136468914064],
-            receive_resume_token: Some("1-deadbeef".into()),
-        });
-        check_response_roundtrip(Response::ListReceiverGuidsOk {
-            guids: vec![],
-            receive_resume_token: None,
-        });
-        check_response_roundtrip(Response::ListSnapshotsOk {
-            snapshots: vec![],
-            receive_resume_token: None,
-        });
-    }
-
-    #[test]
-    fn response_get_receive_resume_token_roundtrip() {
-        check_response_roundtrip(Response::GetReceiveResumeTokenOk {
-            token: Some("1-abc".into()),
-        });
-        check_response_roundtrip(Response::GetReceiveResumeTokenOk { token: None });
-    }
-
-    #[test]
-    fn response_destroy_snapshot_roundtrip() {
-        check_response_roundtrip(Response::DestroySnapshotOk);
-    }
-
-    #[test]
     fn response_discard_partial_recv_roundtrip() {
         check_response_roundtrip(Response::DiscardPartialRecvOk);
-    }
-
-    #[test]
-    fn response_list_jobs_roundtrip() {
-        check_response_roundtrip(Response::ListJobsOk {
-            jobs: vec![JobStatusWire {
-                name: "backup".into(),
-                kind: "push".into(),
-                last_run: Some("2026-05-09T00:00:00Z".into()),
-                next_run: None,
-                last_error: None,
-                running: false,
-            }],
-        });
-    }
-
-    #[test]
-    fn response_get_job_status_roundtrip() {
-        check_response_roundtrip(Response::GetJobStatusOk {
-            job: JobStatusWire {
-                name: "backup".into(),
-                kind: "push".into(),
-                last_run: None,
-                next_run: None,
-                last_error: Some("boom".into()),
-                running: false,
-            },
-        });
-    }
-
-    #[test]
-    fn response_wakeup_ok_roundtrip() {
-        check_response_roundtrip(Response::WakeupJobOk);
     }
 
     #[test]
@@ -812,7 +559,7 @@ mod tests {
     async fn request_frame_wire_roundtrip() {
         let f = RequestFrame {
             id: 1,
-            body: Request::ListSnapshots {
+            body: Request::ListReceiverGuids {
                 dataset: "tank/data".into(),
                 prefix_regex: None,
             },
@@ -847,8 +594,6 @@ mod tests {
             name: "zrepl_001".into(),
             guid: 11587258101628135412,
             createtxg: 8,
-            creation: None,
-            used: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let back: SnapshotEntry = serde_json::from_str(&json).unwrap();

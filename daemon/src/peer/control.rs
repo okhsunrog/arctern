@@ -210,7 +210,7 @@ async fn run_loop<W>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arctern_transport::{ErrorCode, JobStatusWire};
+    use arctern_transport::ErrorCode;
     use tokio::io::duplex;
 
     /// End-to-end demux smoke: spin a fake "server" task on the other
@@ -237,16 +237,7 @@ mod tests {
             for req in frames.into_iter().rev() {
                 let resp = ResponseFrame {
                     request_id: Some(req.id),
-                    body: Response::ListJobsOk {
-                        jobs: vec![JobStatusWire {
-                            name: format!("job-{}", req.id),
-                            kind: "snap".into(),
-                            last_run: None,
-                            next_run: None,
-                            last_error: None,
-                            running: false,
-                        }],
-                    },
+                    body: Response::GetLogCursorOk { id: req.id },
                 };
                 arctern_transport::write_response(&mut server_writer, &resp)
                     .await
@@ -254,17 +245,13 @@ mod tests {
             }
         });
 
-        let r1 = client.send(Request::ListJobs);
-        let r2 = client.send(Request::ListJobs);
-        let r3 = client.send(Request::ListJobs);
+        let r1 = client.send(Request::GetLogCursor);
+        let r2 = client.send(Request::GetLogCursor);
+        let r3 = client.send(Request::GetLogCursor);
         let (a, b, c) = tokio::join!(r1, r2, r3);
         for r in [a, b, c] {
-            let resp = r.unwrap();
-            match resp {
-                Response::ListJobsOk { jobs } => {
-                    assert_eq!(jobs.len(), 1);
-                    assert!(jobs[0].name.starts_with("job-"));
-                }
+            match r.unwrap() {
+                Response::GetLogCursorOk { id } => assert!(id >= 1),
                 other => panic!("unexpected response {other:?}"),
             }
         }
@@ -296,7 +283,7 @@ mod tests {
                 .unwrap();
         });
 
-        let err = client.send(Request::ListJobs).await.unwrap_err();
+        let err = client.send(Request::GetLogCursor).await.unwrap_err();
         match err {
             RpcError::Server(m) => assert_eq!(m, "nope"),
             other => panic!("expected RpcError::Server, got {other:?}"),
@@ -345,7 +332,7 @@ mod tests {
         let (client, task) = ControlClient::spawn(client_reader, client_writer);
         let err = tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            client.send(Request::ListJobs),
+            client.send(Request::GetLogCursor),
         )
         .await
         .unwrap()

@@ -519,8 +519,6 @@ async fn plan_one_filesystem(
             name: String::new(),
             guid,
             createtxg: 0,
-            creation: None,
-            used: None,
         })
         .collect();
     let decoded = match token.as_deref() {
@@ -1526,8 +1524,6 @@ mod tests {
             name: name.into(),
             guid,
             createtxg,
-            creation: None,
-            used: None,
         }
     }
 

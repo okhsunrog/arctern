@@ -2,7 +2,7 @@
 
 import type { Client, Options as Options2, TDataShape } from './client';
 import { client } from './client.gen';
-import type { CancelData, CancelErrors, CancelResponses, CreateHoldData, CreateHoldErrors, CreateHoldResponses, CreateSnapshotData, CreateSnapshotErrors, CreateSnapshotResponses, DestroyPeerSnapshotData, DestroyPeerSnapshotErrors, DestroyPeerSnapshotResponses, DestroySnapshotData, DestroySnapshotErrors, DestroySnapshotResponses, GetArcData, GetArcErrors, GetArcHistoryData, GetArcHistoryResponses, GetArcResponses, GetConfigData, GetConfigErrors, GetConfigResponses, GetPeerJobData, GetPeerJobErrors, GetPeerJobResponses, GetPoolData, GetPoolErrors, GetPoolResponses, ListDatasetsData, ListDatasetsErrors, ListDatasetsResponses, ListHoldsData, ListHoldsErrors, ListHoldsResponses, ListJobsData, ListJobsResponses, ListPeerDatasetsData, ListPeerDatasetsErrors, ListPeerDatasetsResponses, ListPeerJobsData, ListPeerJobsErrors, ListPeerJobsResponses, ListPeersData, ListPeerSnapshotHoldsData, ListPeerSnapshotHoldsErrors, ListPeerSnapshotHoldsResponses, ListPeerSnapshotsData, ListPeerSnapshotsErrors, ListPeerSnapshotsResponses, ListPeersResponses, ListPoolsData, ListPoolsErrors, ListPoolsResponses, ListRunsData, ListRunsResponses, ListSnapshotsData, ListSnapshotsErrors, ListSnapshotsResponses, PauseData, PauseErrors, PauseResponses, PoolScrubData, PoolScrubErrors, PoolScrubResponses, PushToPeerData, PushToPeerErrors, PushToPeerResponses, RecentEventsData, RecentEventsResponses, ReleaseHoldData, ReleaseHoldErrors, ReleaseHoldResponses, ResumeData, ResumeErrors, ResumeResponses, StreamEventsData, StreamEventsResponses, StreamPeerEventsData, StreamPeerEventsErrors, StreamPeerEventsResponses, WakeupData, WakeupErrors, WakeupPeerJobData, WakeupPeerJobErrors, WakeupPeerJobResponses, WakeupResponses } from './types.gen';
+import type { CancelData, CancelErrors, CancelResponses, CreateHoldData, CreateHoldErrors, CreateHoldResponses, CreateSnapshotData, CreateSnapshotErrors, CreateSnapshotResponses, DestroySnapshotData, DestroySnapshotErrors, DestroySnapshotResponses, GetArcData, GetArcErrors, GetArcHistoryData, GetArcHistoryResponses, GetArcResponses, GetConfigData, GetConfigErrors, GetConfigResponses, GetPoolData, GetPoolErrors, GetPoolResponses, ListDatasetsData, ListDatasetsErrors, ListDatasetsResponses, ListHoldsData, ListHoldsErrors, ListHoldsResponses, ListJobsData, ListJobsResponses, ListPeersData, ListPeersResponses, ListPoolsData, ListPoolsErrors, ListPoolsResponses, ListRunsData, ListRunsResponses, ListSnapshotsData, ListSnapshotsErrors, ListSnapshotsResponses, PauseData, PauseErrors, PauseResponses, PoolScrubData, PoolScrubErrors, PoolScrubResponses, PushToPeerData, PushToPeerErrors, PushToPeerResponses, RecentEventsData, RecentEventsResponses, ReleaseHoldData, ReleaseHoldErrors, ReleaseHoldResponses, ResumeData, ResumeErrors, ResumeResponses, StreamEventsData, StreamEventsResponses, StreamPeerEventsData, StreamPeerEventsErrors, StreamPeerEventsResponses, WakeupData, WakeupErrors, WakeupResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean> = Options2<TData, ThrowOnError> & {
     /**
@@ -114,26 +114,12 @@ export const wakeup = <ThrowOnError extends boolean = false>(options: Options<Wa
 
 export const listPeers = <ThrowOnError extends boolean = false>(options?: Options<ListPeersData, ThrowOnError>) => (options?.client ?? client).get<ListPeersResponses, unknown, ThrowOnError>({ url: '/api/v1/peers', ...options });
 
-export const listPeerDatasets = <ThrowOnError extends boolean = false>(options: Options<ListPeerDatasetsData, ThrowOnError>) => (options.client ?? client).get<ListPeerDatasetsResponses, ListPeerDatasetsErrors, ThrowOnError>({ url: '/api/v1/peers/{peer}/datasets', ...options });
-
-export const listPeerSnapshotHolds = <ThrowOnError extends boolean = false>(options: Options<ListPeerSnapshotHoldsData, ThrowOnError>) => (options.client ?? client).get<ListPeerSnapshotHoldsResponses, ListPeerSnapshotHoldsErrors, ThrowOnError>({ url: '/api/v1/peers/{peer}/datasets/{name}/snapshots/{snapshot}/holds', ...options });
-
 /**
  * `GET /api/v1/peers/{peer}/events` — proxied SSE. Sends
  * SubscribeEvents to the peer's control channel and yields each
  * pushed Event frame as an SSE frame.
  */
 export const streamPeerEvents = <ThrowOnError extends boolean = false>(options: Options<StreamPeerEventsData, ThrowOnError>) => (options.client ?? client).get<StreamPeerEventsResponses, StreamPeerEventsErrors, ThrowOnError>({ url: '/api/v1/peers/{peer}/events', ...options });
-
-export const listPeerJobs = <ThrowOnError extends boolean = false>(options: Options<ListPeerJobsData, ThrowOnError>) => (options.client ?? client).get<ListPeerJobsResponses, ListPeerJobsErrors, ThrowOnError>({ url: '/api/v1/peers/{peer}/jobs', ...options });
-
-export const getPeerJob = <ThrowOnError extends boolean = false>(options: Options<GetPeerJobData, ThrowOnError>) => (options.client ?? client).get<GetPeerJobResponses, GetPeerJobErrors, ThrowOnError>({ url: '/api/v1/peers/{peer}/jobs/{name}', ...options });
-
-export const wakeupPeerJob = <ThrowOnError extends boolean = false>(options: Options<WakeupPeerJobData, ThrowOnError>) => (options.client ?? client).post<WakeupPeerJobResponses, WakeupPeerJobErrors, ThrowOnError>({ url: '/api/v1/peers/{peer}/jobs/{name}/wakeup', ...options });
-
-export const listPeerSnapshots = <ThrowOnError extends boolean = false>(options: Options<ListPeerSnapshotsData, ThrowOnError>) => (options.client ?? client).get<ListPeerSnapshotsResponses, ListPeerSnapshotsErrors, ThrowOnError>({ url: '/api/v1/peers/{peer}/snapshots', ...options });
-
-export const destroyPeerSnapshot = <ThrowOnError extends boolean = false>(options: Options<DestroyPeerSnapshotData, ThrowOnError>) => (options.client ?? client).post<DestroyPeerSnapshotResponses, DestroyPeerSnapshotErrors, ThrowOnError>({ url: '/api/v1/peers/{peer}/snapshots/{name}/destroy', ...options });
 
 export const listPools = <ThrowOnError extends boolean = false>(options?: Options<ListPoolsData, ThrowOnError>) => (options?.client ?? client).get<ListPoolsResponses, ListPoolsErrors, ThrowOnError>({ url: '/api/v1/pools', ...options });
 

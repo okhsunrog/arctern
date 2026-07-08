@@ -188,13 +188,17 @@ impl SqliteLogLayer {
         Self { pool }
     }
 
-    /// Per-layer filter that gates this layer alone: INFO and above, and
+    /// Per-layer filter that gates this layer alone: INFO and above,
     /// never the `sqlx` target (whose slow/failed-statement WARN/ERROR
-    /// events would otherwise feed back into the insert path). Apply via
-    /// `layer.with_filter(SqliteLogLayer::filter())`.
+    /// events would otherwise feed back into the insert path), and
+    /// never `memory_serve` (one INFO row per static asset served would
+    /// drown the event log in UI-chrome noise on every page load).
+    /// Apply via `layer.with_filter(SqliteLogLayer::filter())`.
     pub fn filter() -> tracing_subscriber::filter::FilterFn {
         tracing_subscriber::filter::filter_fn(|metadata: &Metadata<'_>| {
-            *metadata.level() <= Level::INFO && !metadata.target().starts_with("sqlx")
+            *metadata.level() <= Level::INFO
+                && !metadata.target().starts_with("sqlx")
+                && !metadata.target().starts_with("memory_serve")
         })
     }
 }

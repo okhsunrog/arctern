@@ -121,43 +121,48 @@ function targetLine(tg: {
 
     <!-- Per-target policy + manual trigger -->
     <div v-if="job.targets?.length" class="space-y-2">
-      <div
-        v-for="tg in job.targets ?? []"
-        :key="tg.peer"
-        class="flex items-start justify-between gap-3"
-      >
-        <div class="min-w-0">
-          <div class="flex items-center gap-2 text-sm">
-            <span
-              class="inline-block w-2 h-2 rounded-full shrink-0"
-              :class="tg.connected ? 'bg-success pulse-dot' : 'bg-neutral-400 dark:bg-neutral-600'"
-              :title="tg.connected ? 'reachable' : 'unreachable'"
-            />
-            <span class="font-medium font-mono">{{ tg.peer }}</span>
-            <UBadge v-if="tg.route" variant="outline" size="sm" color="neutral">
-              via {{ tg.route }}
-            </UBadge>
-            <UBadge variant="subtle" size="sm" :color="tg.mode === 'auto' ? 'info' : 'neutral'">
-              {{ tg.mode }}
-            </UBadge>
-          </div>
-          <div
-            class="text-xs mt-0.5 ml-4"
-            :class="tg.last_error ? 'text-error' : 'text-muted'"
-            :title="tg.last_error ?? undefined"
+      <div v-for="tg in job.targets ?? []" :key="tg.peer" class="space-y-0.5">
+        <div class="flex items-center gap-2 text-sm min-w-0">
+          <span
+            class="inline-block w-2 h-2 rounded-full shrink-0"
+            :class="tg.connected ? 'bg-success pulse-dot' : 'bg-neutral-400 dark:bg-neutral-600'"
+            :title="tg.connected ? 'reachable' : 'unreachable'"
+          />
+          <span class="font-medium font-mono truncate">{{ tg.peer }}</span>
+          <UBadge
+            v-if="tg.route"
+            variant="outline"
+            size="sm"
+            color="neutral"
+            class="shrink-0 whitespace-nowrap"
           >
-            {{ targetLine(tg) }}
-          </div>
+            via {{ tg.route }}
+          </UBadge>
+          <UBadge
+            variant="subtle"
+            size="sm"
+            :color="tg.mode === 'auto' ? 'info' : 'neutral'"
+            class="shrink-0"
+          >
+            {{ tg.mode }}
+          </UBadge>
+          <UButton
+            size="xs"
+            variant="soft"
+            icon="i-lucide-send"
+            class="shrink-0 ms-auto"
+            :disabled="!tg.connected"
+            @click="onPushTo?.(job.name, tg.peer)"
+            >Send now</UButton
+          >
         </div>
-        <UButton
-          size="xs"
-          variant="soft"
-          icon="i-lucide-send"
-          class="shrink-0"
-          :disabled="!tg.connected"
-          @click="onPushTo?.(job.name, tg.peer)"
-          >Send now</UButton
+        <div
+          class="text-xs ml-4 truncate"
+          :class="tg.last_error ? 'text-error' : 'text-muted'"
+          :title="tg.last_error ?? targetLine(tg)"
         >
+          {{ targetLine(tg) }}
+        </div>
       </div>
     </div>
 

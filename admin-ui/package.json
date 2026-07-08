@@ -10,6 +10,8 @@
     "openapi-ts": "openapi-ts"
   },
   "dependencies": {
+    "@fontsource-variable/ibm-plex-sans": "^5.2.8",
+    "@fontsource/jetbrains-mono": "^5.2.8",
     "@hey-api/client-fetch": "^0.13.1",
     "@nuxt/ui": "^4.6.1",
     "chart.js": "^4.5.1",

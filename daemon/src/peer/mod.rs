@@ -57,6 +57,29 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
+/// How long a single `ssh` connect attempt may take before the route
+/// is declared unreachable. Route probing runs while ranking — an
+/// unreachable LAN address away from home must fail in seconds, not
+/// hang until the kernel's SYN timeout (~2 min).
+pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Re-emit one line of a remote stdinserver's stderr at the severity
+/// the remote's own tracing-fmt layer assigned it (`<RFC3339>  LEVEL
+/// target: message`). Unparseable lines stay WARN — unexpected output
+/// (shell errors, panics) deserves attention.
+fn emit_remote_stderr(peer: &str, channel: &'static str, raw: &str) {
+    let line = strip_ansi(raw);
+    let level = line.split_whitespace().nth(1).unwrap_or("");
+    match level {
+        "TRACE" => tracing::trace!(peer = %peer, "{channel} stderr: {line}"),
+        "DEBUG" => tracing::debug!(peer = %peer, "{channel} stderr: {line}"),
+        "INFO" => tracing::info!(peer = %peer, "{channel} stderr: {line}"),
+        "WARN" => tracing::warn!(peer = %peer, "{channel} stderr: {line}"),
+        "ERROR" => tracing::error!(peer = %peer, "{channel} stderr: {line}"),
+        _ => tracing::warn!(peer = %peer, "{channel} stderr: {line}"),
+    }
+}
+
 /// Outbound link to one peer. Cheaply cloneable — handlers and the
 /// scheduler share the same Arc.
 #[derive(Clone)]
@@ -64,6 +87,11 @@ pub struct PeerLink {
     pub(crate) name: String,
     pub(crate) session: Arc<openssh::Session>,
     pub(crate) control: ControlClient,
+    /// Number of recv channels currently streaming over this link.
+    /// The reconnect loop skips its liveness probe and route re-rank
+    /// while this is non-zero: a bulk send legitimately starves the
+    /// control channel, and swapping routes mid-transfer is pointless.
+    active_recvs: Arc<std::sync::atomic::AtomicUsize>,
     /// Keeps the remote control process alive for the lifetime of the
     /// link: openssh's `Child` tears down the mux channel on drop (and
     /// `disconnect()` does so immediately — the remote dispatcher sees
@@ -88,6 +116,7 @@ impl PeerLink {
     pub async fn connect(name: String, ssh_target: &str, job: &str) -> Result<Self, PeerError> {
         let session = SessionBuilder::default()
             .known_hosts_check(KnownHosts::Strict)
+            .connect_timeout(CONNECT_TIMEOUT)
             .connect_mux(ssh_target)
             .await?;
         let session = Arc::new(session);
@@ -105,15 +134,15 @@ impl PeerLink {
             .stdout()
             .take()
             .ok_or_else(|| PeerError::Internal("control child has no stdout".into()))?;
-        // Drain stderr to the daemon's tracing layer.
+        // Drain stderr to the daemon's tracing layer, preserving the
+        // remote event's own severity.
         if let Some(mut stderr) = child.stderr().take() {
             let peer_name = name.clone();
             tokio::spawn(async move {
                 use tokio::io::AsyncBufReadExt;
                 let mut lines = BufReader::new(&mut stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    let line = strip_ansi(&line);
-                    tracing::warn!(peer = %peer_name, "stdinserver stderr: {line}");
+                    emit_remote_stderr(&peer_name, "stdinserver", &line);
                 }
             });
         }
@@ -122,9 +151,15 @@ impl PeerLink {
             name,
             session,
             control,
+            active_recvs: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             _control_child: Arc::new(child),
             events_subscribed: Arc::new(tokio::sync::OnceCell::new()),
         })
+    }
+
+    /// Recv channels currently streaming over this link.
+    pub fn active_recvs(&self) -> usize {
+        self.active_recvs.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Send a Request on the control channel and await its matching
@@ -151,9 +186,19 @@ impl PeerLink {
         let rx = self.control.subscribe_events();
         self.events_subscribed
             .get_or_try_init(|| async {
+                // Anchor the subscription at the receiver's current
+                // cursor: `since: None` means "from 0", which replays
+                // the receiver's whole retained log (24h) into the
+                // broadcast on every fresh link. Live-only is what the
+                // SSE bridge wants; history stays queryable via
+                // GetLogCursor-style RPCs if ever needed.
+                let since = match self.control.send(Request::GetLogCursor).await {
+                    Ok(Response::GetLogCursorOk { id }) => Some(id),
+                    _ => None,
+                };
                 match self
                     .control
-                    .send(Request::SubscribeEvents { since: None })
+                    .send(Request::SubscribeEvents { since })
                     .await?
                 {
                     Response::Ok => Ok(()),
@@ -195,12 +240,26 @@ impl PeerLink {
         write_header(&mut stdin, header)
             .await
             .map_err(|e| PeerError::Internal(format!("write RecvHeader: {e}")))?;
+        self.active_recvs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(RecvChannel {
+            peer: self.name.clone(),
             child,
             stdin: Some(stdin),
             stdout,
             stderr,
+            _guard: RecvGuard(self.active_recvs.clone()),
         })
+    }
+}
+
+/// Decrements the owning link's recv counter when the channel is
+/// dropped — whether via `finish()` or an early error/cancel drop.
+struct RecvGuard(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for RecvGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -212,10 +271,12 @@ impl PeerLink {
 /// parameter binds the channel's lifetime to the underlying SSH session
 /// so the Drop order is correct on early termination.
 pub struct RecvChannel {
+    peer: String,
     child: openssh::Child<Arc<Session>>,
     pub stdin: Option<openssh::ChildStdin>,
     pub stdout: openssh::ChildStdout,
     pub stderr: Option<openssh::ChildStderr>,
+    _guard: RecvGuard,
 }
 
 impl RecvChannel {
@@ -230,11 +291,9 @@ impl RecvChannel {
             use tokio::io::AsyncReadExt;
             let mut buf = Vec::new();
             let _ = stderr.read_to_end(&mut buf).await;
-            if !buf.is_empty() {
-                tracing::warn!(
-                    "recv channel stderr: {}",
-                    strip_ansi(String::from_utf8_lossy(&buf).trim())
-                );
+            let text = String::from_utf8_lossy(&buf);
+            for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                emit_remote_stderr(&self.peer, "recv channel", line);
             }
         }
         let _ = self.child.wait().await;

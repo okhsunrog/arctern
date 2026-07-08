@@ -22,7 +22,8 @@ pub use prune::{PruneError, evaluate as evaluate_keep_rules};
 pub use schema::{
     AllowedClient, Config, Defaults, FilesystemFilter, JobConfig, KeepRule, PeerConfig, PeerMode,
     PruneJobConfig, PruningConfig, PruningDefaults, PushJobConfig, PushTarget, RecvConfig,
-    SendFlagsConfig, SnapJobConfig, SnapshotFilterConfig, SnapshottingConfig, SnapshottingDefaults,
+    RouteConfig, SendFlagsConfig, SnapJobConfig, SnapshotFilterConfig, SnapshottingConfig,
+    SnapshottingDefaults,
 };
 
 #[derive(Debug, Error)]
@@ -74,6 +75,32 @@ pub fn resolve_defaults(cfg: &mut Config) -> Result<(), String> {
     let defaults_prefix = cfg.defaults.prefix.clone();
     let defaults_snapshotting = cfg.defaults.snapshotting.clone();
     let defaults_pruning = cfg.defaults.pruning.clone();
+
+    // Normalise the single-route peer shorthand: `ssh_target = "x"` →
+    // `routes = [{ name = "default", ssh_target = "x" }]`. Downstream
+    // code can then rely on `routes` being the single source of truth.
+    for (i, peer) in cfg.peers.iter_mut().enumerate() {
+        match (peer.ssh_target.take(), peer.routes.is_empty()) {
+            (Some(target), true) => {
+                peer.routes = vec![schema::RouteConfig {
+                    name: "default".into(),
+                    ssh_target: target,
+                    auto: true,
+                }];
+            }
+            (None, false) => {}
+            (Some(_), false) => {
+                return Err(format!(
+                    "peers[{i}]: `ssh_target` and `routes` are mutually exclusive — use one or the other"
+                ));
+            }
+            (None, true) => {
+                return Err(format!(
+                    "peers[{i}]: missing connection — set `ssh_target = \"...\"` or [[peers.routes]]"
+                ));
+            }
+        }
+    }
 
     // Build pruning keep-rules from `[defaults.pruning]` + `[defaults]
     // .prefix`. Returns `None` (without erroring) when defaults aren't
@@ -176,11 +203,27 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
         if peer.name.is_empty() {
             return Err(format!("peers[{i}].name: must not be empty"));
         }
-        if peer.ssh_target.is_empty() {
-            return Err(format!("peers[{i}].ssh_target: must not be empty"));
-        }
         if !peer_names.insert(peer.name.as_str()) {
             return Err(format!("peers[{i}]: duplicate name {:?}", peer.name));
+        }
+        // resolve_defaults normalised the shorthand, so routes is the
+        // single source of truth here.
+        let mut route_names: BTreeSet<&str> = BTreeSet::new();
+        for (ri, route) in peer.routes.iter().enumerate() {
+            if route.name.is_empty() {
+                return Err(format!("peers[{i}].routes[{ri}].name: must not be empty"));
+            }
+            if route.ssh_target.is_empty() {
+                return Err(format!(
+                    "peers[{i}].routes[{ri}].ssh_target: must not be empty"
+                ));
+            }
+            if !route_names.insert(route.name.as_str()) {
+                return Err(format!(
+                    "peers[{i}].routes[{ri}]: duplicate route name {:?}",
+                    route.name
+                ));
+            }
         }
     }
     let mut seen_names: BTreeSet<&str> = BTreeSet::new();
@@ -943,6 +986,94 @@ ssh_target = "u@h2"
 "#;
         let err = parse(s).unwrap_err();
         assert!(err.to_string().contains("duplicate"), "got: {err}");
+    }
+
+    #[test]
+    fn peer_shorthand_normalises_to_single_route() {
+        let s = r#"
+[[peers]]
+name = "home"
+ssh_target = "u@h1"
+"#;
+        let c = parse(s).unwrap();
+        assert!(c.peers[0].ssh_target.is_none());
+        assert_eq!(c.peers[0].routes.len(), 1);
+        assert_eq!(c.peers[0].routes[0].name, "default");
+        assert_eq!(c.peers[0].routes[0].ssh_target, "u@h1");
+        assert!(c.peers[0].routes[0].auto);
+    }
+
+    #[test]
+    fn peer_routes_parse_in_order_with_auto_flag() {
+        let s = r#"
+[[peers]]
+name = "mira"
+mode = "auto"
+auto_interval = "1d"
+[[peers.routes]]
+name = "lan"
+ssh_target = "arctern-mira-lan"
+[[peers.routes]]
+name = "wg"
+ssh_target = "arctern-mira-wg"
+auto = false
+"#;
+        let c = parse(s).unwrap();
+        let p = &c.peers[0];
+        assert_eq!(p.routes.len(), 2);
+        assert_eq!(p.routes[0].name, "lan");
+        assert!(p.routes[0].auto);
+        assert_eq!(p.routes[1].name, "wg");
+        assert!(!p.routes[1].auto);
+    }
+
+    #[test]
+    fn peer_ssh_target_and_routes_both_rejected() {
+        let s = r#"
+[[peers]]
+name = "mira"
+ssh_target = "u@h"
+[[peers.routes]]
+name = "lan"
+ssh_target = "u@h2"
+"#;
+        let err = parse(s).unwrap_err();
+        assert!(err.to_string().contains("mutually exclusive"), "got: {err}");
+    }
+
+    #[test]
+    fn peer_without_connection_rejected() {
+        let s = r#"
+[[peers]]
+name = "mira"
+"#;
+        let err = parse(s).unwrap_err();
+        assert!(err.to_string().contains("missing connection"), "got: {err}");
+    }
+
+    #[test]
+    fn peer_duplicate_route_names_rejected() {
+        let s = r#"
+[[peers]]
+name = "mira"
+[[peers.routes]]
+name = "lan"
+ssh_target = "a"
+[[peers.routes]]
+name = "lan"
+ssh_target = "b"
+"#;
+        let err = parse(s).unwrap_err();
+        assert!(err.to_string().contains("duplicate route"), "got: {err}");
+    }
+
+    #[test]
+    fn socket_path_optional() {
+        let c = parse("socket = \"/run/arctern/arctern.sock\"\n").unwrap();
+        assert_eq!(
+            c.socket.as_deref().map(|p| p.display().to_string()),
+            Some("/run/arctern/arctern.sock".to_string())
+        );
     }
 
     #[test]

@@ -148,6 +148,10 @@ where
                 tracing::warn!(error = %e, "control: flush failed");
             }
         });
+        // Reap finished request tasks as we go — a days-long control
+        // channel would otherwise accumulate one completed-task slot
+        // per request in the JoinSet until EOF.
+        while inflight.try_join_next().is_some() {}
     };
     // EOF path: let in-flight tasks finish writing before tearing down.
     while inflight.join_next().await.is_some() {}
@@ -201,7 +205,7 @@ where
 
 async fn dispatch(
     runner: &dyn CommandRunner,
-    _config: &Config,
+    config: &Config,
     acl: &AllowedClient,
     pool: Option<&SqlitePool>,
     req: Request,
@@ -231,6 +235,12 @@ async fn dispatch(
             }
             handle_get_receive_resume_token(runner, acl, &dataset).await
         }
+        Request::ListDatasets => {
+            if let Err(r) = enforce_control_acl(acl, "control:list_datasets", true) {
+                return r;
+            }
+            handle_list_datasets(runner, acl).await
+        }
         Request::DestroySnapshot { name } => {
             if let Err(r) = enforce_control_acl(acl, "control:destroy_snapshot", false) {
                 return r;
@@ -247,24 +257,37 @@ async fn dispatch(
             if let Err(r) = enforce_control_acl(acl, "control:list_jobs", true) {
                 return r;
             }
-            Response::ListJobsOk { jobs: Vec::new() }
+            handle_list_jobs(config).await
         }
-        Request::GetJobStatus { name: _ } => {
+        Request::GetJobStatus { name } => {
             if let Err(r) = enforce_control_acl(acl, "control:get_job_status", true) {
                 return r;
             }
-            Response::Error {
-                code: ErrorCode::NotFound,
-                message: "GetJobStatus not yet implemented on the receiver".into(),
+            match handle_list_jobs(config).await {
+                Response::ListJobsOk { jobs } => match jobs.into_iter().find(|j| j.name == name) {
+                    Some(job) => Response::GetJobStatusOk { job },
+                    None => Response::Error {
+                        code: ErrorCode::NotFound,
+                        message: format!("no job named {name:?}"),
+                    },
+                },
+                other => other,
             }
         }
-        Request::WakeupJob { name: _ } => {
+        Request::WakeupJob { name } => {
             if let Err(r) = enforce_control_acl(acl, "control:wakeup_job", false) {
                 return r;
             }
-            Response::Error {
-                code: ErrorCode::NotFound,
-                message: "WakeupJob not yet implemented on the receiver".into(),
+            match arctern_client::wakeup_job(&daemon_socket(config), &name).await {
+                Ok(()) => Response::WakeupJobOk,
+                Err(arctern_client::ClientError::Status { code: 404, .. }) => Response::Error {
+                    code: ErrorCode::NotFound,
+                    message: format!("no job named {name:?}"),
+                },
+                Err(e) => Response::Error {
+                    code: ErrorCode::Internal,
+                    message: format!("local daemon: {e}"),
+                },
             }
         }
         Request::SubscribeEvents { .. } => unreachable!("handled in run()"),
@@ -444,6 +467,47 @@ async fn collect_receiver_snapshots(
     Ok((snapshots, receive_resume_token))
 }
 
+/// List filesystems/volumes under the client's `root_fs` — the ACL
+/// scope IS the listing root, so nothing outside the subtree leaks.
+/// A client without `root_fs` (validation requires one for control
+/// clients, so this is belt-and-suspenders) gets an empty list rather
+/// than the whole pool.
+async fn handle_list_datasets(runner: &dyn CommandRunner, acl: &AllowedClient) -> Response {
+    let Some(root) = acl.root_fs.as_deref() else {
+        return Response::ListDatasetsOk { datasets: vec![] };
+    };
+    let opts = ListOptions {
+        recursive: true,
+        types: vec![DatasetType::Filesystem, DatasetType::Volume],
+        roots: vec![root.to_string()],
+        properties: vec!["used".into()],
+        ..ListOptions::default()
+    };
+    let entries = match palimpsest::dataset::list(runner, &opts).await {
+        Ok(v) => v,
+        // Nothing received yet — the subtree root doesn't exist.
+        Err(ZfsError::DatasetNotFound { .. }) => {
+            return Response::ListDatasetsOk { datasets: vec![] };
+        }
+        Err(e) => {
+            return Response::Error {
+                code: zfs_error_code(&e),
+                message: format!("list {root}: {e}"),
+            };
+        }
+    };
+    Response::ListDatasetsOk {
+        datasets: entries
+            .into_iter()
+            .map(|e| arctern_transport::DatasetWire {
+                used: e.properties.get("used").map(|p| p.value.clone()),
+                kind: e.kind.cli_name().to_string(),
+                name: e.name,
+            })
+            .collect(),
+    }
+}
+
 async fn handle_get_receive_resume_token(
     runner: &dyn CommandRunner,
     acl: &AllowedClient,
@@ -525,6 +589,45 @@ fn zfs_error_code(e: &ZfsError) -> ErrorCode {
     }
 }
 
+/// Where the local daemon's API socket lives. The stdinserver process
+/// is spawned by sshd, so the daemon's `--socket` flag is invisible
+/// here — the config's `socket` key is the shared rendezvous point.
+fn daemon_socket(config: &Config) -> std::path::PathBuf {
+    config
+        .socket
+        .clone()
+        .unwrap_or_else(crate::default_socket_path)
+}
+
+/// Proxy `ListJobs` into the local daemon over its UDS. The
+/// stdinserver process has no JobManager of its own; the daemon is the
+/// scheduler, and this bridge is what makes the sender's "peer jobs"
+/// view show real data.
+async fn handle_list_jobs(config: &Config) -> Response {
+    match arctern_client::list_jobs(&daemon_socket(config)).await {
+        Ok(jobs) => Response::ListJobsOk {
+            jobs: jobs
+                .into_iter()
+                .map(|j| arctern_transport::JobStatusWire {
+                    name: j.name,
+                    kind: j.kind,
+                    last_run: j.last_run,
+                    next_run: j.next_run,
+                    last_error: j.last_error,
+                    running: j.running,
+                })
+                .collect(),
+        },
+        Err(e) => Response::Error {
+            code: ErrorCode::Internal,
+            message: format!(
+                "local daemon unreachable at {}: {e}",
+                daemon_socket(config).display()
+            ),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,7 +651,12 @@ mod tests {
     }
 
     fn cfg() -> Arc<Config> {
-        Arc::new(Config::default())
+        // Hermetic: point the UDS-proxy paths at a socket that cannot
+        // exist so tests never talk to a real daemon on the dev host.
+        Arc::new(Config {
+            socket: Some(std::path::PathBuf::from("/nonexistent/arctern-test.sock")),
+            ..Config::default()
+        })
     }
 
     /// One end-to-end roundtrip per request kind, using duplex pipes
@@ -934,12 +1042,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_jobs_returns_empty() {
+    async fn list_jobs_errors_honestly_when_local_daemon_unreachable() {
         let runner = Arc::new(RecordingRunner::new());
         let r = rpc(runner, acl(None), Request::ListJobs).await;
         match r {
-            Response::ListJobsOk { jobs } => assert!(jobs.is_empty()),
-            other => panic!("expected ListJobsOk, got {other:?}"),
+            Response::Error { code, message } => {
+                assert_eq!(code, ErrorCode::Internal);
+                assert!(
+                    message.contains("local daemon unreachable"),
+                    "got: {message}"
+                );
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn wakeup_job_errors_honestly_when_local_daemon_unreachable() {
+        let runner = Arc::new(RecordingRunner::new());
+        let r = rpc(
+            runner,
+            acl_with_ops(None, &["control", "control:wakeup_job"]),
+            Request::WakeupJob {
+                name: "backup".into(),
+            },
+        )
+        .await;
+        match r {
+            Response::Error { code, .. } => assert_eq!(code, ErrorCode::Internal),
+            other => panic!("expected Error, got {other:?}"),
         }
     }
 }

@@ -76,6 +76,11 @@ pub enum Request {
     GetReceiveResumeToken {
         dataset: String,
     },
+    /// List the receiver's filesystems/volumes under the client's
+    /// configured `root_fs` — the ACL scope IS the listing root, so a
+    /// client never sees datasets outside its subtree. Drives the
+    /// sender-side UI's receiver dataset browser.
+    ListDatasets,
     DestroySnapshot {
         name: String,
     },
@@ -119,6 +124,9 @@ pub enum Response {
     },
     GetReceiveResumeTokenOk {
         token: Option<String>,
+    },
+    ListDatasetsOk {
+        datasets: Vec<DatasetWire>,
     },
     DestroySnapshotOk,
     DiscardPartialRecvOk,
@@ -251,6 +259,21 @@ pub struct SnapshotEntry {
     pub name: String,
     pub guid: u64,
     pub createtxg: u64,
+}
+
+/// One receiver dataset row for `Response::ListDatasetsOk`. Slim on
+/// purpose — name, kind and the `used` property are what the sender's
+/// dataset browser renders; anything more can be added compatibly
+/// (serde default) later.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DatasetWire {
+    pub name: String,
+    /// `"filesystem" | "volume"` — mirrors `zfs list -t`.
+    pub kind: String,
+    /// `used` property value in bytes-as-string (zfs `-p` output), when
+    /// available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used: Option<String>,
 }
 
 /// Compile a `prefix_regex` string from a `Request::ListSnapshots`.
@@ -469,6 +492,29 @@ mod tests {
         check_request_roundtrip(Request::ListReceiverGuids {
             dataset: "tank/data".into(),
             prefix_regex: None,
+        });
+    }
+
+    #[test]
+    fn request_list_datasets_roundtrip() {
+        check_request_roundtrip(Request::ListDatasets);
+    }
+
+    #[test]
+    fn response_list_datasets_roundtrip() {
+        check_response_roundtrip(Response::ListDatasetsOk {
+            datasets: vec![
+                DatasetWire {
+                    name: "tank/backups/laptop".into(),
+                    kind: "filesystem".into(),
+                    used: Some("482000000000".into()),
+                },
+                DatasetWire {
+                    name: "tank/backups/laptop/vol".into(),
+                    kind: "volume".into(),
+                    used: None,
+                },
+            ],
         });
     }
 

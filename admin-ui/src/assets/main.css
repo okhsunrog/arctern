@@ -1,2 +1,79 @@
 @import 'tailwindcss';
 @import '@nuxt/ui';
+
+/* Industrial ops-console type system: IBM Plex Sans for chrome,
+   JetBrains Mono for every piece of ZFS data (dataset names, tags,
+   GUIDs, log lines). */
+@import '@fontsource-variable/ibm-plex-sans';
+@import '@fontsource/jetbrains-mono/400.css';
+@import '@fontsource/jetbrains-mono/500.css';
+@import '@fontsource/jetbrains-mono/600.css';
+
+@theme {
+  --font-sans: 'IBM Plex Sans Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+:root {
+  --ui-radius: 0.25rem;
+}
+
+/* Faint blueprint grid behind the whole console — atmosphere without
+   noise. Dark mode only; light mode stays clean paper. */
+.dark body {
+  background-image:
+    radial-gradient(
+      ellipse 80% 50% at 50% -10%,
+      color-mix(in oklab, var(--ui-primary) 7%, transparent),
+      transparent
+    ),
+    linear-gradient(
+      color-mix(in oklab, var(--ui-color-neutral-800) 35%, transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      90deg,
+      color-mix(in oklab, var(--ui-color-neutral-800) 35%, transparent) 1px,
+      transparent 1px
+    );
+  background-size:
+    100% 100%,
+    32px 32px,
+    32px 32px;
+  background-attachment: fixed;
+}
+
+/* Micro-label idiom used across the console for section/kicker text. */
+.microlabel {
+  @apply text-[11px] font-medium uppercase tracking-[0.14em] text-muted;
+}
+
+/* Status rail: cards carry their health on the left edge. */
+.rail {
+  @apply border-s-2;
+}
+.rail-ok {
+  border-inline-start-color: var(--ui-success);
+}
+.rail-warn {
+  border-inline-start-color: var(--ui-warning);
+}
+.rail-err {
+  border-inline-start-color: var(--ui-error);
+}
+.rail-info {
+  border-inline-start-color: var(--ui-info);
+}
+.rail-idle {
+  border-inline-start-color: var(--ui-color-neutral-700);
+}
+
+/* Pulsing dot for live/running states. */
+.pulse-dot {
+  animation: pulse-dot 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+@keyframes pulse-dot {
+  50% {
+    opacity: 0.35;
+  }
+}

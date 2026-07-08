@@ -280,6 +280,14 @@ Reconnect runs **eagerly in a background task** per peer, not lazily on next cal
 name = "home"
 ssh_target = "arctern-replicator@homeserver.lan"
 
+# A peer is one PHYSICAL host; `ssh_target` is shorthand for a single
+# route. Multi-homed hosts list ordered `[[peers.routes]]` (highest
+# priority first) — the link connects the first reachable route,
+# re-ranks back when a higher one returns, and `auto = false` marks a
+# route as manual-push-only (metered WireGuard). Cursor bookmarks, step
+# holds and push_syncs are keyed by the PEER name, never the route, so
+# switching networks never invalidates replication state.
+
 [[jobs]]
 type = "push"
 name = "backup"

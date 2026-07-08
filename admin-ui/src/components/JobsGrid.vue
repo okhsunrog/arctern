@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { JobStatus } from '../client'
 import { formatNextRun, formatRelative } from '../utils/format'
+import { jobStatus } from '../utils/status'
 import TransferPanel from './TransferPanel.vue'
 
 defineProps<{
@@ -11,45 +12,42 @@ defineProps<{
   onResume?: (name: string) => void
   onPushTo?: (name: string, peer: string) => void
 }>()
-
-function statusBadge(j: JobStatus): {
-  label: string
-  color: 'success' | 'error' | 'neutral' | 'info'
-} {
-  // running/paused win: last_error/last_run describe the previous
-  // cycle and are stale while a long send is in flight.
-  if (j.paused) return { label: 'paused', color: 'neutral' }
-  if (j.running) return { label: 'running', color: 'info' }
-  if (j.last_error) return { label: 'error', color: 'error' }
-  if (j.last_run) return { label: 'ok', color: 'success' }
-  return { label: 'idle', color: 'neutral' }
-}
 </script>
 
 <template>
   <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-    <UCard v-for="j in jobs" :key="j.name">
+    <UCard v-for="j in jobs" :key="j.name" :class="jobStatus(j).rail">
       <template #header>
         <div class="flex items-center justify-between">
-          <div>
-            <RouterLink :to="`/jobs/${j.name}`" class="font-semibold hover:underline">{{
-              j.name
-            }}</RouterLink>
-            <span class="ml-2 text-sm text-gray-500">{{ j.kind }}</span>
+          <div class="min-w-0">
+            <RouterLink
+              :to="`/jobs/${j.name}`"
+              class="font-semibold font-mono hover:underline truncate block"
+            >
+              {{ j.name }}
+            </RouterLink>
+            <span class="microlabel">{{ j.kind }}</span>
           </div>
-          <UBadge :color="statusBadge(j).color" variant="subtle">{{ statusBadge(j).label }}</UBadge>
+          <UBadge
+            :color="jobStatus(j).color"
+            variant="subtle"
+            :icon="jobStatus(j).icon"
+            class="shrink-0"
+          >
+            {{ jobStatus(j).label }}
+          </UBadge>
         </div>
       </template>
       <dl class="text-sm space-y-1">
         <div class="flex justify-between">
-          <dt class="text-gray-500">Last run</dt>
+          <dt class="text-muted">Last run</dt>
           <dd>{{ formatRelative(j.last_run) }}</dd>
         </div>
         <div class="flex justify-between">
-          <dt class="text-gray-500">Next run</dt>
+          <dt class="text-muted">Next run</dt>
           <dd>{{ formatNextRun(j.next_run, j.running) }}</dd>
         </div>
-        <div v-if="j.last_error" class="text-error-600 text-xs mt-2 truncate" :title="j.last_error">
+        <div v-if="j.last_error" class="text-error text-xs mt-2 truncate" :title="j.last_error">
           {{ j.last_error }}
         </div>
       </dl>
@@ -63,9 +61,9 @@ function statusBadge(j: JobStatus): {
         />
       </div>
       <template #footer>
-        <UButton size="xs" variant="soft" icon="i-lucide-zap" @click="onWake?.(j.name)"
-          >Wakeup</UButton
-        >
+        <UButton size="xs" variant="soft" icon="i-lucide-alarm-clock" @click="onWake?.(j.name)">
+          Wake up
+        </UButton>
       </template>
     </UCard>
   </div>

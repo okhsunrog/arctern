@@ -17,32 +17,47 @@ const jobOptions = computed(() => {
 </script>
 
 <template>
-  <div class="max-w-6xl mx-auto px-4 py-6">
-    <div class="flex items-center justify-between mb-4">
-      <h1 class="text-2xl font-semibold">Events</h1>
-      <div class="flex items-center gap-2">
-        <UBadge :color="connected ? 'success' : 'error'" variant="subtle">
-          {{ connected ? 'live' : 'disconnected' }}
-        </UBadge>
-        <UButton
-          :icon="paused ? 'i-lucide-play' : 'i-lucide-pause'"
-          variant="soft"
-          size="xs"
-          @click="togglePause"
-          >{{ paused ? 'Resume' : 'Pause' }}</UButton
-        >
-        <UButton icon="i-lucide-trash-2" variant="soft" size="xs" @click="clear">Clear</UButton>
+  <UDashboardPanel id="events">
+    <template #header>
+      <UDashboardNavbar title="Events">
+        <template #right>
+          <UBadge
+            :color="connected ? 'success' : 'error'"
+            variant="subtle"
+            :icon="connected ? 'i-lucide-signal' : 'i-lucide-signal-zero'"
+          >
+            {{ connected ? 'live' : 'disconnected' }}
+          </UBadge>
+          <UButton
+            :icon="paused ? 'i-lucide-play' : 'i-lucide-pause'"
+            variant="soft"
+            size="xs"
+            @click="togglePause"
+            >{{ paused ? 'Resume' : 'Pause' }}</UButton
+          >
+          <UButton icon="i-lucide-eraser" variant="soft" size="xs" @click="clear">Clear</UButton>
+        </template>
+      </UDashboardNavbar>
+    </template>
+    <template #body>
+      <div class="mx-auto w-full max-w-7xl space-y-3">
+        <UAlert v-if="error" color="warning" :title="error" icon="i-lucide-triangle-alert" />
+        <div class="flex gap-3 text-sm">
+          <USelect
+            v-model="levelFilter"
+            :items="levelOptions"
+            placeholder="all levels"
+            class="w-32"
+          />
+          <USelect v-model="jobFilter" :items="jobOptions" placeholder="all jobs" class="w-48" />
+        </div>
+        <EventsLog
+          :events="events"
+          :level-filter="levelFilter || undefined"
+          :job-filter="jobFilter || undefined"
+          max-height-class="max-h-[70vh]"
+        />
       </div>
-    </div>
-    <UAlert v-if="error" color="warning" :title="error" class="mb-4" />
-    <div class="flex gap-3 mb-3 text-sm">
-      <USelect v-model="levelFilter" :items="levelOptions" placeholder="all levels" class="w-32" />
-      <USelect v-model="jobFilter" :items="jobOptions" placeholder="all jobs" class="w-48" />
-    </div>
-    <EventsLog
-      :events="events"
-      :level-filter="levelFilter || undefined"
-      :job-filter="jobFilter || undefined"
-    />
-  </div>
+    </template>
+  </UDashboardPanel>
 </template>

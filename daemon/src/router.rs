@@ -25,6 +25,7 @@ use crate::{auth, handlers};
         arctern_api::TargetStatus,
         arctern_api::JobRun,
         arctern_api::PeerSummary,
+        arctern_api::PeerRoute,
         arctern_api::PeerReachability,
         arctern_api::PeerSnapshotEntry,
         arctern_api::LogEvent,
@@ -37,6 +38,7 @@ use crate::{auth, handlers};
         arctern_api::ArcStats,
         arctern_api::ArcHistoryPoint,
         arctern_api::SnapshotHold,
+        arctern_api::CreateHoldRequest,
     ))
 )]
 struct ApiDoc;
@@ -48,6 +50,8 @@ fn openapi_router() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::snapshots::create_snapshot))
         .routes(routes!(handlers::snapshots::destroy_snapshot))
         .routes(routes!(handlers::snapshots::list_holds))
+        .routes(routes!(handlers::snapshots::create_hold))
+        .routes(routes!(handlers::snapshots::release_hold))
         .routes(routes!(handlers::jobs::list_jobs))
         .routes(routes!(handlers::jobs::wakeup))
         .routes(routes!(handlers::jobs::cancel))
@@ -59,6 +63,7 @@ fn openapi_router() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::peers::list_peer_jobs))
         .routes(routes!(handlers::peers::get_peer_job))
         .routes(routes!(handlers::peers::wakeup_peer_job))
+        .routes(routes!(handlers::peers::list_peer_datasets))
         .routes(routes!(handlers::peers::list_peer_snapshots))
         .routes(routes!(handlers::peers::destroy_peer_snapshot))
         .routes(routes!(handlers::peers::stream_peer_events))
@@ -98,12 +103,23 @@ pub fn build_router(state: AppState) -> Router {
 /// has bytes to serve regardless of debug-vs-release memory-serve mode.
 const SPA_INDEX_HTML: &[u8] = include_bytes!("../../admin-ui/dist/index.html");
 
-async fn spa_fallback() -> impl IntoResponse {
+async fn spa_fallback(request: axum::extract::Request) -> axum::response::Response {
+    // Unknown API paths must 404 as JSON, not 200 with the SPA shell —
+    // a typo'd endpoint otherwise "succeeds" with HTML and the client
+    // fails later on parse.
+    if request.uri().path().starts_with("/api/") {
+        let body = arctern_api::ApiErrorBody {
+            error: "not_found".into(),
+            message: format!("no such endpoint: {}", request.uri().path()),
+        };
+        return (StatusCode::NOT_FOUND, Json(body)).into_response();
+    }
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         SPA_INDEX_HTML,
     )
+        .into_response()
 }
 
 pub fn build_loopback_router(state: AppState) -> Router {
@@ -257,6 +273,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn unknown_api_path_returns_404_not_spa_html() {
+        let app = build_loopback_router(test_state().await);
+        let resp = app
+            .oneshot(req(Method::GET, "/api/v1/no_such_endpoint", None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let ct = resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(ct.contains("json"), "got content-type {ct:?}");
+    }
+
+    #[tokio::test]
+    async fn unknown_ui_path_serves_spa_shell() {
+        let app = build_loopback_router(test_state().await);
+        let resp = app
+            .oneshot(req(Method::GET, "/jobs/some-job", None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]

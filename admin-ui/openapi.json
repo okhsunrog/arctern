@@ -321,6 +321,137 @@
             }
           }
         }
+      },
+      "post": {
+        "tags": ["snapshots"],
+        "summary": "Place a user hold on `{name}@{snapshot}`. Tags with the `arctern_`\nprefix are refused — they'd collide with the replication machinery's\nstep/last holds and be swept or misread by it.",
+        "operationId": "create_hold",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Parent dataset (URL-encode `/` as %2F)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "snapshot",
+            "in": "path",
+            "description": "Snapshot tag (the part after `@`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateHoldRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Hold placed"
+          },
+          "400": {
+            "description": "Invalid or reserved tag",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Snapshot not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "ZFS returned an error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/datasets/{name}/snapshots/{snapshot}/holds/{tag}": {
+      "delete": {
+        "tags": ["snapshots"],
+        "summary": "Release a user hold. `arctern_*` tags ARE allowed here — releasing\na stuck step hold from the UI is exactly the recovery path this\nendpoint exists for.",
+        "operationId": "release_hold",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Parent dataset (URL-encode `/` as %2F)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "snapshot",
+            "in": "path",
+            "description": "Snapshot tag (the part after `@`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tag",
+            "in": "path",
+            "description": "Hold tag to release",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Hold released"
+          },
+          "404": {
+            "description": "Snapshot or hold not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "ZFS returned an error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/events": {
@@ -575,6 +706,58 @@
                   "items": {
                     "$ref": "#/components/schemas/PeerSummary"
                   }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/peers/{peer}/datasets": {
+      "get": {
+        "tags": ["peers"],
+        "operationId": "list_peer_datasets",
+        "parameters": [
+          {
+            "name": "peer",
+            "in": "path",
+            "description": "Peer name from [[peers]]",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Receiver datasets under the client's allowed root_fs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DatasetSummary"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such peer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Peer not currently connected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
                 }
               }
             }
@@ -1332,6 +1515,16 @@
           }
         }
       },
+      "CreateHoldRequest": {
+        "type": "object",
+        "description": "Body of `POST /api/v1/datasets/{name}/snapshots/{snapshot}/holds`.\n`arctern_*` tags are reserved for the replication machinery and\nrejected.",
+        "required": ["tag"],
+        "properties": {
+          "tag": {
+            "type": "string"
+          }
+        }
+      },
       "CreateSnapshotRequest": {
         "type": "object",
         "description": "Request body for `POST /api/v1/datasets/{name}/snapshots`. The path\nsegment carries the parent dataset; this struct carries everything\nelse. `recursive` and `properties` default so a minimal client can\npost `{\"snapshot_name\":\"…\"}` and get the common case.",
@@ -1525,6 +1718,34 @@
         ],
         "description": "Reachability classification for one configured peer. The daemon\nupdates this from its background reconnect loop; the UI surfaces\nit in the Peers tab."
       },
+      "PeerRoute": {
+        "type": "object",
+        "description": "One network route of a peer, in priority order (first = preferred).",
+        "required": ["name", "ssh_target", "auto", "health"],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "ssh_target": {
+            "type": "string"
+          },
+          "auto": {
+            "type": "boolean",
+            "description": "Whether scheduled (auto) replication may run over this route."
+          },
+          "health": {
+            "type": "string",
+            "description": "`\"connected\" | \"failed\" | \"unknown\"` — last connect result for\nthis route. Lower-priority routes are only probed on failover /\nre-rank, so `unknown` is the common idle state."
+          },
+          "last_error": {
+            "type": ["string", "null"]
+          },
+          "last_checked": {
+            "type": ["string", "null"],
+            "description": "RFC3339 timestamp of the last connect attempt, if any."
+          }
+        }
+      },
       "PeerSnapshotEntry": {
         "type": "object",
         "description": "One snapshot returned by `GET /api/v1/peers/{peer}/snapshots`.",
@@ -1547,16 +1768,23 @@
       "PeerSummary": {
         "type": "object",
         "description": "One row in `GET /api/v1/peers`.",
-        "required": ["name", "ssh_target", "reachability"],
+        "required": ["name", "reachability", "routes"],
         "properties": {
           "name": {
             "type": "string"
           },
-          "ssh_target": {
-            "type": "string"
-          },
           "reachability": {
             "$ref": "#/components/schemas/PeerReachability"
+          },
+          "active_route": {
+            "type": ["string", "null"],
+            "description": "Name of the route the live link currently runs over."
+          },
+          "routes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PeerRoute"
+            }
           }
         }
       },
@@ -1711,6 +1939,14 @@
           },
           "connected": {
             "type": "boolean"
+          },
+          "route": {
+            "type": ["string", "null"],
+            "description": "Active route name while connected (e.g. `\"lan\"`)."
+          },
+          "route_auto": {
+            "type": "boolean",
+            "description": "Whether the active route permits scheduled replication."
           },
           "auto_interval_secs": {
             "type": ["integer", "null"],

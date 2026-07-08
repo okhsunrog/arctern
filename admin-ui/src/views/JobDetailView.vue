@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, h, resolveComponent } from 'vue'
 import { useRoute } from 'vue-router'
+import type { TableColumn } from '@nuxt/ui'
 import { useJobs } from '../composables/useJobs'
 import { useJobRuns } from '../composables/useJobRuns'
 import { formatBytes, formatTimestamp } from '../utils/format'
+import { jobStatus, runStatus } from '../utils/status'
 import RunsCharts from '../components/RunsCharts.vue'
 import TransferPanel from '../components/TransferPanel.vue'
 import type { JobRun } from '../client'
@@ -18,17 +20,16 @@ const { runs, error: runsError, loading: runsLoading } = useJobRuns(name.value)
 
 const UBadge = resolveComponent('UBadge')
 
-const tableColumns = computed(() => [
+const tableColumns = computed<TableColumn<JobRun>[]>(() => [
   {
     accessorKey: 'started_at',
     header: 'Started',
-    cell: ({ row }: { row: { original: JobRun } }) =>
-      formatTimestamp(new Date(row.original.started_at * 1000).toISOString()),
+    cell: ({ row }) => formatTimestamp(new Date(row.original.started_at * 1000).toISOString()),
   },
   {
     id: 'duration',
     header: 'Duration',
-    cell: ({ row }: { row: { original: JobRun } }) => {
+    cell: ({ row }) => {
       const r = row.original
       if (!r.finished_at) return '—'
       return `${Math.max(0, r.finished_at - r.started_at)}s`
@@ -37,75 +38,111 @@ const tableColumns = computed(() => [
   {
     id: 'status',
     header: 'Status',
-    cell: ({ row }: { row: { original: JobRun } }) => {
-      const r = row.original
-      const color =
-        r.status === 'ok'
-          ? 'success'
-          : r.status === 'error'
-            ? 'error'
-            : r.status === 'running'
-              ? 'info'
-              : 'neutral'
-      return h(UBadge, { color, variant: 'subtle' }, () => r.status)
+    cell: ({ row }) => {
+      const s = runStatus(row.original.status)
+      return h(UBadge, { color: s.color, variant: 'subtle', icon: s.icon }, () => s.label)
     },
   },
   {
     accessorKey: 'bytes_sent',
     header: 'Bytes',
-    cell: ({ row }: { row: { original: JobRun } }) => formatBytes(row.original.bytes_sent),
+    cell: ({ row }) => formatBytes(row.original.bytes_sent),
   },
   {
     accessorKey: 'error_message',
     header: 'Error',
-    cell: ({ row }: { row: { original: JobRun } }) => row.original.error_message ?? '',
+    cell: ({ row }) => row.original.error_message ?? '',
   },
 ])
 </script>
 
 <template>
-  <div class="max-w-6xl mx-auto px-4 py-6 space-y-6">
-    <RouterLink to="/jobs" class="text-sm text-primary-500 hover:underline"> ← Jobs </RouterLink>
-    <UAlert v-if="jobsError" color="error" :title="jobsError" />
-    <div v-if="!job" class="text-gray-500">Job not found.</div>
-    <template v-else>
-      <div class="flex items-center justify-between">
-        <div>
-          <h1 class="text-2xl font-semibold">{{ job.name }}</h1>
-          <p class="text-sm text-gray-500">{{ job.kind }}</p>
-        </div>
-        <UButton icon="i-lucide-zap" @click="wake(job.name)">Wakeup</UButton>
-      </div>
-      <UCard v-if="job.transfer || job.targets?.length || job.paused">
-        <TransferPanel
-          :job="job"
-          :on-cancel="cancel"
-          :on-pause="pause"
-          :on-resume="resume"
-          :on-push-to="pushTo"
-        />
-      </UCard>
-      <UCard>
-        <dl class="grid grid-cols-2 gap-y-3 text-sm">
-          <dt class="text-gray-500">Last run</dt>
-          <dd>{{ formatTimestamp(job.last_run) }}</dd>
-          <dt class="text-gray-500">Next run</dt>
-          <dd>{{ formatTimestamp(job.next_run) }}</dd>
-          <dt class="text-gray-500">Last error</dt>
-          <dd class="text-error-600">{{ job.last_error ?? '—' }}</dd>
-        </dl>
-      </UCard>
-
-      <UAlert v-if="runsError" color="error" :title="runsError" />
-      <div v-if="runsLoading && runs.length === 0" class="text-gray-500">Loading runs…</div>
-      <div v-else-if="runs.length === 0" class="text-gray-500">No runs recorded yet.</div>
-      <template v-else>
-        <RunsCharts :runs="runs" />
-        <div>
-          <h2 class="text-lg font-semibold mb-2">Recent runs</h2>
-          <UTable :data="runs" :columns="tableColumns" />
-        </div>
-      </template>
+  <UDashboardPanel id="job-detail">
+    <template #header>
+      <UDashboardNavbar :title="name">
+        <template #leading>
+          <UButton
+            to="/jobs"
+            icon="i-lucide-arrow-left"
+            variant="ghost"
+            color="neutral"
+            size="sm"
+            aria-label="Back to jobs"
+          />
+        </template>
+        <template #right>
+          <UBadge
+            v-if="job"
+            :color="jobStatus(job).color"
+            variant="subtle"
+            :icon="jobStatus(job).icon"
+          >
+            {{ jobStatus(job).label }}
+          </UBadge>
+          <UButton v-if="job" icon="i-lucide-alarm-clock" size="sm" @click="wake(job.name)">
+            Wake up
+          </UButton>
+        </template>
+      </UDashboardNavbar>
     </template>
-  </div>
+    <template #body>
+      <div class="mx-auto w-full max-w-7xl space-y-6">
+        <UAlert v-if="jobsError" color="error" :title="jobsError" icon="i-lucide-circle-x" />
+        <UEmpty
+          v-if="!job"
+          icon="i-lucide-search-x"
+          title="Job not found"
+          :description="`No job named ${name} is configured.`"
+        />
+        <template v-else>
+          <UCard :class="jobStatus(job).rail">
+            <div class="flex items-start justify-between gap-6 flex-wrap">
+              <dl class="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1 text-sm">
+                <dt class="text-muted">Kind</dt>
+                <dd class="font-mono">{{ job.kind }}</dd>
+                <dt class="text-muted">Last run</dt>
+                <dd>{{ formatTimestamp(job.last_run) }}</dd>
+                <dt class="text-muted">Next run</dt>
+                <dd>{{ formatTimestamp(job.next_run) }}</dd>
+                <template v-if="job.last_error">
+                  <dt class="text-muted">Last error</dt>
+                  <dd class="text-error break-all">{{ job.last_error }}</dd>
+                </template>
+              </dl>
+            </div>
+            <div v-if="job.transfer || job.targets?.length || job.paused" class="mt-4">
+              <TransferPanel
+                :job="job"
+                :on-cancel="cancel"
+                :on-pause="pause"
+                :on-resume="resume"
+                :on-push-to="pushTo"
+              />
+            </div>
+          </UCard>
+
+          <UAlert v-if="runsError" color="error" :title="runsError" icon="i-lucide-circle-x" />
+          <div v-if="runsLoading && runs.length === 0" class="text-muted text-sm">
+            Loading runs…
+          </div>
+          <UEmpty
+            v-else-if="runs.length === 0"
+            icon="i-lucide-history"
+            title="No runs recorded yet"
+          />
+          <template v-else>
+            <RunsCharts :runs="runs" />
+            <div>
+              <div class="microlabel mb-2">recent runs</div>
+              <UTable
+                :data="runs"
+                :columns="tableColumns"
+                class="rounded-md border border-default bg-default"
+              />
+            </div>
+          </template>
+        </template>
+      </div>
+    </template>
+  </UDashboardPanel>
 </template>

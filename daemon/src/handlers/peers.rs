@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use arctern_api::{
-    ApiErrorBody, JobStatus, LogEvent, PeerReachability, PeerSnapshotEntry, PeerSummary,
+    ApiErrorBody, JobStatus, LogEvent, PeerReachability, PeerRoute, PeerSnapshotEntry, PeerSummary,
 };
 use arctern_transport::{ErrorCode, Request, Response};
 use axum::{
@@ -35,12 +35,30 @@ pub async fn list_peers(State(state): State<AppState>) -> Json<Vec<PeerSummary>>
         .values()
         .map(|e| PeerSummary {
             name: e.name.clone(),
-            ssh_target: e.ssh_target.clone(),
             reachability: render_reachability(&e.status),
+            active_route: e.active_route.clone(),
+            routes: e.routes.iter().map(render_route).collect(),
         })
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Json(out)
+}
+
+fn render_route(r: &crate::peer::state::RouteState) -> PeerRoute {
+    use crate::peer::state::RouteHealth;
+    let (health, last_error) = match &r.health {
+        RouteHealth::Unknown => ("unknown", None),
+        RouteHealth::Connected => ("connected", None),
+        RouteHealth::Failed { last_error } => ("failed", Some(last_error.clone())),
+    };
+    PeerRoute {
+        name: r.name.clone(),
+        ssh_target: r.ssh_target.clone(),
+        auto: r.auto,
+        health: health.into(),
+        last_error,
+        last_checked: r.last_checked.and_then(|t| t.format(&Rfc3339).ok()),
+    }
 }
 
 fn render_reachability(s: &PeerStatus) -> PeerReachability {
@@ -233,6 +251,49 @@ pub async fn wakeup_peer_job(
         .map_err(|e| rpc_error_to_http(format!("{e}")))?;
     match resp {
         Response::WakeupJobOk => Ok(StatusCode::NO_CONTENT),
+        Response::Error { code, message } => Err(map_response_error(code, message)),
+        other => Err(map_response_error(
+            ErrorCode::Internal,
+            format!("unexpected response: {other:?}"),
+        )),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/peers/{peer}/datasets",
+    tag = "peers",
+    params(("peer" = String, Path, description = "Peer name from [[peers]]")),
+    responses(
+        (status = 200, description = "Receiver datasets under the client's allowed root_fs",
+         body = Vec<arctern_api::DatasetSummary>),
+        (status = 404, description = "No such peer", body = ApiErrorBody),
+        (status = 503, description = "Peer not currently connected", body = ApiErrorBody),
+    ),
+)]
+pub async fn list_peer_datasets(
+    State(state): State<AppState>,
+    Path(peer): Path<String>,
+) -> Result<Json<Vec<arctern_api::DatasetSummary>>, (StatusCode, HeaderMap, Json<ApiErrorBody>)> {
+    let link = require_link(&state, &peer).await?;
+    let resp = link
+        .rpc(Request::ListDatasets)
+        .await
+        .map_err(|e| rpc_error_to_http(format!("{e}")))?;
+    match resp {
+        Response::ListDatasetsOk { datasets } => Ok(Json(
+            datasets
+                .into_iter()
+                .map(|d| arctern_api::DatasetSummary {
+                    name: d.name,
+                    dataset_type: d.kind,
+                    properties: d
+                        .used
+                        .map(|u| [("used".to_string(), u)].into_iter().collect())
+                        .unwrap_or_default(),
+                })
+                .collect(),
+        )),
         Response::Error { code, message } => Err(map_response_error(code, message)),
         other => Err(map_response_error(
             ErrorCode::Internal,

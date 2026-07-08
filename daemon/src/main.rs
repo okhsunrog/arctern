@@ -144,11 +144,23 @@ async fn run_stdinserver_dispatch(identity: String, config: PathBuf) -> eyre::Re
     stdinserver::dispatch::run_with(&identity, cfg, pool).await
 }
 
-/// Resolve the socket path the daemon should bind to.
-fn resolve_socket_path(arg: Option<PathBuf>) -> PathBuf {
+/// Resolve the socket path the daemon should bind to. Priority:
+/// `--socket` flag, then the config's `socket` key (which
+/// `stdinserver-dispatch` also reads, so the two processes agree),
+/// then the environment default.
+fn resolve_socket_path(arg: Option<PathBuf>, config: Option<&std::path::Path>) -> PathBuf {
     if let Some(p) = arg {
         return p;
     }
+    if let Some(p) = config {
+        return p.to_path_buf();
+    }
+    default_socket_path()
+}
+
+/// Environment fallback shared by the daemon bind and the
+/// stdinserver's client side.
+pub(crate) fn default_socket_path() -> PathBuf {
     if let Ok(rt) = std::env::var("XDG_RUNTIME_DIR")
         && !rt.is_empty()
     {
@@ -164,7 +176,7 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
     let config = arctern_config::load_from_path(&config_path)
         .map_err(|e| eyre::eyre!("config load: {e}"))?;
 
-    let socket_path = resolve_socket_path(socket_arg);
+    let socket_path = resolve_socket_path(socket_arg, config.socket.as_deref());
 
     match std::fs::remove_file(&socket_path) {
         Ok(()) => {}
@@ -246,9 +258,9 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
         let state_for_task = peers_state.clone();
         let cancel = peers_cancel.clone();
         let name = p.name.clone();
-        let target = p.ssh_target.clone();
+        let routes = p.routes.clone();
         reconnect_handles.push(tokio::spawn(async move {
-            peer::reconnect::run_for_peer(state_for_task, name, target, cancel).await;
+            peer::reconnect::run_for_peer(state_for_task, name, routes, cancel).await;
         }));
     }
     for job in config.jobs {

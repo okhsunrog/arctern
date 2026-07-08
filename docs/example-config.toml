@@ -35,14 +35,33 @@ grid = "4x15m | 24x1h | 14x1d"
 protect_non_prefixed = true
 
 # ─── Outbound SSH peers ──────────────────────────────────────────────
+#
+# A peer is one PHYSICAL host, possibly reachable over several network
+# routes (LAN, WireGuard, ...) listed highest-priority first. The link
+# connects the first reachable route and switches back to a higher one
+# when it returns. Cursor bookmarks, holds and sync history are keyed
+# by the peer name — routes are pure transport.
+#
+# `auto = false` on a route means scheduled replication never runs
+# while that route is the active one — it carries only manual
+# "Send now" pushes (the metered-WireGuard case).
 
 [[peers]]
-name = "nas-home"
+name = "nas"
+mode = "auto"
+auto_interval = "1d"    # don't auto-sync more often than daily
+[[peers.routes]]
+name = "lan"
 ssh_target = "arctern-replicator@10.44.44.1"
+[[peers.routes]]
+name = "wg"
+ssh_target = "arctern-replicator@10.66.66.2"
+auto = false
 
+# Single-route shorthand — equivalent to one route named "default":
 [[peers]]
 name = "nas-remote"
-ssh_target = "arctern-replicator@10.66.66.2"
+ssh_target = "arctern-replicator@203.0.113.7"
 
 # ─── databak: snap job ───────────────────────────────────────────────
 #
@@ -70,18 +89,19 @@ keep = [
   { type = "regex", regex = "^zrepl_.*", negate = true },
 ]
 
-# ─── push_to_nas: replicate to home, fall back to remote ────────────
+# ─── push_to_nas: replicate to both hosts on their own schedules ────
 #
-# `targets` is ordered: the cycle picks the first peer whose
-# reachability is "Connected" and uses it. When 10.44 is unreachable
-# (laptop is off the home network), 10.66 takes over. Each peer keeps
-# its own cursor bookmark, so the offline peer catches up cleanly when
-# it's reachable again.
+# Every DUE target replicates each cycle: manual "Send now" requests
+# always run; an auto peer runs when its active route allows auto and
+# its `auto_interval` has elapsed since the last success. Failover
+# between network paths to the SAME host is the peer's `routes` list,
+# not a second target. Each peer keeps its own cursor bookmark, so an
+# offline peer catches up cleanly when it's reachable again.
 
 [[jobs]]
 type = "push"
 name = "push_to_nas"
-targets = ["nas-home", "nas-remote"]
+targets = ["nas", "nas-remote"]
 interval = "15m"
 dry_run = true # first-run safety: plan and log actions without sending
 filesystems = { "novafs/arch0/" = true, "novafs/arch0" = false, "novafs/arch0/data" = false }

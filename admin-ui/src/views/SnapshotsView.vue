@@ -1,326 +1,550 @@
 <script setup lang="ts">
-import { computed, h, onMounted, ref, resolveComponent, watch } from 'vue'
+import { computed, h, onMounted, onUnmounted, ref, resolveComponent, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { useSnapshots } from '../composables/useSnapshots'
+import type { TableColumn, TreeItem } from '@nuxt/ui'
+import {
+  createHold,
+  createSnapshot,
+  destroySnapshot,
+  listHolds,
+  listSnapshots,
+  releaseHold,
+} from '../client'
+import type { DatasetSummary, SnapshotHold } from '../client'
 import { useDatasets } from '../composables/useDatasets'
-import { visibleDatasetRows } from '../utils/datasets'
-import { formatBytes, formatRelative, formatTimestamp } from '../utils/format'
-import DestroySnapshotModal from '../components/DestroySnapshotModal.vue'
+import { useMutation } from '../composables/useMutation'
+import { formatBytes } from '../utils/format'
 import CreateSnapshotModal from '../components/CreateSnapshotModal.vue'
-import type { DatasetSummary } from '../client'
+import DestroySnapshotModal from '../components/DestroySnapshotModal.vue'
 
 const route = useRoute()
 const router = useRouter()
-const {
-  dataset,
-  prefix,
-  snapshots,
-  error,
-  loading,
-  refresh,
-  create,
-  destroy,
-  loadHolds,
-  holdsCache,
-} = useSnapshots()
-const {
-  datasets,
-  loading: datasetsLoading,
-  error: datasetsError,
-  refresh: refreshDatasets,
-} = useDatasets()
+const { datasets, error: dsError, loading: dsLoading, refresh: refreshDatasets } = useDatasets()
+const { mutate } = useMutation()
 
+// ── Dataset tree ────────────────────────────────────────────────
+interface DsNode extends TreeItem {
+  label: string
+  value: string
+  children?: DsNode[]
+}
+
+const treeFilter = ref('')
+
+const tree = computed<DsNode[]>(() => {
+  const fs = datasets.value
+    .filter((d) => d.dataset_type === 'filesystem' || d.dataset_type === 'volume')
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name))
+  const q = treeFilter.value.trim().toLowerCase()
+  const matching = q ? fs.filter((d) => d.name.toLowerCase().includes(q)) : fs
+  const byPath = new Map<string, DsNode>()
+  const roots: DsNode[] = []
+  for (const d of matching) {
+    const parts = d.name.split('/')
+    const node: DsNode = {
+      label: parts[parts.length - 1] ?? d.name,
+      value: d.name,
+      icon: d.dataset_type === 'volume' ? 'i-lucide-box' : 'i-lucide-database',
+      defaultExpanded: parts.length <= 2 || q.length > 0,
+      children: undefined,
+    }
+    byPath.set(d.name, node)
+    const parentPath = parts.slice(0, -1).join('/')
+    const parent = byPath.get(parentPath)
+    if (parent) {
+      parent.children = parent.children ?? []
+      parent.children.push(node)
+    } else {
+      // Parent filtered out (or a pool root): promote to top level with
+      // the full path as label so context isn't lost.
+      node.label = d.name
+      roots.push(node)
+    }
+  }
+  return roots
+})
+
+const selectedNode = ref<DsNode>()
+const dataset = computed(() => selectedNode.value?.value ?? '')
+
+// Deep-link: /snapshots?dataset=tank/data selects on load.
 onMounted(() => {
   const q = route.query.dataset
-  if (typeof q === 'string') dataset.value = q
-  void refresh()
+  if (typeof q === 'string' && q) {
+    selectedNode.value = { label: q, value: q }
+  }
+})
+watch(dataset, (d) => {
+  void router.replace({ query: d ? { dataset: d } : {} })
+  void refreshSnapshots()
 })
 
-watch(dataset, (v) => {
-  void router.replace({ query: v ? { dataset: v } : {} })
-  void refresh()
-})
+// ── Snapshots of the selected dataset ───────────────────────────
+const snapshots = ref<DatasetSummary[]>([])
+const snapsLoading = ref(false)
+const holds = ref<Map<string, SnapshotHold[]>>(new Map())
+const rowSelection = ref<Record<string, boolean>>({})
 
-// --- dataset picker (left pane) ---
-const dsSearch = ref('')
-const collapsed = ref<Set<string>>(new Set())
-
-const rows = computed(() => visibleDatasetRows(datasets.value, collapsed.value, dsSearch.value))
-
-function selectDataset(name: string) {
-  dataset.value = name
+function tagOf(full: string): string {
+  const at = full.indexOf('@')
+  return at >= 0 ? full.slice(at + 1) : full
 }
 
-function toggleCollapse(name: string) {
-  const next = new Set(collapsed.value)
-  if (next.has(name)) next.delete(name)
-  else next.add(name)
-  collapsed.value = next
+async function refreshSnapshots() {
+  rowSelection.value = {}
+  if (!dataset.value) {
+    snapshots.value = []
+    return
+  }
+  snapsLoading.value = true
+  const r = await listSnapshots({ path: { name: dataset.value } })
+  if (!r.error) {
+    snapshots.value = r.data ?? []
+    void loadAllHolds()
+  }
+  snapsLoading.value = false
 }
 
-// --- create / destroy (right pane) ---
+// Eager holds: a lock badge must be visible BEFORE the operator clicks
+// destroy, not discovered via a 409 after.
+async function loadAllHolds() {
+  const ds = dataset.value
+  const names = snapshots.value.map((s) => s.name)
+  const next = new Map<string, SnapshotHold[]>()
+  await Promise.all(
+    names.map(async (full) => {
+      const r = await listHolds({ path: { name: ds, snapshot: tagOf(full) } })
+      if (!r.error) next.set(full, r.data ?? [])
+    }),
+  )
+  if (dataset.value === ds) holds.value = next
+}
+
+// Poll while a dataset is selected — the snap job mutates underneath.
+const pollHandle = setInterval(() => {
+  if (dataset.value && !snapsLoading.value) void refreshSnapshots()
+}, 15_000)
+onUnmounted(() => clearInterval(pollHandle))
+
+// ── Detail slideover ────────────────────────────────────────────
+const detailOpen = ref(false)
+const detailSnap = ref<DatasetSummary | null>(null)
+const newHoldTag = ref('')
+
+function openDetail(s: DatasetSummary) {
+  detailSnap.value = s
+  newHoldTag.value = ''
+  detailOpen.value = true
+}
+
+const detailHolds = computed(() =>
+  detailSnap.value ? (holds.value.get(detailSnap.value.name) ?? []) : [],
+)
+
+async function addHold() {
+  const s = detailSnap.value
+  const tag = newHoldTag.value.trim()
+  if (!s || !tag) return
+  const ok = await mutate(`Held ${s.name}`, () =>
+    createHold({ path: { name: dataset.value, snapshot: tagOf(s.name) }, body: { tag } }),
+  )
+  if (ok) {
+    newHoldTag.value = ''
+    await loadAllHolds()
+  }
+}
+
+async function releaseHoldTag(tag: string) {
+  const s = detailSnap.value
+  if (!s) return
+  const ok = await mutate(`Released ${tag}`, () =>
+    releaseHold({ path: { name: dataset.value, snapshot: tagOf(s.name), tag } }),
+  )
+  if (ok) await loadAllHolds()
+}
+
+// ── Create / destroy ────────────────────────────────────────────
 const createOpen = ref(false)
-async function onCreate(payload: { name: string; recursive: boolean }) {
-  await create(payload.name, payload.recursive)
+
+async function confirmCreate(payload: { name: string; recursive: boolean }) {
+  await mutate(`Created ${dataset.value}@${payload.name}`, () =>
+    createSnapshot({
+      path: { name: dataset.value },
+      body: { snapshot_name: payload.name, recursive: payload.recursive },
+    }),
+  )
+  await refreshSnapshots()
 }
 
-const modalOpen = ref(false)
-const pending = ref<string | null>(null)
-const focusedHolds = ref<string | null>(null)
+const destroyOpen = ref(false)
+const destroyTarget = ref<string | null>(null)
 
-function ask(name: string) {
-  pending.value = name
-  modalOpen.value = true
+function askDestroy(full: string) {
+  destroyTarget.value = full
+  destroyOpen.value = true
 }
 
-async function onConfirm(name: string) {
-  await destroy(name)
-  pending.value = null
+async function confirmDestroy(full: string) {
+  await mutate(`Destroyed ${full}`, () =>
+    destroySnapshot({ path: { name: dataset.value, snapshot: tagOf(full) } }),
+  )
+  await refreshSnapshots()
 }
 
-async function showHolds(name: string) {
-  focusedHolds.value = name
-  if (!holdsCache.value.has(name)) await loadHolds(name)
+// Bulk destroy: selected rows, skipping held ones loudly.
+const bulkOpen = ref(false)
+const selectedNames = computed(() =>
+  Object.entries(rowSelection.value)
+    .filter(([, v]) => v)
+    .map(([k]) => k),
+)
+
+async function confirmBulkDestroy() {
+  bulkOpen.value = false
+  for (const full of selectedNames.value) {
+    await mutate(
+      `Destroyed ${full}`,
+      () => destroySnapshot({ path: { name: dataset.value, snapshot: tagOf(full) } }),
+      { silentSuccess: true },
+    )
+  }
+  await refreshSnapshots()
 }
 
-function holdsLabel(name: string): string {
-  const cached = holdsCache.value.get(name)
-  if (cached == null) return 'Holds'
-  if (cached.length === 0) return 'No holds'
-  return `${cached.length} hold${cached.length === 1 ? '' : 's'}`
-}
-
+// ── Table ───────────────────────────────────────────────────────
+const UBadge = resolveComponent('UBadge')
 const UButton = resolveComponent('UButton')
+const UCheckbox = resolveComponent('UCheckbox')
 
-const columns = computed(() => [
+const sorting = ref([{ id: 'created', desc: true }])
+
+const columns = computed<TableColumn<DatasetSummary>[]>(() => [
   {
-    accessorKey: 'name',
-    header: 'Snapshot',
-    cell: ({ row }: { row: { original: DatasetSummary } }) => {
-      const at = row.original.name.indexOf('@')
-      return h(
-        'span',
-        { class: 'font-mono text-xs' },
-        at >= 0 ? row.original.name.slice(at) : row.original.name,
-      )
-    },
+    id: 'select',
+    header: ({ table }) =>
+      h(UCheckbox, {
+        modelValue: table.getIsSomePageRowsSelected()
+          ? 'indeterminate'
+          : table.getIsAllPageRowsSelected(),
+        'onUpdate:modelValue': (v: boolean | 'indeterminate') =>
+          table.toggleAllPageRowsSelected(!!v),
+        'aria-label': 'Select all',
+      }),
+    cell: ({ row }) =>
+      h(UCheckbox, {
+        modelValue: row.getIsSelected(),
+        'onUpdate:modelValue': (v: boolean | 'indeterminate') => row.toggleSelected(!!v),
+        'aria-label': 'Select row',
+      }),
+    enableSorting: false,
   },
   {
-    id: 'creation',
-    header: 'Created',
-    cell: ({ row }: { row: { original: DatasetSummary } }) => {
-      const sec = Number(row.original.properties?.creation ?? '')
-      if (!Number.isFinite(sec)) return '—'
-      const iso = new Date(sec * 1000).toISOString()
-      return h('span', { title: formatTimestamp(iso) }, formatRelative(iso))
+    id: 'name',
+    accessorFn: (r) => tagOf(r.name),
+    header: 'Snapshot',
+    cell: ({ row }) =>
+      h(
+        'button',
+        {
+          class: 'font-mono text-left hover:underline',
+          onClick: () => openDetail(row.original),
+        },
+        tagOf(row.original.name),
+      ),
+  },
+  {
+    id: 'created',
+    accessorFn: (r) => Number(r.properties?.creation ?? 0),
+    header: ({ column }) =>
+      h(UButton, {
+        color: 'neutral',
+        variant: 'ghost',
+        label: 'Created',
+        icon:
+          column.getIsSorted() === 'asc'
+            ? 'i-lucide-arrow-up-narrow-wide'
+            : 'i-lucide-arrow-down-wide-narrow',
+        class: '-mx-2.5',
+        onClick: () => column.toggleSorting(column.getIsSorted() === 'asc'),
+      }),
+    cell: ({ row }) => {
+      const t = Number(row.original.properties?.creation ?? 0)
+      return t ? new Date(t * 1000).toLocaleString() : '—'
     },
   },
   {
     id: 'used',
-    header: 'Used',
-    cell: ({ row }: { row: { original: DatasetSummary } }) => {
-      const n = Number(row.original.properties?.used ?? '')
-      return Number.isFinite(n) ? formatBytes(n) : '—'
-    },
+    accessorFn: (r) => Number(r.properties?.used ?? 0),
+    header: ({ column }) =>
+      h(UButton, {
+        color: 'neutral',
+        variant: 'ghost',
+        label: 'Used',
+        icon:
+          column.getIsSorted() === 'asc'
+            ? 'i-lucide-arrow-up-narrow-wide'
+            : 'i-lucide-arrow-down-wide-narrow',
+        class: '-mx-2.5',
+        onClick: () => column.toggleSorting(column.getIsSorted() === 'asc'),
+      }),
+    cell: ({ row }) => formatBytes(Number(row.original.properties?.used ?? 0)),
   },
   {
     id: 'holds',
     header: 'Holds',
-    cell: ({ row }: { row: { original: DatasetSummary } }) => {
-      const cached = holdsCache.value.get(row.original.name)
-      const variant: 'soft' | 'ghost' = cached && cached.length > 0 ? 'soft' : 'ghost'
-      const color: 'error' | 'neutral' = cached && cached.length > 0 ? 'error' : 'neutral'
+    enableSorting: false,
+    cell: ({ row }) => {
+      const hs = holds.value.get(row.original.name)
+      if (!hs || hs.length === 0) return ''
       return h(
-        UButton,
-        {
-          icon: 'i-lucide-lock',
-          variant,
-          color,
-          size: 'xs',
-          onClick: () => showHolds(row.original.name),
-        },
-        () => holdsLabel(row.original.name),
+        'div',
+        { class: 'flex gap-1 flex-wrap' },
+        hs.map((hold) =>
+          h(
+            UBadge,
+            { color: 'warning', variant: 'subtle', size: 'sm', icon: 'i-lucide-lock' },
+            () => hold.tag,
+          ),
+        ),
       )
     },
   },
   {
     id: 'actions',
     header: '',
-    cell: ({ row }: { row: { original: DatasetSummary } }) => {
-      const cached = holdsCache.value.get(row.original.name)
-      const blocked = cached != null && cached.length > 0
-      return h(
-        UButton,
-        {
-          icon: 'i-lucide-trash-2',
-          color: 'error',
-          variant: 'soft',
+    enableSorting: false,
+    cell: ({ row }) =>
+      h('div', { class: 'flex justify-end gap-0.5' }, [
+        h(UButton, {
           size: 'xs',
-          disabled: blocked,
-          title: blocked ? 'Release the holds first' : '',
-          onClick: () => ask(row.original.name),
-        },
-        () => 'Destroy',
-      )
-    },
+          color: 'neutral',
+          variant: 'ghost',
+          icon: 'i-lucide-info',
+          'aria-label': 'Details',
+          onClick: () => openDetail(row.original),
+        }),
+        h(UButton, {
+          size: 'xs',
+          color: 'error',
+          variant: 'ghost',
+          icon: 'i-lucide-trash-2',
+          'aria-label': 'Destroy',
+          onClick: () => askDestroy(row.original.name),
+        }),
+      ]),
   },
 ])
-
-const focusedHoldsList = computed(() => {
-  if (!focusedHolds.value) return null
-  return holdsCache.value.get(focusedHolds.value) ?? null
-})
 </script>
 
 <template>
-  <div class="max-w-6xl mx-auto px-4 py-6 space-y-4">
-    <h1 class="text-2xl font-semibold">Snapshots</h1>
-
-    <UAlert v-if="datasetsError" color="error" :title="datasetsError" />
-
-    <div class="grid grid-cols-1 lg:grid-cols-[19rem_1fr] gap-4 items-start">
-      <!-- Left: dataset tree picker -->
-      <div
-        class="rounded-md border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-3 space-y-2 lg:sticky lg:top-4"
-      >
-        <div class="flex items-center justify-between">
-          <span class="text-sm font-semibold">Datasets</span>
-          <UButton
-            icon="i-lucide-refresh-cw"
-            variant="ghost"
-            size="xs"
-            :loading="datasetsLoading"
-            title="Reload dataset list"
-            @click="refreshDatasets"
-          />
-        </div>
-        <UInput
-          v-model="dsSearch"
-          icon="i-lucide-search"
-          size="sm"
-          placeholder="Filter datasets…"
-          class="w-full"
-        />
-        <div class="max-h-[70vh] overflow-auto -mx-1 pr-1">
-          <div v-if="datasetsLoading && rows.length === 0" class="text-gray-500 text-sm px-2 py-1">
-            Loading…
-          </div>
-          <div v-else-if="rows.length === 0" class="text-gray-500 text-sm px-2 py-1">
-            No datasets match.
-          </div>
-          <button
-            v-for="row in rows"
-            :key="row.name"
-            type="button"
-            class="w-full flex items-center gap-1 rounded px-1 py-1 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-800"
-            :class="
-              row.name === dataset
-                ? 'bg-primary-50 dark:bg-primary-950 text-primary-700 dark:text-primary-300'
-                : ''
-            "
-            :style="{ paddingLeft: `${row.depth * 0.85 + 0.25}rem` }"
-            @click="selectDataset(row.name)"
-          >
-            <span
-              v-if="row.hasChildren"
-              class="shrink-0 rounded p-0.5 hover:bg-gray-200 dark:hover:bg-gray-700"
-              @click.stop="toggleCollapse(row.name)"
-            >
-              <UIcon
-                :name="row.collapsed ? 'i-lucide-chevron-right' : 'i-lucide-chevron-down'"
-                class="size-4 text-gray-400"
-              />
-            </span>
-            <span v-else class="shrink-0 w-5" />
-            <UIcon
-              :name="row.type === 'volume' ? 'i-lucide-hard-drive' : 'i-lucide-folder'"
-              class="size-4 shrink-0 text-gray-400"
-            />
-            <span class="font-mono truncate flex-1">{{ row.label }}</span>
-            <span v-if="row.used != null" class="text-xs text-gray-400 shrink-0">
-              {{ formatBytes(row.used) }}
-            </span>
-          </button>
-        </div>
-      </div>
-
-      <!-- Right: snapshots of the selected dataset -->
-      <div class="space-y-3 min-w-0">
-        <div
-          v-if="!dataset"
-          class="rounded-md border border-dashed border-gray-300 dark:border-gray-700 p-8 text-center text-gray-500"
-        >
-          Pick a dataset on the left to view and manage its snapshots.
-        </div>
-
-        <template v-else>
-          <div class="flex flex-wrap items-center gap-2">
-            <div class="min-w-0 flex-1">
-              <div class="font-mono text-sm truncate" :title="dataset">{{ dataset }}</div>
-              <div class="text-xs text-gray-500">
-                {{ snapshots.length }} snapshot{{ snapshots.length === 1 ? '' : 's' }}
-              </div>
-            </div>
+  <UDashboardPanel id="snapshots">
+    <template #header>
+      <UDashboardNavbar title="Snapshots">
+        <template #right>
+          <UButton v-if="dataset" icon="i-lucide-camera" size="sm" @click="createOpen = true">
+            Create snapshot
+          </UButton>
+        </template>
+      </UDashboardNavbar>
+    </template>
+    <template #body>
+      <div class="mx-auto w-full max-w-7xl">
+        <UAlert v-if="dsError" color="error" :title="dsError" icon="i-lucide-circle-x" />
+        <div class="grid grid-cols-1 lg:grid-cols-[minmax(16rem,20rem)_1fr] gap-4">
+          <!-- Dataset tree -->
+          <div class="rounded-md border border-default bg-default p-2 self-start">
             <UInput
-              v-model="prefix"
+              v-model="treeFilter"
+              icon="i-lucide-search"
+              placeholder="Filter datasets…"
               size="sm"
-              placeholder="Prefix filter"
-              class="font-mono w-40"
-              @change="refresh"
+              class="w-full mb-2 font-mono"
+            />
+            <div v-if="dsLoading && tree.length === 0" class="text-muted text-sm p-2">Loading…</div>
+            <UTree
+              v-else
+              v-model="selectedNode"
+              :items="tree"
+              :get-key="(i: DsNode) => i.value"
+              size="sm"
+              class="font-mono"
             />
             <UButton
-              icon="i-lucide-refresh-cw"
+              size="xs"
               variant="ghost"
-              size="sm"
-              :loading="loading"
-              @click="refresh"
-            />
-            <UButton icon="i-lucide-camera" color="primary" size="sm" @click="createOpen = true">
-              Create
+              color="neutral"
+              icon="i-lucide-refresh-cw"
+              class="mt-2"
+              @click="refreshDatasets"
+            >
+              Refresh
             </UButton>
           </div>
 
-          <UAlert v-if="error" color="error" :title="error" />
-
-          <div v-if="loading && snapshots.length === 0" class="text-gray-500">Loading…</div>
-          <div v-else-if="snapshots.length === 0" class="text-gray-500">No snapshots match.</div>
-          <UTable v-else :data="snapshots" :columns="columns" />
-
-          <UCard v-if="focusedHolds">
-            <template #header>
-              <div class="flex items-center justify-between">
-                <div class="font-semibold font-mono text-sm break-all">{{ focusedHolds }}</div>
-                <UButton icon="i-lucide-x" variant="ghost" size="xs" @click="focusedHolds = null" />
+          <!-- Snapshot table -->
+          <div class="space-y-3 min-w-0">
+            <UEmpty
+              v-if="!dataset"
+              icon="i-lucide-database"
+              title="Pick a dataset"
+              description="Select a dataset on the left to browse its snapshots."
+            />
+            <template v-else>
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="font-mono text-sm font-medium truncate">{{ dataset }}</span>
+                <span class="text-xs text-muted">{{ snapshots.length }} snapshots</span>
+                <span class="ms-auto flex gap-2">
+                  <UButton
+                    v-if="selectedNames.length"
+                    color="error"
+                    variant="soft"
+                    size="xs"
+                    icon="i-lucide-trash-2"
+                    @click="bulkOpen = true"
+                  >
+                    Destroy {{ selectedNames.length }} selected
+                  </UButton>
+                  <UButton
+                    size="xs"
+                    variant="ghost"
+                    color="neutral"
+                    icon="i-lucide-refresh-cw"
+                    :loading="snapsLoading"
+                    @click="refreshSnapshots"
+                  >
+                    Refresh
+                  </UButton>
+                </span>
               </div>
+              <UTable
+                v-model:row-selection="rowSelection"
+                v-model:sorting="sorting"
+                :data="snapshots"
+                :columns="columns"
+                :get-row-id="(r: DatasetSummary) => r.name"
+                :loading="snapsLoading && snapshots.length === 0"
+                class="rounded-md border border-default bg-default"
+              />
             </template>
-            <div v-if="focusedHoldsList == null" class="text-gray-500 text-sm">Loading…</div>
-            <div v-else-if="focusedHoldsList.length === 0" class="text-gray-500 text-sm">
-              No user holds. Destroy will succeed unless a clone or zfs send hold blocks it.
-            </div>
-            <ul v-else class="space-y-2 text-sm">
-              <li
-                v-for="hold in focusedHoldsList"
-                :key="hold.tag"
-                class="flex items-center justify-between rounded px-3 py-2 bg-gray-50 dark:bg-gray-900"
-              >
-                <div>
-                  <span class="font-mono font-semibold">{{ hold.tag }}</span>
-                  <span class="ml-3 text-xs text-gray-500">
-                    held since
-                    {{ formatTimestamp(new Date(Number(hold.timestamp) * 1000).toISOString()) }}
-                  </span>
-                </div>
-                <code class="text-xs text-gray-500">
-                  zfs release {{ hold.tag }} {{ focusedHolds }}
-                </code>
-              </li>
-            </ul>
-          </UCard>
-        </template>
+          </div>
+        </div>
       </div>
-    </div>
 
-    <CreateSnapshotModal v-model:open="createOpen" :dataset="dataset" @confirm="onCreate" />
-    <DestroySnapshotModal v-model:open="modalOpen" :snapshot-name="pending" @confirm="onConfirm" />
-  </div>
+      <CreateSnapshotModal v-model:open="createOpen" :dataset="dataset" @confirm="confirmCreate" />
+      <DestroySnapshotModal
+        v-model:open="destroyOpen"
+        :snapshot-name="destroyTarget"
+        @confirm="confirmDestroy"
+      />
+
+      <!-- Bulk destroy confirm -->
+      <UModal
+        v-model:open="bulkOpen"
+        title="Destroy selected snapshots?"
+        :description="`${selectedNames.length} snapshots will be permanently removed.`"
+      >
+        <template #body>
+          <ul class="font-mono text-xs space-y-1 max-h-64 overflow-y-auto">
+            <li v-for="n in selectedNames" :key="n" class="flex items-center gap-2">
+              <UIcon
+                v-if="(holds.get(n)?.length ?? 0) > 0"
+                name="i-lucide-lock"
+                class="text-warning shrink-0"
+              />
+              <span class="break-all">{{ n }}</span>
+            </li>
+          </ul>
+          <p
+            v-if="selectedNames.some((n) => (holds.get(n)?.length ?? 0) > 0)"
+            class="text-warning text-xs mt-3"
+          >
+            Locked snapshots are held and will fail to destroy until their holds are released.
+          </p>
+        </template>
+        <template #footer>
+          <div class="flex justify-end gap-2 w-full">
+            <UButton variant="ghost" @click="bulkOpen = false">Cancel</UButton>
+            <UButton color="error" icon="i-lucide-trash-2" @click="confirmBulkDestroy">
+              Destroy {{ selectedNames.length }}
+            </UButton>
+          </div>
+        </template>
+      </UModal>
+
+      <!-- Snapshot detail slideover -->
+      <USlideover v-model:open="detailOpen" :title="detailSnap ? tagOf(detailSnap.name) : ''">
+        <template #body>
+          <div v-if="detailSnap" class="space-y-5 text-sm">
+            <div>
+              <div class="microlabel mb-1">full name</div>
+              <code class="font-mono break-all">{{ detailSnap.name }}</code>
+            </div>
+
+            <div>
+              <div class="microlabel mb-2">holds</div>
+              <div v-if="detailHolds.length === 0" class="text-muted text-xs">
+                No holds — destroy-eligible.
+              </div>
+              <div v-else class="space-y-1">
+                <div
+                  v-for="hold in detailHolds"
+                  :key="hold.tag"
+                  class="flex items-center justify-between gap-2"
+                >
+                  <UBadge color="warning" variant="subtle" icon="i-lucide-lock">
+                    {{ hold.tag }}
+                  </UBadge>
+                  <span class="text-xs text-muted">
+                    {{ new Date(hold.timestamp * 1000).toLocaleString() }}
+                  </span>
+                  <UButton
+                    size="xs"
+                    color="warning"
+                    variant="ghost"
+                    icon="i-lucide-lock-open"
+                    @click="releaseHoldTag(hold.tag)"
+                  >
+                    Release
+                  </UButton>
+                </div>
+              </div>
+              <div class="flex gap-2 mt-2">
+                <UInput
+                  v-model="newHoldTag"
+                  size="xs"
+                  placeholder="hold tag (e.g. keep_forever)"
+                  class="font-mono flex-1"
+                  @keydown.enter="addHold"
+                />
+                <UButton size="xs" variant="soft" icon="i-lucide-lock" @click="addHold">
+                  Hold
+                </UButton>
+              </div>
+            </div>
+
+            <div>
+              <div class="microlabel mb-2">properties</div>
+              <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 font-mono text-xs">
+                <template v-for="(v, k) in detailSnap.properties" :key="k">
+                  <dt class="text-muted">{{ k }}</dt>
+                  <dd class="break-all">{{ v }}</dd>
+                </template>
+              </dl>
+            </div>
+
+            <UButton
+              color="error"
+              variant="soft"
+              icon="i-lucide-trash-2"
+              block
+              @click="(askDestroy(detailSnap.name), (detailOpen = false))"
+            >
+              Destroy snapshot
+            </UButton>
+          </div>
+        </template>
+      </USlideover>
+    </template>
+  </UDashboardPanel>
 </template>

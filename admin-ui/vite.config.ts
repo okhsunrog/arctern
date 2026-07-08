@@ -72,7 +72,18 @@ export default defineConfig({
     chunkSizeWarningLimit: 1000,
   },
   base: '/',
-  plugins: [vue(), vueDevTools(), ui()],
+  plugins: [
+    vue(),
+    vueDevTools(),
+    ui({
+      ui: {
+        colors: {
+          primary: 'cyan',
+          neutral: 'zinc',
+        },
+      },
+    }),
+  ],
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),

@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 arctern-api = { version = "0.1.0", path = "../crates/api" }
+arctern-client = { version = "0.1.0", path = "../crates/client" }
 arctern-config = { version = "0.1.0", path = "../crates/config" }
 arctern-transport = { version = "0.1.0", path = "../crates/transport" }
 async-trait = "0.1.89"

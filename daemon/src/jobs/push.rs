@@ -96,14 +96,12 @@ pub struct BookmarkRef {
 #[derive(Debug, Clone)]
 pub struct CompiledFilter {
     re: Option<regex::Regex>,
-    wire: Option<String>,
 }
 
 impl CompiledFilter {
     pub fn from_config(cfg: &SnapshotFilterConfig) -> Result<Self, regex::Error> {
-        let wire = cfg.as_regex_str();
-        let re = compile_prefix_regex(wire.as_deref())?;
-        Ok(Self { re, wire })
+        let re = compile_prefix_regex(cfg.as_regex_str().as_deref())?;
+        Ok(Self { re })
     }
 
     pub fn matches(&self, snap_name: &str) -> bool {
@@ -111,10 +109,6 @@ impl CompiledFilter {
             None => true,
             Some(r) => r.is_match(snap_name),
         }
-    }
-
-    pub fn wire_regex(&self) -> Option<&str> {
-        self.wire.as_deref()
     }
 }
 
@@ -491,10 +485,18 @@ async fn plan_one_filesystem(
     if sender.is_empty() {
         return Ok((SnapshotPlan::Nothing, sender));
     }
+    // Deliberately UNFILTERED: the planner intersects by GUID, and a
+    // common snapshot (or bookmark-fallback base) may carry a different
+    // prefix than this job's filter — zrepl_* history after a prefix
+    // switch, a manual snapshot that travelled in a send stream. The
+    // sender-side list stays filtered, so the filter still decides what
+    // gets SENT; the receiver list only decides what counts as a
+    // common base. Filtering here forced a full resend in exactly the
+    // migration scenarios the bookmark fallback exists for.
     let resp = peer
         .rpc(Request::ListReceiverGuids {
             dataset: target_dataset.to_string(),
-            prefix_regex: filter.wire_regex().map(String::from),
+            prefix_regex: None,
         })
         .await
         .map_err(|e| format!("ListReceiverGuids: {e}"))?;
@@ -931,11 +933,15 @@ impl PushJob {
             .and_then(|p| p.auto_interval)
     }
 
-    /// Live link for one named target, if connected.
-    async fn link_for(&self, name: &str) -> Option<Arc<PeerLink>> {
+    /// Live link + active-route snapshot for one named target, if
+    /// connected. The bool is the active route's `auto` eligibility.
+    async fn link_for(&self, name: &str) -> Option<(Arc<PeerLink>, String, bool)> {
         let peers = self.peers.as_ref()?;
         let g = peers.read().await;
-        g.get(name).and_then(|entry| entry.link.clone())
+        let entry = g.get(name)?;
+        let link = entry.link.clone()?;
+        let route = entry.active_route()?;
+        Some((link, route.name.clone(), route.auto))
     }
 
     /// True while any target is connected — used only for the startup
@@ -1009,12 +1015,16 @@ impl PushJob {
     }
 
     /// Decide which targets this cycle replicates to.
-    /// - manual requests: always (error if the peer is unreachable);
-    /// - auto peers: when connected AND `auto_interval` has elapsed
-    ///   since the last success. An unreachable auto peer is skipped
-    ///   silently — its reachability IS the locality policy (a LAN-only
-    ///   peer is "am I home?") — unless the last success is more than
-    ///   3x the expected cadence old, which becomes a visible error.
+    /// - manual requests: always, over whatever route is active (error
+    ///   if the peer is unreachable);
+    /// - auto peers: when connected over an auto-eligible route AND
+    ///   `auto_interval` has elapsed since the last success. A peer
+    ///   without an auto-eligible active route is skipped silently —
+    ///   route reachability IS the locality policy (a LAN-only route is
+    ///   "am I home?"; a metered WG route carries manual pushes only) —
+    ///   unless the last success is more than 3x the expected cadence
+    ///   old, which becomes a visible error regardless of why auto
+    ///   couldn't run.
     async fn select_targets(
         &self,
         errors: &mut Vec<String>,
@@ -1026,7 +1036,10 @@ impl PushJob {
             let link = self.link_for(name).await;
             if manual.contains(name) {
                 match link {
-                    Some(l) => selected.push((name.clone(), l, "manual")),
+                    Some((l, route, _)) => {
+                        tracing::info!(peer = %name, route = %route, "manual push queued");
+                        selected.push((name.clone(), l, "manual"));
+                    }
                     None => errors.push(format!("manual push to {name:?}: peer not connected")),
                 }
                 continue;
@@ -1044,7 +1057,12 @@ impl PushJob {
                 .peer_auto_interval(name)
                 .unwrap_or(self.config.interval)
                 .as_secs() as i64;
-            match link {
+            let auto_link = match link {
+                Some((l, _route, true)) => Some(l),
+                // Connected, but the active route is manual-only.
+                Some((_, _, false)) | None => None,
+            };
+            match auto_link {
                 Some(l) => {
                     let due = match (self.peer_auto_interval(name), last_success) {
                         (None, _) => true,
@@ -1060,7 +1078,7 @@ impl PushJob {
                         && now - ts > cadence.saturating_mul(3)
                     {
                         errors.push(format!(
-                            "auto target {name:?} unreachable and last successful sync is {}h old",
+                            "auto target {name:?} has no auto-eligible route and last successful sync is {}h old",
                             (now - ts) / 3600
                         ));
                     }
@@ -1074,10 +1092,9 @@ impl PushJob {
         &self,
         ctx: &JobContext,
         cancel: &CancellationToken,
+        selected: Vec<(String, Arc<PeerLink>, &'static str)>,
+        mut errors: Vec<String>,
     ) -> (u64, Result<(), String>) {
-        self.ensure_outcomes_loaded(ctx).await;
-        let mut errors: Vec<String> = Vec::new();
-        let selected = self.select_targets(&mut errors).await;
         let mut total_bytes: u64 = 0;
         for (peer_name, link, reason) in selected {
             if cancel.is_cancelled() {
@@ -1292,14 +1309,25 @@ impl Job for PushJob {
         let mut s = self.status.lock().unwrap().clone();
         s.paused = self.paused.load(Ordering::Relaxed);
         s.transfer = self.transfer.lock().unwrap().clone();
-        // Best-effort `connected` via try_read: status() is sync and the
+        // Best-effort snapshot via try_read: status() is sync and the
         // peers map is an async RwLock; a missed read shows the peer as
         // disconnected for one 5s poll — harmless.
-        let connected: HashMap<String, bool> = match self.peers.as_ref() {
+        type RouteSnap = (bool, Option<String>, bool);
+        let connected: HashMap<String, RouteSnap> = match self.peers.as_ref() {
             Some(p) => match p.try_read() {
                 Ok(g) => g
                     .iter()
-                    .map(|(name, e)| (name.clone(), e.link.is_some()))
+                    .map(|(name, e)| {
+                        let route = e.active_route();
+                        (
+                            name.clone(),
+                            (
+                                e.link.is_some(),
+                                route.map(|r| r.name.clone()),
+                                route.is_some_and(|r| r.auto),
+                            ),
+                        )
+                    })
                     .collect(),
                 Err(_) => HashMap::new(),
             },
@@ -1313,13 +1341,17 @@ impl Job for PushJob {
             .map(|name| {
                 let (last_success, last_error) =
                     outcomes.get(name).cloned().unwrap_or((None, None));
+                let (is_connected, route, route_auto) =
+                    connected.get(name).cloned().unwrap_or((false, None, false));
                 TargetStatus {
                     peer: name.clone(),
                     mode: match self.peer_mode(name) {
                         PeerMode::Auto => "auto".into(),
                         PeerMode::Manual => "manual".into(),
                     },
-                    connected: connected.get(name).copied().unwrap_or(false),
+                    connected: is_connected,
+                    route,
+                    route_auto,
                     auto_interval_secs: self.peer_auto_interval(name).map(|d| d.as_secs()),
                     last_success,
                     last_error,
@@ -1414,6 +1446,17 @@ impl PushJob {
             return;
         }
         let job_name = &self.config.name;
+        self.ensure_outcomes_loaded(ctx).await;
+        let mut errors: Vec<String> = Vec::new();
+        let selected = self.select_targets(&mut errors).await;
+        // A tick where nothing is due (auto_interval not elapsed, no
+        // manual request, nothing to report) records no job_runs row —
+        // otherwise a 15m cycle against a 1d auto_interval writes 96
+        // no-op rows a day into the history.
+        if selected.is_empty() && errors.is_empty() {
+            self.record_cycle(None, interval);
+            return;
+        }
         self.mark_running();
         // Child token: cancel/pause abort just this cycle, daemon
         // shutdown (the parent) still cancels everything.
@@ -1423,7 +1466,7 @@ impl PushJob {
         if let Some(pool) = ctx.state.as_ref() {
             let _ = crate::state::job_runs::record_start(pool, job_name, started_at).await;
         }
-        let (bytes, outcome) = self.run_cycle(ctx, &cycle_token).await;
+        let (bytes, outcome) = self.run_cycle(ctx, &cycle_token, selected, errors).await;
         *self.cycle_cancel.lock().unwrap() = None;
         let finished_at = OffsetDateTime::now_utc().unix_timestamp();
         let (status, err_msg) = match &outcome {
@@ -1539,7 +1582,6 @@ mod tests {
         let f = CompiledFilter::from_config(&cfg).unwrap();
         assert!(f.matches("zrepl_001"));
         assert!(!f.matches("manual_001"));
-        assert_eq!(f.wire_regex(), Some("^zrepl_"));
     }
 
     #[test]

@@ -46,10 +46,12 @@ export function usePool(name: string, refreshMs = 3000) {
     loading.value = false
   }
 
-  async function scrub(action: ScrubRequest['action']) {
+  /// Returns the raw call result so callers can toast the outcome.
+  async function scrub(action: ScrubRequest['action']): Promise<{ error?: unknown }> {
     const r = await poolScrub({ path: { name }, body: { action } })
     if (r.error) error.value = errMessage(r.error)
     await refresh()
+    return { error: r.error }
   }
 
   void refresh()

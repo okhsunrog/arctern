@@ -69,6 +69,34 @@ pub async fn create_snapshot(
     Ok(serde_json::from_slice(&response)?)
 }
 
+/// `GET <socket>/api/v1/jobs`. Used by `stdinserver-dispatch` to proxy
+/// a peer's ListJobs request into the local daemon — the two processes
+/// share no state besides this socket.
+pub async fn list_jobs(socket: &Path) -> Result<Vec<arctern_api::JobStatus>, ClientError> {
+    let (status, body) = request(socket, Method::GET, "/api/v1/jobs", None).await?;
+    if !status.is_success() {
+        return Err(ClientError::Status {
+            code: status.as_u16(),
+            body: String::from_utf8_lossy(&body).into_owned(),
+        });
+    }
+    Ok(serde_json::from_slice(&body)?)
+}
+
+/// `POST <socket>/api/v1/jobs/{name}/wakeup`. 204 on success; 404 maps
+/// to `ClientError::Status { code: 404 }`.
+pub async fn wakeup_job(socket: &Path, name: &str) -> Result<(), ClientError> {
+    let path = format!("/api/v1/jobs/{}/wakeup", encode_segment(name));
+    let (status, body) = request(socket, Method::POST, &path, None).await?;
+    if !status.is_success() {
+        return Err(ClientError::Status {
+            code: status.as_u16(),
+            body: String::from_utf8_lossy(&body).into_owned(),
+        });
+    }
+    Ok(())
+}
+
 async fn request(
     socket: &Path,
     method: Method,

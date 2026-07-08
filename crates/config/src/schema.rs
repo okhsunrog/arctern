@@ -18,6 +18,14 @@ pub struct Config {
     /// `/var/lib/arctern` (see daemon main).
     #[serde(default)]
     pub state_dir: Option<PathBuf>,
+    /// Path of the daemon's UNIX API socket. The daemon binds here
+    /// unless overridden by `--socket`; `stdinserver-dispatch` uses it
+    /// to reach the local daemon when proxying peer requests (job list,
+    /// wakeup) — the two processes have no other rendezvous point.
+    /// `None` falls back to `$XDG_RUNTIME_DIR/arctern.sock`, then
+    /// `/run/arctern.sock`.
+    #[serde(default)]
+    pub socket: Option<PathBuf>,
     /// Host-wide defaults applied to every job at config-load time. Lets
     /// an operator write 5-line jobs that say only what differs from
     /// the standard zrepl idiom.
@@ -80,28 +88,54 @@ pub struct PruningDefaults {
     pub protect_non_prefixed: bool,
 }
 
-/// One outbound peer the daemon can open an SSH session to. Field
-/// shapes mirror `ssh(1)`'s positional target so an entry can be
-/// hand-validated with `ssh -G <ssh_target> exit`.
+/// One outbound peer: a physical host the daemon can open an SSH
+/// session to, possibly reachable over several network routes (LAN,
+/// WireGuard, ...). Exactly one of `ssh_target` (single-route
+/// shorthand) or `routes` must be given; the loader normalises the
+/// shorthand into a one-entry `routes` list.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PeerConfig {
     pub name: String,
-    /// `[user@]host[:port]` or any string `ssh(1)` accepts (including
-    /// an alias from `~/.ssh/config`). The daemon does NOT parse this;
-    /// it hands it verbatim to openssh.
-    pub ssh_target: String,
+    /// Single-route shorthand: equivalent to
+    /// `routes = [{ name = "default", ssh_target = "..." }]`.
+    /// Mutually exclusive with `routes`; `None` after config load.
+    #[serde(default)]
+    pub ssh_target: Option<String>,
+    /// Ordered routes to the same physical host, highest priority
+    /// first. The peer link connects the first reachable route and
+    /// re-ranks back to a higher one when it returns. Cursor bookmarks,
+    /// step holds and sync history are keyed by the PEER name — routes
+    /// are pure transport and leave no trace in ZFS state.
+    #[serde(default)]
+    pub routes: Vec<RouteConfig>,
     /// Replication policy for push jobs targeting this peer.
     #[serde(default)]
     pub mode: PeerMode,
     /// For `mode = "auto"`: don't auto-replicate to this peer more
     /// often than this (measured from the last successful sync).
-    /// Unset = every push cycle. The reachability of the peer itself
-    /// is the locality signal — a LAN-only peer is only reachable at
-    /// home, so "auto at home, never on the road" needs no
-    /// network-detection config at all.
+    /// Unset = every push cycle. Combined with per-route `auto`
+    /// eligibility, route reachability is the locality signal — a
+    /// LAN-only route is only reachable at home, so "auto at home,
+    /// manual on the road" needs no network-detection config at all.
     #[serde(default, with = "humantime_serde::option")]
     pub auto_interval: Option<Duration>,
+}
+
+/// One network route to a peer.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouteConfig {
+    pub name: String,
+    /// `[user@]host[:port]` or any string `ssh(1)` accepts (including
+    /// an alias from `~/.ssh/config`). The daemon does NOT parse this;
+    /// it hands it verbatim to openssh.
+    pub ssh_target: String,
+    /// Whether scheduled (auto) replication may run while this route is
+    /// the active one. `false` = the route carries only manual
+    /// "Send now" pushes — e.g. a metered WireGuard path.
+    #[serde(default = "yes")]
+    pub auto: bool,
 }
 
 /// When a push job replicates to a peer.
@@ -305,10 +339,11 @@ pub struct PushJobConfig {
     /// compatibility with configs written before multi-target landed.
     #[serde(default)]
     pub peer: Option<String>,
-    /// Ordered list of peer names to attempt each cycle. The cycle
-    /// picks the first peer whose reachability is `Connected`,
-    /// falling back to subsequent entries when earlier ones are
-    /// unreachable. Each peer keeps its own per-dataset cursor
+    /// Peer names this job replicates to. Each cycle selects EVERY due
+    /// target: manual requests always run; an auto peer runs when its
+    /// active route is auto-eligible and `auto_interval` has elapsed.
+    /// Route failover within one physical host lives in `[[peers]]`
+    /// routes, not here. Each peer keeps its own per-dataset cursor
     /// bookmark, so a peer that's been offline for a week catches up
     /// from where it left off when it comes back.
     #[serde(default)]

@@ -105,6 +105,12 @@ pub struct TargetStatus {
     /// `"auto" | "manual"`.
     pub mode: String,
     pub connected: bool,
+    /// Active route name while connected (e.g. `"lan"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<String>,
+    /// Whether the active route permits scheduled replication.
+    #[serde(default)]
+    pub route_auto: bool,
     /// For auto mode: the configured `auto_interval` in seconds. The
     /// next auto sync is `last_success + auto_interval_secs` (or the
     /// next planner tick when unset/no history).
@@ -305,6 +311,14 @@ pub struct JobRun {
     pub bytes_sent: Option<i64>,
 }
 
+/// Body of `POST /api/v1/datasets/{name}/snapshots/{snapshot}/holds`.
+/// `arctern_*` tags are reserved for the replication machinery and
+/// rejected.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CreateHoldRequest {
+    pub tag: String,
+}
+
 /// Body shape for `4xx`/`5xx` responses from the daemon. `error` is a
 /// short machine-readable category (`spawn`, `dataset_not_found`, …);
 /// `message` is a human-readable description.
@@ -335,12 +349,33 @@ pub enum PeerReachability {
     },
 }
 
+/// One network route of a peer, in priority order (first = preferred).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PeerRoute {
+    pub name: String,
+    pub ssh_target: String,
+    /// Whether scheduled (auto) replication may run over this route.
+    pub auto: bool,
+    /// `"connected" | "failed" | "unknown"` — last connect result for
+    /// this route. Lower-priority routes are only probed on failover /
+    /// re-rank, so `unknown` is the common idle state.
+    pub health: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    /// RFC3339 timestamp of the last connect attempt, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_checked: Option<String>,
+}
+
 /// One row in `GET /api/v1/peers`.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PeerSummary {
     pub name: String,
-    pub ssh_target: String,
     pub reachability: PeerReachability,
+    /// Name of the route the live link currently runs over.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_route: Option<String>,
+    pub routes: Vec<PeerRoute>,
 }
 
 /// One snapshot returned by `GET /api/v1/peers/{peer}/snapshots`.

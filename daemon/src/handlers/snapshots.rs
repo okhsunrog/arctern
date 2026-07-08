@@ -192,3 +192,77 @@ pub async fn list_holds(
     out.sort_by_key(|h| h.timestamp);
     Ok(Json(out))
 }
+
+/// Hold tags are ZFS name components; reuse the leaf validation so a
+/// tag can't smuggle whitespace or a leading `-` into the zfs argv.
+fn check_hold_tag(tag: &str) -> Result<(), ApiError> {
+    validate_snapshot_leaf(tag)
+        .map_err(|e| ApiError::bad_request(format!("invalid hold tag {tag:?}: {e}")))
+}
+
+/// Place a user hold on `{name}@{snapshot}`. Tags with the `arctern_`
+/// prefix are refused — they'd collide with the replication machinery's
+/// step/last holds and be swept or misread by it.
+#[utoipa::path(
+    post,
+    path = "/api/v1/datasets/{name}/snapshots/{snapshot}/holds",
+    tag = "snapshots",
+    request_body = arctern_api::CreateHoldRequest,
+    params(
+        ("name" = String, Path, description = "Parent dataset (URL-encode `/` as %2F)"),
+        ("snapshot" = String, Path, description = "Snapshot tag (the part after `@`)"),
+    ),
+    responses(
+        (status = 201, description = "Hold placed"),
+        (status = 400, description = "Invalid or reserved tag", body = ApiErrorBody),
+        (status = 404, description = "Snapshot not found", body = ApiErrorBody),
+        (status = 500, description = "ZFS returned an error", body = ApiErrorBody),
+    ),
+)]
+pub async fn create_hold(
+    State(state): State<AppState>,
+    Path((name, snapshot)): Path<(String, String)>,
+    Json(req): Json<arctern_api::CreateHoldRequest>,
+) -> Result<StatusCode, ApiError> {
+    check_dataset(&name)?;
+    check_snapshot_leaf(&snapshot)?;
+    check_hold_tag(&req.tag)?;
+    if req.tag.starts_with("arctern_") {
+        return Err(ApiError::bad_request(
+            "tags with the arctern_ prefix are reserved for the replication machinery",
+        ));
+    }
+    let full = format!("{name}@{snapshot}");
+    palimpsest::hold::hold(state.runner.as_ref(), &full, &req.tag).await?;
+    Ok(StatusCode::CREATED)
+}
+
+/// Release a user hold. `arctern_*` tags ARE allowed here — releasing
+/// a stuck step hold from the UI is exactly the recovery path this
+/// endpoint exists for.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/datasets/{name}/snapshots/{snapshot}/holds/{tag}",
+    tag = "snapshots",
+    params(
+        ("name" = String, Path, description = "Parent dataset (URL-encode `/` as %2F)"),
+        ("snapshot" = String, Path, description = "Snapshot tag (the part after `@`)"),
+        ("tag" = String, Path, description = "Hold tag to release"),
+    ),
+    responses(
+        (status = 204, description = "Hold released"),
+        (status = 404, description = "Snapshot or hold not found", body = ApiErrorBody),
+        (status = 500, description = "ZFS returned an error", body = ApiErrorBody),
+    ),
+)]
+pub async fn release_hold(
+    State(state): State<AppState>,
+    Path((name, snapshot, tag)): Path<(String, String, String)>,
+) -> Result<StatusCode, ApiError> {
+    check_dataset(&name)?;
+    check_snapshot_leaf(&snapshot)?;
+    check_hold_tag(&tag)?;
+    let full = format!("{name}@{snapshot}");
+    palimpsest::hold::release(state.runner.as_ref(), &full, &tag).await?;
+    Ok(StatusCode::NO_CONTENT)
+}

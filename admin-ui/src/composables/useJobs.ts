@@ -8,16 +8,18 @@ import {
   wakeup,
 } from '../client'
 import type { JobStatus } from '../client'
+import { apiErrorMessage, useMutation } from './useMutation'
 
 export function useJobs(refreshMs = 5000) {
   const jobs = ref<JobStatus[]>([])
   const error = ref<string | null>(null)
   const loading = ref(true)
+  const { mutate } = useMutation()
 
   async function refresh() {
     const r = await listJobs()
     if (r.error) {
-      error.value = errMessage(r.error)
+      error.value = apiErrorMessage(r.error)
     } else {
       jobs.value = r.data ?? []
       error.value = null
@@ -30,40 +32,32 @@ export function useJobs(refreshMs = 5000) {
   onUnmounted(() => clearInterval(handle))
 
   async function wake(name: string) {
-    const r = await wakeup({ path: { name } })
-    if (r.error) error.value = errMessage(r.error)
+    await mutate(`Woke up ${name}`, () => wakeup({ path: { name } }))
     void refresh()
   }
 
   async function cancel(name: string) {
-    const r = await cancelJob({ path: { name } })
-    if (r.error) error.value = errMessage(r.error)
+    await mutate(`Cancelled ${name}`, () => cancelJob({ path: { name } }), {
+      successDescription: 'Partial recv state on the receiver keeps the transfer resumable.',
+    })
     void refresh()
   }
 
   async function pause(name: string) {
-    const r = await pauseJob({ path: { name } })
-    if (r.error) error.value = errMessage(r.error)
+    await mutate(`Paused ${name}`, () => pauseJob({ path: { name } }))
     void refresh()
   }
 
   async function resume(name: string) {
-    const r = await resumeJob({ path: { name } })
-    if (r.error) error.value = errMessage(r.error)
+    await mutate(`Resumed ${name}`, () => resumeJob({ path: { name } }))
     void refresh()
   }
 
   async function pushTo(name: string, peer: string) {
-    const r = await pushToPeer({ path: { name, peer } })
-    if (r.error) error.value = errMessage(r.error)
+    await mutate(`Queued push to ${peer}`, () => pushToPeer({ path: { name, peer } }), {
+      successDescription: `${name} will replicate to ${peer} within seconds.`,
+    })
     void refresh()
-  }
-
-  function errMessage(e: unknown): string {
-    if (e && typeof e === 'object' && 'message' in e) {
-      return String((e as { message: unknown }).message)
-    }
-    return String(e)
   }
 
   return { jobs, error, loading, refresh, wake, cancel, pause, resume, pushTo }

@@ -81,6 +81,15 @@ export type ConfigView = {
 };
 
 /**
+ * Body of `POST /api/v1/datasets/{name}/snapshots/{snapshot}/holds`.
+ * `arctern_*` tags are reserved for the replication machinery and
+ * rejected.
+ */
+export type CreateHoldRequest = {
+    tag: string;
+};
+
+/**
  * Request body for `POST /api/v1/datasets/{name}/snapshots`. The path
  * segment carries the parent dataset; this struct carries everything
  * else. `recursive` and `properties` default so a minimal client can
@@ -196,6 +205,29 @@ export type PeerReachability = {
 };
 
 /**
+ * One network route of a peer, in priority order (first = preferred).
+ */
+export type PeerRoute = {
+    name: string;
+    ssh_target: string;
+    /**
+     * Whether scheduled (auto) replication may run over this route.
+     */
+    auto: boolean;
+    /**
+     * `"connected" | "failed" | "unknown"` — last connect result for
+     * this route. Lower-priority routes are only probed on failover /
+     * re-rank, so `unknown` is the common idle state.
+     */
+    health: string;
+    last_error?: string | null;
+    /**
+     * RFC3339 timestamp of the last connect attempt, if any.
+     */
+    last_checked?: string | null;
+};
+
+/**
  * One snapshot returned by `GET /api/v1/peers/{peer}/snapshots`.
  */
 export type PeerSnapshotEntry = {
@@ -213,8 +245,12 @@ export type PeerSnapshotEntry = {
  */
 export type PeerSummary = {
     name: string;
-    ssh_target: string;
     reachability: PeerReachability;
+    /**
+     * Name of the route the live link currently runs over.
+     */
+    active_route?: string | null;
+    routes: Array<PeerRoute>;
 };
 
 /**
@@ -300,6 +336,14 @@ export type TargetStatus = {
      */
     mode: string;
     connected: boolean;
+    /**
+     * Active route name while connected (e.g. `"lan"`).
+     */
+    route?: string | null;
+    /**
+     * Whether the active route permits scheduled replication.
+     */
+    route_auto?: boolean;
     /**
      * For auto mode: the configured `auto_interval` in seconds. The
      * next auto sync is `last_success + auto_interval_secs` (or the
@@ -567,6 +611,88 @@ export type ListHoldsResponses = {
 
 export type ListHoldsResponse = ListHoldsResponses[keyof ListHoldsResponses];
 
+export type CreateHoldData = {
+    body: CreateHoldRequest;
+    path: {
+        /**
+         * Parent dataset (URL-encode `/` as %2F)
+         */
+        name: string;
+        /**
+         * Snapshot tag (the part after `@`)
+         */
+        snapshot: string;
+    };
+    query?: never;
+    url: '/api/v1/datasets/{name}/snapshots/{snapshot}/holds';
+};
+
+export type CreateHoldErrors = {
+    /**
+     * Invalid or reserved tag
+     */
+    400: ApiErrorBody;
+    /**
+     * Snapshot not found
+     */
+    404: ApiErrorBody;
+    /**
+     * ZFS returned an error
+     */
+    500: ApiErrorBody;
+};
+
+export type CreateHoldError = CreateHoldErrors[keyof CreateHoldErrors];
+
+export type CreateHoldResponses = {
+    /**
+     * Hold placed
+     */
+    201: unknown;
+};
+
+export type ReleaseHoldData = {
+    body?: never;
+    path: {
+        /**
+         * Parent dataset (URL-encode `/` as %2F)
+         */
+        name: string;
+        /**
+         * Snapshot tag (the part after `@`)
+         */
+        snapshot: string;
+        /**
+         * Hold tag to release
+         */
+        tag: string;
+    };
+    query?: never;
+    url: '/api/v1/datasets/{name}/snapshots/{snapshot}/holds/{tag}';
+};
+
+export type ReleaseHoldErrors = {
+    /**
+     * Snapshot or hold not found
+     */
+    404: ApiErrorBody;
+    /**
+     * ZFS returned an error
+     */
+    500: ApiErrorBody;
+};
+
+export type ReleaseHoldError = ReleaseHoldErrors[keyof ReleaseHoldErrors];
+
+export type ReleaseHoldResponses = {
+    /**
+     * Hold released
+     */
+    204: void;
+};
+
+export type ReleaseHoldResponse = ReleaseHoldResponses[keyof ReleaseHoldResponses];
+
 export type StreamEventsData = {
     body?: never;
     path?: never;
@@ -804,6 +930,40 @@ export type ListPeersResponses = {
 };
 
 export type ListPeersResponse = ListPeersResponses[keyof ListPeersResponses];
+
+export type ListPeerDatasetsData = {
+    body?: never;
+    path: {
+        /**
+         * Peer name from [[peers]]
+         */
+        peer: string;
+    };
+    query?: never;
+    url: '/api/v1/peers/{peer}/datasets';
+};
+
+export type ListPeerDatasetsErrors = {
+    /**
+     * No such peer
+     */
+    404: ApiErrorBody;
+    /**
+     * Peer not currently connected
+     */
+    503: ApiErrorBody;
+};
+
+export type ListPeerDatasetsError = ListPeerDatasetsErrors[keyof ListPeerDatasetsErrors];
+
+export type ListPeerDatasetsResponses = {
+    /**
+     * Receiver datasets under the client's allowed root_fs
+     */
+    200: Array<DatasetSummary>;
+};
+
+export type ListPeerDatasetsResponse = ListPeerDatasetsResponses[keyof ListPeerDatasetsResponses];
 
 export type StreamPeerEventsData = {
     body?: never;

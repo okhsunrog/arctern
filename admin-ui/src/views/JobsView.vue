@@ -1,86 +1,129 @@
 <script setup lang="ts">
 import { computed, h, resolveComponent } from 'vue'
+import type { TableColumn } from '@nuxt/ui'
 import { useJobs } from '../composables/useJobs'
 import { formatNextRun, formatRelative } from '../utils/format'
+import { jobStatus } from '../utils/status'
 import type { JobStatus } from '../client'
 
-const { jobs, error, loading, wake } = useJobs()
+const { jobs, error, loading, wake, cancel, pause, resume } = useJobs()
 
 const UButton = resolveComponent('UButton')
 const UBadge = resolveComponent('UBadge')
+const UTooltip = resolveComponent('UTooltip')
 
-const columns = computed(() => [
+const columns = computed<TableColumn<JobStatus>[]>(() => [
   {
     accessorKey: 'name',
     header: 'Name',
-    cell: ({ row }: { row: { original: JobStatus } }) =>
+    cell: ({ row }) =>
       h(
         resolveComponent('RouterLink'),
-        { to: `/jobs/${row.original.name}`, class: 'text-primary-500 hover:underline' },
+        {
+          to: `/jobs/${row.original.name}`,
+          class: 'font-mono font-medium text-primary hover:underline',
+        },
         () => row.original.name,
       ),
   },
-  { accessorKey: 'kind', header: 'Kind' },
+  {
+    accessorKey: 'kind',
+    header: 'Kind',
+    cell: ({ row }) => h(UBadge, { color: 'neutral', variant: 'outline' }, () => row.original.kind),
+  },
   {
     id: 'status',
     header: 'Status',
-    cell: ({ row }: { row: { original: JobStatus } }) => {
-      const j = row.original
-      const color = j.paused
-        ? 'neutral'
-        : j.running
-          ? 'info'
-          : j.last_error
-            ? 'error'
-            : j.last_run
-              ? 'success'
-              : 'neutral'
-      const label = j.paused
-        ? 'paused'
-        : j.running
-          ? 'running'
-          : j.last_error
-            ? 'error'
-            : j.last_run
-              ? 'ok'
-              : 'idle'
-      return h(UBadge, { color, variant: 'subtle' }, () => label)
+    cell: ({ row }) => {
+      const s = jobStatus(row.original)
+      const badge = h(UBadge, { color: s.color, variant: 'subtle', icon: s.icon }, () => s.label)
+      return row.original.last_error
+        ? h(UTooltip, { text: row.original.last_error }, () => badge)
+        : badge
+    },
+  },
+  {
+    id: 'targets',
+    header: 'Targets',
+    cell: ({ row }) => {
+      const targets = row.original.targets ?? []
+      if (targets.length === 0) return ''
+      return h(
+        'div',
+        { class: 'flex gap-1 flex-wrap' },
+        targets.map((t) =>
+          h(
+            UBadge,
+            {
+              color: t.connected ? 'success' : 'neutral',
+              variant: 'subtle',
+              size: 'sm',
+            },
+            () => (t.route ? `${t.peer} · ${t.route}` : t.peer),
+          ),
+        ),
+      )
     },
   },
   {
     accessorKey: 'last_run',
     header: 'Last run',
-    cell: ({ row }: { row: { original: JobStatus } }) => formatRelative(row.original.last_run),
+    cell: ({ row }) => formatRelative(row.original.last_run),
   },
   {
     accessorKey: 'next_run',
     header: 'Next run',
-    cell: ({ row }: { row: { original: JobStatus } }) =>
-      formatNextRun(row.original.next_run, row.original.running),
+    cell: ({ row }) => formatNextRun(row.original.next_run, row.original.running),
   },
   {
     id: 'actions',
     header: '',
-    cell: ({ row }: { row: { original: JobStatus } }) =>
-      h(
-        UButton,
-        {
-          size: 'xs',
-          variant: 'soft',
-          icon: 'i-lucide-zap',
-          onClick: () => wake(row.original.name),
-        },
-        () => 'Wakeup',
-      ),
+    cell: ({ row }) => {
+      const j = row.original
+      const btn = (
+        icon: string,
+        label: string,
+        onClick: () => void,
+        color: 'neutral' | 'warning' | 'success' | 'error' = 'neutral',
+      ) =>
+        h(UTooltip, { text: label }, () =>
+          h(UButton, { size: 'xs', variant: 'ghost', color, icon, 'aria-label': label, onClick }),
+        )
+      const actions = [btn('i-lucide-alarm-clock', 'Wake up now', () => void wake(j.name))]
+      if (j.running && !j.paused) {
+        actions.push(
+          btn('i-lucide-circle-pause', 'Pause (resumable)', () => void pause(j.name), 'warning'),
+        )
+      }
+      if (j.paused) {
+        actions.push(btn('i-lucide-circle-play', 'Resume', () => void resume(j.name), 'success'))
+      }
+      if (j.running) {
+        actions.push(
+          btn('i-lucide-circle-x', 'Cancel transfer', () => void cancel(j.name), 'error'),
+        )
+      }
+      return h('div', { class: 'flex justify-end gap-0.5' }, actions)
+    },
   },
 ])
 </script>
 
 <template>
-  <div class="max-w-6xl mx-auto px-4 py-6">
-    <h1 class="text-2xl font-semibold mb-4">Jobs</h1>
-    <UAlert v-if="error" color="error" :title="error" class="mb-4" />
-    <div v-if="loading && jobs.length === 0" class="text-gray-500">Loading…</div>
-    <UTable v-else :data="jobs" :columns="columns" />
-  </div>
+  <UDashboardPanel id="jobs">
+    <template #header>
+      <UDashboardNavbar title="Jobs" />
+    </template>
+    <template #body>
+      <div class="mx-auto w-full max-w-7xl space-y-4">
+        <UAlert v-if="error" color="error" :title="error" icon="i-lucide-circle-x" />
+        <UTable
+          :data="jobs"
+          :columns="columns"
+          :loading="loading && jobs.length === 0"
+          class="rounded-md border border-default bg-default"
+        />
+      </div>
+    </template>
+  </UDashboardPanel>
 </template>

@@ -18,21 +18,53 @@ pub enum PeerStatus {
     Reconnecting {
         since: OffsetDateTime,
     },
-    /// Last connect attempt failed. The loop will sleep, increment
-    /// attempt, and try again.
+    /// Last connect attempt failed on every route. The loop will
+    /// sleep, increment attempt, and try again.
     Failed {
         since: OffsetDateTime,
         last_error: String,
     },
 }
 
+/// Last known result of connecting over one route. `Unknown` means the
+/// route hasn't been attempted since a higher-priority one succeeded
+/// first — the link connects only the active route (no idle SSH
+/// session per route).
+#[derive(Debug, Clone)]
+pub enum RouteHealth {
+    Unknown,
+    Connected,
+    Failed { last_error: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct RouteState {
+    pub name: String,
+    pub ssh_target: String,
+    /// Whether scheduled (auto) replication may run while this route
+    /// is active. Mirrors `RouteConfig::auto`.
+    pub auto: bool,
+    pub health: RouteHealth,
+    pub last_checked: Option<OffsetDateTime>,
+}
+
 #[derive(Clone)]
 pub struct PeerEntry {
     pub name: String,
-    pub ssh_target: String,
     pub status: PeerStatus,
+    /// Name of the route the live link runs over; None while down.
+    pub active_route: Option<String>,
+    /// Per-route snapshot, in priority order (config order).
+    pub routes: Vec<RouteState>,
     /// Some only when status is Connected; None otherwise.
     pub link: Option<Arc<PeerLink>>,
+}
+
+impl PeerEntry {
+    pub fn active_route(&self) -> Option<&RouteState> {
+        let name = self.active_route.as_deref()?;
+        self.routes.iter().find(|r| r.name == name)
+    }
 }
 
 pub type PeersState = Arc<RwLock<HashMap<String, PeerEntry>>>;

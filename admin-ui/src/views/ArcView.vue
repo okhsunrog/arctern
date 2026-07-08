@@ -126,79 +126,88 @@ const rateOpts = {
 </script>
 
 <template>
-  <div class="max-w-6xl mx-auto px-4 py-6 space-y-4">
-    <h1 class="text-2xl font-semibold">ARC</h1>
-    <UAlert v-if="error" color="error" :title="error" />
+  <UDashboardPanel id="arc">
+    <template #header>
+      <UDashboardNavbar title="ARC" />
+    </template>
+    <template #body>
+      <div class="mx-auto w-full max-w-7xl space-y-4">
+        <UAlert v-if="error" color="error" :title="error" icon="i-lucide-circle-x" />
 
-    <ArcGauge :arc="arc" />
+        <ArcGauge :arc="arc" />
 
-    <div v-if="loading && history.length === 0" class="text-gray-500">
-      Collecting samples… the daemon writes one row per minute.
-    </div>
-    <div v-else-if="history.length < 2" class="text-gray-500">
-      Need at least 2 samples for the hit-rate delta chart. Check back in a minute.
-    </div>
-    <div v-else class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-      <UCard>
-        <template #header>
-          <div class="font-semibold">Size vs. target</div>
-        </template>
-        <div class="h-64">
-          <Line :data="sizeData" :options="sizeOpts" />
+        <div v-if="loading && history.length === 0" class="text-gray-500">
+          Collecting samples… the daemon writes one row per minute.
         </div>
-      </UCard>
-      <UCard>
-        <template #header>
-          <div class="font-semibold">Hit rate (per-minute delta)</div>
-        </template>
-        <div class="h-64">
-          <Line :data="rateData" :options="rateOpts" />
+        <div v-else-if="history.length < 2" class="text-gray-500">
+          Need at least 2 samples for the hit-rate delta chart. Check back in a minute.
         </div>
-      </UCard>
-    </div>
+        <div v-else class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <UCard>
+            <template #header>
+              <div class="font-semibold">Size vs. target</div>
+            </template>
+            <div class="h-64">
+              <Line :data="sizeData" :options="sizeOpts" />
+            </div>
+          </UCard>
+          <UCard>
+            <template #header>
+              <div class="font-semibold">Hit rate (per-minute delta)</div>
+            </template>
+            <div class="h-64">
+              <Line :data="rateData" :options="rateOpts" />
+            </div>
+          </UCard>
+        </div>
 
-    <UCard v-if="arc">
-      <template #header><div class="font-semibold">Breakdown</div></template>
-      <dl class="grid grid-cols-2 md:grid-cols-4 gap-y-2 text-sm">
-        <dt class="text-gray-500">Demand data</dt>
-        <dd>
-          {{ arc.demand_data_hits.toLocaleString() }} /
-          {{ arc.demand_data_misses.toLocaleString() }}
-        </dd>
-        <dt class="text-gray-500">Demand metadata</dt>
-        <dd>
-          {{ arc.demand_metadata_hits.toLocaleString() }} /
-          {{ arc.demand_metadata_misses.toLocaleString() }}
-        </dd>
-        <dt class="text-gray-500">Prefetch data</dt>
-        <dd>
-          {{ arc.prefetch_data_hits.toLocaleString() }} /
-          {{ arc.prefetch_data_misses.toLocaleString() }}
-        </dd>
-        <dt class="text-gray-500">Prefetch metadata</dt>
-        <dd>
-          {{ arc.prefetch_metadata_hits.toLocaleString() }} /
-          {{ arc.prefetch_metadata_misses.toLocaleString() }}
-        </dd>
-        <dt class="text-gray-500">MRU / MFU</dt>
-        <dd>{{ arc.mru_hits.toLocaleString() }} / {{ arc.mfu_hits.toLocaleString() }}</dd>
-        <dt class="text-gray-500">Ghost MRU / MFU</dt>
-        <dd>
-          {{ arc.mru_ghost_hits.toLocaleString() }} / {{ arc.mfu_ghost_hits.toLocaleString() }}
-        </dd>
-        <dt class="text-gray-500">Compression</dt>
-        <dd v-if="arc.compressed_size > 0">
-          {{ formatBytes(arc.uncompressed_size) }} → {{ formatBytes(arc.compressed_size) }} ({{
-            (arc.uncompressed_size / arc.compressed_size).toFixed(2)
-          }}×)
-        </dd>
-        <dd v-else>—</dd>
-        <dt class="text-gray-500">L2ARC</dt>
-        <dd v-if="arc.l2_size > 0">
-          {{ formatBytes(arc.l2_size) }} · {{ arc.l2_hits.toLocaleString() }} hits
-        </dd>
-        <dd v-else>not configured</dd>
-      </dl>
-    </UCard>
-  </div>
+        <UCard v-if="arc">
+          <template #header><div class="font-semibold">Breakdown</div></template>
+          <dl class="grid grid-cols-2 md:grid-cols-4 gap-y-2 text-sm">
+            <dt class="text-gray-500">Demand data</dt>
+            <dd>
+              {{ arc.demand_data_hits.toLocaleString() }} /
+              {{ arc.demand_data_misses.toLocaleString() }}
+            </dd>
+            <dt class="text-gray-500">Demand metadata</dt>
+            <dd>
+              {{ arc.demand_metadata_hits.toLocaleString() }} /
+              {{ arc.demand_metadata_misses.toLocaleString() }}
+            </dd>
+            <dt class="text-gray-500">Prefetch data</dt>
+            <dd>
+              {{ arc.prefetch_data_hits.toLocaleString() }} /
+              {{ arc.prefetch_data_misses.toLocaleString() }}
+            </dd>
+            <dt class="text-gray-500">Prefetch metadata</dt>
+            <dd>
+              {{ arc.prefetch_metadata_hits.toLocaleString() }} /
+              {{ arc.prefetch_metadata_misses.toLocaleString() }}
+            </dd>
+            <dt class="text-gray-500">MRU / MFU</dt>
+            <dd>{{ arc.mru_hits.toLocaleString() }} / {{ arc.mfu_hits.toLocaleString() }}</dd>
+            <dt class="text-gray-500">Ghost MRU / MFU</dt>
+            <dd>
+              {{ arc.mru_ghost_hits.toLocaleString() }} / {{ arc.mfu_ghost_hits.toLocaleString() }}
+            </dd>
+            <dt class="text-gray-500">Compression</dt>
+            <dd v-if="arc.compressed_size > 0">
+              {{ formatBytes(arc.uncompressed_size) }} → {{ formatBytes(arc.compressed_size) }} ({{
+                (arc.uncompressed_size / arc.compressed_size).toFixed(2)
+              }}×)
+            </dd>
+            <dd v-else>—</dd>
+            <dt class="text-gray-500">L2ARC</dt>
+            <dd v-if="arc.l2_size > 0">
+              {{ formatBytes(arc.l2_size) }} · {{ arc.l2_hits.toLocaleString() }} hits /
+              {{ arc.l2_misses.toLocaleString() }} misses
+            </dd>
+            <dd v-else>not configured</dd>
+            <dt class="text-gray-500">c bounds</dt>
+            <dd class="font-mono">{{ formatBytes(arc.c_min) }} … {{ formatBytes(arc.c_max) }}</dd>
+          </dl>
+        </UCard>
+      </div>
+    </template>
+  </UDashboardPanel>
 </template>

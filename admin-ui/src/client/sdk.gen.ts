@@ -2,7 +2,7 @@
 
 import type { Client, Options as Options2, TDataShape } from './client';
 import { client } from './client.gen';
-import type { CancelData, CancelErrors, CancelResponses, CreateSnapshotData, CreateSnapshotErrors, CreateSnapshotResponses, DestroyPeerSnapshotData, DestroyPeerSnapshotErrors, DestroyPeerSnapshotResponses, DestroySnapshotData, DestroySnapshotErrors, DestroySnapshotResponses, GetArcData, GetArcErrors, GetArcHistoryData, GetArcHistoryResponses, GetArcResponses, GetConfigData, GetConfigErrors, GetConfigResponses, GetPeerJobData, GetPeerJobErrors, GetPeerJobResponses, GetPoolData, GetPoolErrors, GetPoolResponses, ListDatasetsData, ListDatasetsErrors, ListDatasetsResponses, ListHoldsData, ListHoldsErrors, ListHoldsResponses, ListJobsData, ListJobsResponses, ListPeerJobsData, ListPeerJobsErrors, ListPeerJobsResponses, ListPeersData, ListPeerSnapshotsData, ListPeerSnapshotsErrors, ListPeerSnapshotsResponses, ListPeersResponses, ListPoolsData, ListPoolsErrors, ListPoolsResponses, ListRunsData, ListRunsResponses, ListSnapshotsData, ListSnapshotsErrors, ListSnapshotsResponses, PauseData, PauseErrors, PauseResponses, PoolScrubData, PoolScrubErrors, PoolScrubResponses, PushToPeerData, PushToPeerErrors, PushToPeerResponses, ResumeData, ResumeErrors, ResumeResponses, StreamEventsData, StreamEventsResponses, StreamPeerEventsData, StreamPeerEventsErrors, StreamPeerEventsResponses, WakeupData, WakeupErrors, WakeupPeerJobData, WakeupPeerJobErrors, WakeupPeerJobResponses, WakeupResponses } from './types.gen';
+import type { CancelData, CancelErrors, CancelResponses, CreateHoldData, CreateHoldErrors, CreateHoldResponses, CreateSnapshotData, CreateSnapshotErrors, CreateSnapshotResponses, DestroyPeerSnapshotData, DestroyPeerSnapshotErrors, DestroyPeerSnapshotResponses, DestroySnapshotData, DestroySnapshotErrors, DestroySnapshotResponses, GetArcData, GetArcErrors, GetArcHistoryData, GetArcHistoryResponses, GetArcResponses, GetConfigData, GetConfigErrors, GetConfigResponses, GetPeerJobData, GetPeerJobErrors, GetPeerJobResponses, GetPoolData, GetPoolErrors, GetPoolResponses, ListDatasetsData, ListDatasetsErrors, ListDatasetsResponses, ListHoldsData, ListHoldsErrors, ListHoldsResponses, ListJobsData, ListJobsResponses, ListPeerDatasetsData, ListPeerDatasetsErrors, ListPeerDatasetsResponses, ListPeerJobsData, ListPeerJobsErrors, ListPeerJobsResponses, ListPeersData, ListPeerSnapshotsData, ListPeerSnapshotsErrors, ListPeerSnapshotsResponses, ListPeersResponses, ListPoolsData, ListPoolsErrors, ListPoolsResponses, ListRunsData, ListRunsResponses, ListSnapshotsData, ListSnapshotsErrors, ListSnapshotsResponses, PauseData, PauseErrors, PauseResponses, PoolScrubData, PoolScrubErrors, PoolScrubResponses, PushToPeerData, PushToPeerErrors, PushToPeerResponses, ReleaseHoldData, ReleaseHoldErrors, ReleaseHoldResponses, ResumeData, ResumeErrors, ResumeResponses, StreamEventsData, StreamEventsResponses, StreamPeerEventsData, StreamPeerEventsErrors, StreamPeerEventsResponses, WakeupData, WakeupErrors, WakeupPeerJobData, WakeupPeerJobErrors, WakeupPeerJobResponses, WakeupResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean> = Options2<TData, ThrowOnError> & {
     /**
@@ -62,6 +62,27 @@ export const destroySnapshot = <ThrowOnError extends boolean = false>(options: O
 export const listHolds = <ThrowOnError extends boolean = false>(options: Options<ListHoldsData, ThrowOnError>) => (options.client ?? client).get<ListHoldsResponses, ListHoldsErrors, ThrowOnError>({ url: '/api/v1/datasets/{name}/snapshots/{snapshot}/holds', ...options });
 
 /**
+ * Place a user hold on `{name}@{snapshot}`. Tags with the `arctern_`
+ * prefix are refused — they'd collide with the replication machinery's
+ * step/last holds and be swept or misread by it.
+ */
+export const createHold = <ThrowOnError extends boolean = false>(options: Options<CreateHoldData, ThrowOnError>) => (options.client ?? client).post<CreateHoldResponses, CreateHoldErrors, ThrowOnError>({
+    url: '/api/v1/datasets/{name}/snapshots/{snapshot}/holds',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
+
+/**
+ * Release a user hold. `arctern_*` tags ARE allowed here — releasing
+ * a stuck step hold from the UI is exactly the recovery path this
+ * endpoint exists for.
+ */
+export const releaseHold = <ThrowOnError extends boolean = false>(options: Options<ReleaseHoldData, ThrowOnError>) => (options.client ?? client).delete<ReleaseHoldResponses, ReleaseHoldErrors, ThrowOnError>({ url: '/api/v1/datasets/{name}/snapshots/{snapshot}/holds/{tag}', ...options });
+
+/**
  * Subscribe to the daemon's log-event broadcast and yield each as an
  * SSE frame, preceded by a replay of the most recent events so a
  * freshly opened page shows context instead of an empty feed until
@@ -84,6 +105,8 @@ export const listRuns = <ThrowOnError extends boolean = false>(options: Options<
 export const wakeup = <ThrowOnError extends boolean = false>(options: Options<WakeupData, ThrowOnError>) => (options.client ?? client).post<WakeupResponses, WakeupErrors, ThrowOnError>({ url: '/api/v1/jobs/{name}/wakeup', ...options });
 
 export const listPeers = <ThrowOnError extends boolean = false>(options?: Options<ListPeersData, ThrowOnError>) => (options?.client ?? client).get<ListPeersResponses, unknown, ThrowOnError>({ url: '/api/v1/peers', ...options });
+
+export const listPeerDatasets = <ThrowOnError extends boolean = false>(options: Options<ListPeerDatasetsData, ThrowOnError>) => (options.client ?? client).get<ListPeerDatasetsResponses, ListPeerDatasetsErrors, ThrowOnError>({ url: '/api/v1/peers/{peer}/datasets', ...options });
 
 /**
  * `GET /api/v1/peers/{peer}/events` — proxied SSE. Sends

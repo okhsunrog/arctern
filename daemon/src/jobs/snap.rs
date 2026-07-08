@@ -200,11 +200,16 @@ impl SnapJob {
     }
 }
 
-/// `<prefix><RFC3339-utc-no-colons>`. Colons stripped because some
-/// downstream tooling chokes on them and zrepl uses the same shape.
+/// `<prefix><RFC3339-utc-no-colons>` at second precision, e.g.
+/// `arctern_2026-07-08T182612Z`. Colons stripped because some
+/// downstream tooling chokes on them; sub-second digits dropped —
+/// they added 10 chars of noise to every snapshot name and the
+/// same-second collision they'd prevent is already an idempotent
+/// no-op (SnapshotExists).
 fn snapshot_tag(prefix: &str) -> String {
-    let now = OffsetDateTime::now_utc();
-    // Format with second precision; colons replaced.
+    let now = OffsetDateTime::now_utc()
+        .replace_nanosecond(0)
+        .expect("0 is a valid nanosecond");
     let formatted = now
         .format(&Rfc3339)
         .expect("Rfc3339 format always succeeds");
@@ -221,5 +226,13 @@ mod tests {
         let t = snapshot_tag("zrepl_");
         assert!(t.starts_with("zrepl_"));
         assert!(!t.contains(':'));
+    }
+
+    #[test]
+    fn snapshot_tag_is_second_precision() {
+        let t = snapshot_tag("arctern_");
+        // No fractional-second part: arctern_2026-07-08T182612Z.
+        assert!(!t.contains('.'), "got: {t}");
+        assert!(t.ends_with('Z'));
     }
 }

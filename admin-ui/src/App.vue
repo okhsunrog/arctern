@@ -205,7 +205,13 @@ function toggleMode() {
 
       <UDashboardSearch :groups="searchGroups" placeholder="Jump to, wake, send, scrub…" />
 
-      <RouterView />
+      <!-- Keyed by host: local and /h/:host render the SAME components,
+           and Vue would otherwise patch the existing instance in place —
+           leaving composables holding the previous host's baseUrl. A
+           scope switch is a context switch; remount is the contract. -->
+      <RouterView v-slot="{ Component }">
+        <component :is="Component" :key="host ?? 'local'" />
+      </RouterView>
     </UDashboardGroup>
   </UApp>
 </template>

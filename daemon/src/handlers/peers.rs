@@ -453,7 +453,7 @@ pub async fn destroy_peer_snapshot(
 /// dedicated streaming path.
 pub async fn proxy_any(
     State(state): State<AppState>,
-    Path((peer, rest)): Path<(String, String)>,
+    Path((peer, _rest)): Path<(String, String)>,
     request: axum::extract::Request,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
@@ -463,7 +463,22 @@ pub async fn proxy_any(
         .query()
         .map(|q| format!("?{q}"))
         .unwrap_or_default();
-    let path = format!("/api/v1/{rest}{query}");
+    // Take the forwarded path from the RAW uri, not the decoded Path
+    // param: axum percent-decodes captures, which would turn an
+    // encoded dataset segment (okdata%2Fdata) into literal slashes and
+    // break single-segment routes on the peer.
+    let raw = request.uri().path();
+    let Some((_, encoded_rest)) = raw.split_once("/proxy/") else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiErrorBody {
+                error: "bad_request".into(),
+                message: "malformed proxy path".into(),
+            }),
+        )
+            .into_response();
+    };
+    let path = format!("/{encoded_rest}{query}");
     let body = match axum::body::to_bytes(request.into_body(), 1 << 20).await {
         Ok(b) if b.is_empty() => None,
         Ok(b) => Some(String::from_utf8_lossy(&b).into_owned()),

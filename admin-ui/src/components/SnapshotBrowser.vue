@@ -125,6 +125,7 @@ const selectedUsedBySnapshots = computed(() => {
 
 // ── Snapshots ───────────────────────────────────────────────────
 const snapshots = ref<SnapshotRow[]>([])
+const snapsError = ref<string | null>(null)
 const snapsLoading = ref(false)
 const holds = ref<Map<string, SnapshotHold[]>>(new Map())
 const rowSelection = ref<Record<string, boolean>>({})
@@ -137,7 +138,10 @@ async function refreshSnapshots() {
   }
   snapsLoading.value = true
   const r = await props.source.listSnapshots(dataset.value)
-  if (!r.error) {
+  if (r.error) {
+    snapsError.value = String((r.error as { message?: string })?.message ?? JSON.stringify(r.error))
+  } else {
+    snapsError.value = null
     snapshots.value = r.data ?? []
     void loadAllHolds()
   }
@@ -445,6 +449,7 @@ const columns = computed<TableColumn<SnapshotRow>[]>(() => [
           "
         />
         <template v-else>
+          <UAlert v-if="snapsError" color="error" :title="snapsError" icon="i-lucide-circle-x" />
           <div class="flex items-center gap-x-3 gap-y-1 flex-wrap">
             <span class="font-mono text-sm font-medium truncate">{{ dataset }}</span>
             <span class="text-xs text-muted">

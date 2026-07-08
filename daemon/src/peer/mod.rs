@@ -68,14 +68,23 @@ pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// target: message`). Unparseable lines stay WARN — unexpected output
 /// (shell errors, panics) deserves attention.
 fn emit_remote_stderr(peer: &str, channel: &'static str, raw: &str) {
+    // First two whitespace-separated tokens (timestamp, level). Not
+    // `splitn(_, char::is_whitespace)`: the remote fmt layer right-pads
+    // the level ("Z  INFO"), and splitn would yield an empty token at
+    // the doubled space, misreading every line as unparseable.
+    fn split_token(s: &str) -> (&str, &str) {
+        let s = s.trim_start();
+        match s.find(char::is_whitespace) {
+            Some(i) => (&s[..i], s[i..].trim_start()),
+            None => (s, ""),
+        }
+    }
     let line = strip_ansi(raw);
-    let mut parts = line.splitn(3, char::is_whitespace);
-    let _ts = parts.next().unwrap_or("");
-    let level = parts.next().unwrap_or("");
+    let (_ts, after_ts) = split_token(&line);
+    let (level, rest) = split_token(after_ts);
     // Drop the remote fmt layer's own `timestamp LEVEL target:` prefix —
     // re-logging it verbatim reads as line noise in the event feed. The
     // remainder after "target: " is the actual message.
-    let rest = parts.next().unwrap_or("").trim_start();
     let msg = rest.split_once(": ").map(|(_, m)| m).unwrap_or(rest);
     match level {
         "TRACE" => tracing::trace!(peer = %peer, "{peer} {channel}: {msg}"),
@@ -383,6 +392,41 @@ mod tests {
             strip_ansi(colored),
             "2026-07-07T20:38:17Z  INFO opening channel identity=\"laptop_nova\""
         );
+    }
+
+    #[test]
+    fn emit_remote_stderr_parses_padded_level() {
+        // The remote fmt layer right-pads levels ("Z  INFO"); the parse
+        // must not trip on the doubled space. Captured via a scoped
+        // subscriber that records the emitted level.
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        #[derive(Clone, Default)]
+        struct Seen(Arc<Mutex<Vec<tracing::Level>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Seen {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                self.0.lock().unwrap().push(*event.metadata().level());
+            }
+        }
+        let seen = Seen::default();
+        let sub = tracing_subscriber::registry().with(seen.clone());
+        tracing::subscriber::with_default(sub, || {
+            super::emit_remote_stderr(
+                "mira",
+                "stdinserver",
+                "2026-07-08T23:09:54.224210Z  INFO arctern::stdinserver: opening channel",
+            );
+            super::emit_remote_stderr("mira", "recv channel", "zsh:1: command not found: arctern");
+        });
+        let levels = seen.0.lock().unwrap();
+        assert_eq!(levels[0], tracing::Level::INFO);
+        // Unparseable line stays loud.
+        assert_eq!(levels[1], tracing::Level::WARN);
     }
 
     #[test]

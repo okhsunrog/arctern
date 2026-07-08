@@ -118,7 +118,11 @@ async fn run_stdinserver_dispatch(identity: String, config: PathBuf) -> eyre::Re
         }
     };
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // tarpc traces every RPC at INFO (BeginRequest/SendResponse, four
+    // lines per probe); over the stderr bridge that would flood the
+    // sender's event log every 15s. WARN keeps real tarpc failures.
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,tarpc=warn"));
     // stderr here is an SSH pipe read by the peer's stderr drain (or
     // journald); ANSI colour codes would travel into the peer's event
     // log as garbage.
@@ -232,7 +236,10 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
     use tracing_subscriber::Layer as _;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // tarpc=warn: its per-RPC INFO tracing (four lines per control-
+    // channel call) is protocol noise, not operator signal.
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,tarpc=warn"));
     // Under systemd stderr is a pipe to journald — no ANSI there either.
     use std::io::IsTerminal as _;
     let fmt_layer = tracing_subscriber::fmt::layer()

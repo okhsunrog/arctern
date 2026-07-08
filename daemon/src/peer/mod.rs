@@ -108,11 +108,11 @@ pub struct PeerLink {
     /// exactly when the last clone of this link is dropped, i.e. on
     /// reconnect — no leak, no premature teardown.
     _control_child: Arc<openssh::Child<Arc<Session>>>,
-    /// Guards the one-time `SubscribeEvents` RPC. The receiver spawns a
-    /// pusher task per SubscribeEvents it accepts; sending it once per
-    /// link keeps that at one pusher per control channel no matter how
-    /// many local SSE clients subscribe to the broadcast.
-    events_subscribed: Arc<tokio::sync::OnceCell<()>>,
+    /// Fan-out of the peer's event stream. Filled by a reader task
+    /// over the dedicated `events` channel, spawned once per link on
+    /// first subscription; every SSE client shares it.
+    events: tokio::sync::broadcast::Sender<arctern_transport::EventWire>,
+    events_started: Arc<tokio::sync::OnceCell<()>>,
 }
 
 impl PeerLink {
@@ -162,7 +162,8 @@ impl PeerLink {
             control,
             active_recvs: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             _control_child: Arc::new(child),
-            events_subscribed: Arc::new(tokio::sync::OnceCell::new()),
+            events: tokio::sync::broadcast::channel(256).0,
+            events_started: Arc::new(tokio::sync::OnceCell::new()),
         })
     }
 
@@ -187,38 +188,61 @@ impl PeerLink {
     /// local broadcast. New subscribers see events that arrive after
     /// they subscribe; backlog replay is the SSE bridge's
     /// responsibility.
+    /// Subscribe to the peer's event stream. Events ride a dedicated
+    /// one-way channel (`stdinserver <id> events`, NDJSON lines) — not
+    /// the control channel — opened once per link by the first
+    /// subscriber; every SSE client shares the broadcast. Backlog
+    /// replay is the HTTP bridge's job (proxy `/events/recent`).
     pub async fn subscribe_events(
         &self,
     ) -> Result<tokio::sync::broadcast::Receiver<arctern_transport::EventWire>, RpcError> {
-        // Grab the receiver before the RPC so frames pushed between the
-        // request landing and our return are not missed.
-        let rx = self.control.subscribe_events();
-        self.events_subscribed
+        let rx = self.events.subscribe();
+        self.events_started
             .get_or_try_init(|| async {
-                // Anchor the subscription at the receiver's current
-                // cursor: `since: None` means "from 0", which replays
-                // the receiver's whole retained log (24h) into the
-                // broadcast on every fresh link. Live-only is what the
-                // SSE bridge wants; history stays queryable via
-                // GetLogCursor-style RPCs if ever needed.
-                // Anchor slightly behind the cursor: a fresh subscriber
-                // gets a ~100-row tail for context instead of a blank
-                // feed, without the old full-day replay.
-                let since = match self.control.send(Request::GetLogCursor).await {
-                    Ok(Response::GetLogCursorOk { id }) => Some(id.saturating_sub(100)),
-                    _ => None,
-                };
-                match self
-                    .control
-                    .send(Request::SubscribeEvents { since })
-                    .await?
-                {
-                    Response::Ok => Ok(()),
-                    Response::Error { message, .. } => Err(RpcError::Server(message)),
-                    other => Err(RpcError::Server(format!(
-                        "unexpected SubscribeEvents response: {other:?}"
-                    ))),
+                let mut cmd = Arc::clone(&self.session).arc_command("arctern");
+                cmd.arg("stdinserver").arg("control").arg("events");
+                cmd.stdin(Stdio::null());
+                cmd.stdout(Stdio::piped());
+                cmd.stderr(Stdio::piped());
+                let mut child = cmd
+                    .spawn()
+                    .await
+                    .map_err(|e| RpcError::Server(format!("spawn events channel: {e}")))?;
+                let stdout = child
+                    .stdout()
+                    .take()
+                    .ok_or_else(|| RpcError::Server("events child has no stdout".into()))?;
+                if let Some(mut stderr) = child.stderr().take() {
+                    let peer_name = self.name.clone();
+                    tokio::spawn(async move {
+                        use tokio::io::AsyncBufReadExt;
+                        let mut lines = BufReader::new(&mut stderr).lines();
+                        while let Ok(Some(line)) = lines.next_line().await {
+                            emit_remote_stderr(&peer_name, "events channel", &line);
+                        }
+                    });
                 }
+                let events = self.events.clone();
+                let peer_name = self.name.clone();
+                tokio::spawn(async move {
+                    use tokio::io::AsyncBufReadExt;
+                    // The child rides along so the remote process lives
+                    // exactly as long as this reader.
+                    let child = child;
+                    let mut lines = BufReader::new(stdout).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        match serde_json::from_str::<arctern_transport::EventWire>(&line) {
+                            Ok(ev) => {
+                                let _ = events.send(ev);
+                            }
+                            Err(e) => {
+                                tracing::debug!(peer = %peer_name, error = %e, "events channel: bad line");
+                            }
+                        }
+                    }
+                    let _ = child.wait().await;
+                });
+                Ok::<(), RpcError>(())
             })
             .await?;
         Ok(rx)

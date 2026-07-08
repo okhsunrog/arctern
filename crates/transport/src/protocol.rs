@@ -75,13 +75,6 @@ pub enum Request {
     DiscardPartialRecv {
         dataset: String,
     },
-    /// Subscribe to event broadcasts. `since` is the last-seen
-    /// `log_events.id` (see daemon::state::log_events); the server
-    /// replays everything strictly greater.
-    SubscribeEvents {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        since: Option<u64>,
-    },
     GetLogCursor,
     /// Generic passthrough into the receiver's local daemon HTTP API
     /// (over its UNIX socket). This is what makes managing a peer
@@ -124,9 +117,6 @@ pub enum Response {
     /// is reserved for "operation succeeded with no payload" replies
     /// where a richer Ok variant doesn't add value.
     Ok,
-    /// Server-pushed event frame (control channel only;
-    /// `ResponseFrame.request_id == None`).
-    Event(EventWire),
     Error {
         code: ErrorCode,
         message: String,
@@ -150,9 +140,10 @@ pub enum ErrorCode {
     Internal,
 }
 
-/// One log event surfaced over the SSE bridge. Mirrors the
-/// `daemon::state::log_events` row shape; the `id` field is the same
-/// monotonic cursor used by `Request::SubscribeEvents { since }`.
+/// One log event, as carried on the dedicated events channel: the
+/// stream is newline-delimited JSON `EventWire` lines (no framing, no
+/// request ids — events are a stream, not RPC). Mirrors the
+/// `daemon::state::log_events` row shape; `id` is the SQLite cursor.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EventWire {
     pub id: u64,
@@ -458,12 +449,6 @@ mod tests {
     }
 
     #[test]
-    fn request_subscribe_events_roundtrip() {
-        check_request_roundtrip(Request::SubscribeEvents { since: Some(42) });
-        check_request_roundtrip(Request::SubscribeEvents { since: None });
-    }
-
-    #[test]
     fn request_get_log_cursor_roundtrip() {
         check_request_roundtrip(Request::GetLogCursor);
     }
@@ -519,24 +504,6 @@ mod tests {
     #[test]
     fn response_ok_roundtrip() {
         check_response_roundtrip(Response::Ok);
-    }
-
-    #[test]
-    fn response_event_uses_none_request_id() {
-        let f = ResponseFrame {
-            request_id: None,
-            body: Response::Event(EventWire {
-                id: 1,
-                timestamp: 1715212345,
-                level: "INFO".into(),
-                job_name: Some("backup".into()),
-                message: "cycle ok".into(),
-            }),
-        };
-        let s = serde_json::to_string(&f).unwrap();
-        let back: ResponseFrame = serde_json::from_str(&s).unwrap();
-        assert_eq!(back.request_id, None);
-        assert_eq!(back, f);
     }
 
     #[test]

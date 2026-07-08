@@ -14,16 +14,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use arctern_transport::{
-    EventWire, Request, RequestFrame, Response, ResponseFrame, read_response, write_request,
+    Request, RequestFrame, Response, ResponseFrame, read_response, write_request,
 };
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use super::Pending;
-
-const EVENT_BROADCAST_CAPACITY: usize = 256;
 
 #[derive(Debug, Error)]
 pub enum RpcError {
@@ -47,7 +45,6 @@ const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 #[derive(Clone)]
 pub struct ControlClient {
     tx: mpsc::Sender<Outbound>,
-    events: broadcast::Sender<EventWire>,
     next_id: Arc<AtomicU64>,
 }
 
@@ -69,7 +66,6 @@ impl ControlClient {
         W: AsyncWrite + Unpin + Send + 'static,
     {
         let (tx, rx) = mpsc::channel::<Outbound>(64);
-        let (events_tx, _events_rx) = broadcast::channel::<EventWire>(EVENT_BROADCAST_CAPACITY);
         let next_id = Arc::new(AtomicU64::new(1));
         let pending = Arc::new(Mutex::new(HashMap::<u64, Pending>::new()));
         let (inbound_tx, inbound_rx) = mpsc::channel::<ResponseFrame>(64);
@@ -84,19 +80,14 @@ impl ControlClient {
             }
         });
         let task = {
-            let events = events_tx.clone();
             let pending = pending.clone();
             tokio::spawn(async move {
-                run_loop(writer, rx, inbound_rx, pending, events).await;
+                run_loop(writer, rx, inbound_rx, pending).await;
                 // Unblock the reader if it is still parked on a read.
                 reader_task.abort();
             })
         };
-        let client = Self {
-            tx,
-            events: events_tx,
-            next_id,
-        };
+        let client = Self { tx, next_id };
         (client, task)
     }
 
@@ -121,13 +112,6 @@ impl ControlClient {
             Err(_elapsed) => Err(RpcError::Timeout),
         }
     }
-
-    /// Subscribe to server-pushed events. New subscribers see events
-    /// emitted after they subscribe; backlog replay is the SSE bridge's
-    /// job (queries log_events directly via SQLite).
-    pub fn subscribe_events(&self) -> broadcast::Receiver<EventWire> {
-        self.events.subscribe()
-    }
 }
 
 async fn run_loop<W>(
@@ -135,7 +119,6 @@ async fn run_loop<W>(
     mut rx: mpsc::Receiver<Outbound>,
     mut inbound: mpsc::Receiver<ResponseFrame>,
     pending: Arc<Mutex<HashMap<u64, Pending>>>,
-    events: broadcast::Sender<EventWire>,
 ) where
     W: AsyncWrite + Unpin + Send,
 {
@@ -167,9 +150,6 @@ async fn run_loop<W>(
             // Inbound: the reader task decoded a frame.
             frame = inbound.recv() => {
                 match frame {
-                    Some(ResponseFrame { request_id: None, body: Response::Event(ev) }) => {
-                        let _ = events.send(ev);
-                    }
                     Some(ResponseFrame { request_id: Some(id), body }) => {
                         let mut p = pending.lock().await;
                         if let Some(reply) = p.remove(&id) {
@@ -181,8 +161,9 @@ async fn run_loop<W>(
                         }
                         // Unmatched id = server bug or stale frame; drop it.
                     }
-                    Some(ResponseFrame { request_id: None, body: _ }) => {
-                        // Non-event frame with None id: protocol violation; ignore.
+                    Some(ResponseFrame { request_id: None, .. }) => {
+                        // Events moved to their own channel; a None id
+                        // here is a protocol violation — ignore.
                     }
                     None => {
                         // Reader task ended — peer hung up or stream broke.
@@ -289,36 +270,6 @@ mod tests {
             other => panic!("expected RpcError::Server, got {other:?}"),
         }
         server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn event_frames_fan_out_to_subscribers() {
-        let (client_io, server_io) = duplex(8192);
-        let (client_reader, client_writer) = tokio::io::split(client_io);
-        let (_server_reader, mut server_writer) = tokio::io::split(server_io);
-        let (client, _task) = ControlClient::spawn(client_reader, client_writer);
-        let mut sub = client.subscribe_events();
-
-        let ev = EventWire {
-            id: 7,
-            timestamp: 1715200000,
-            level: "INFO".into(),
-            job_name: Some("backup".into()),
-            message: "hello".into(),
-        };
-        let frame = ResponseFrame {
-            request_id: None,
-            body: Response::Event(ev.clone()),
-        };
-        arctern_transport::write_response(&mut server_writer, &frame)
-            .await
-            .unwrap();
-
-        let got = tokio::time::timeout(std::time::Duration::from_secs(1), sub.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(got, ev);
     }
 
     #[tokio::test]

@@ -14,8 +14,8 @@ use std::sync::Arc;
 use arctern_config::zfs_names::validate_dataset_name;
 use arctern_config::{AllowedClient, Config};
 use arctern_transport::{
-    ErrorCode, EventWire, Request, RequestFrame, Response, ResponseFrame, SnapshotEntry,
-    compile_prefix_regex, read_request, write_response,
+    ErrorCode, Request, RequestFrame, Response, ResponseFrame, SnapshotEntry, compile_prefix_regex,
+    read_request, write_response,
 };
 use palimpsest::ZfsError;
 use palimpsest::dataset::ListOptions;
@@ -45,10 +45,6 @@ where
     // background SubscribeEvents pusher; serialise writes through one
     // mutex so frames never interleave on the wire.
     let writer = Arc::new(Mutex::new(BufWriter::new(writer)));
-    // At most one pusher per control channel: the client sends
-    // SubscribeEvents once per link, and a duplicate (e.g. a client
-    // predating that dedup) must not double every Event frame.
-    let mut event_pusher: Option<tokio::task::JoinHandle<()>> = None;
     let mut inflight = tokio::task::JoinSet::new();
     let result = loop {
         let frame: RequestFrame = match read_request(&mut reader).await {
@@ -78,56 +74,6 @@ where
             let _ = w.flush().await;
             break Ok(());
         }
-        // SubscribeEvents is special: reply Ok immediately, then spawn
-        // a background task that polls log_events and writes Event
-        // frames into the shared writer.
-        if let Request::SubscribeEvents { since } = &body {
-            let since = since.unwrap_or(0);
-            let already_running = event_pusher.as_ref().is_some_and(|h| !h.is_finished());
-            match pool.clone() {
-                Some(p) => {
-                    if let Err(r) = enforce_control_acl(&acl, "control:subscribe_events", true) {
-                        let resp = ResponseFrame {
-                            request_id: Some(id),
-                            body: r,
-                        };
-                        let mut w = writer.lock().await;
-                        let _ = write_response(&mut *w, &resp).await;
-                        let _ = w.flush().await;
-                        continue;
-                    }
-                    let resp = ResponseFrame {
-                        request_id: Some(id),
-                        body: Response::Ok,
-                    };
-                    {
-                        let mut w = writer.lock().await;
-                        let _ = write_response(&mut *w, &resp).await;
-                        let _ = w.flush().await;
-                    }
-                    if !already_running {
-                        let writer_for_task = writer.clone();
-                        event_pusher = Some(tokio::spawn(async move {
-                            push_events(p, since, writer_for_task).await;
-                        }));
-                    }
-                    continue;
-                }
-                None => {
-                    let resp = ResponseFrame {
-                        request_id: Some(id),
-                        body: Response::Error {
-                            code: ErrorCode::Internal,
-                            message: "stdinserver has no SQLite log layer".into(),
-                        },
-                    };
-                    let mut w = writer.lock().await;
-                    let _ = write_response(&mut *w, &resp).await;
-                    let _ = w.flush().await;
-                    continue;
-                }
-            }
-        }
         let runner = runner.clone();
         let config = config.clone();
         let acl = acl.clone();
@@ -155,52 +101,7 @@ where
     };
     // EOF path: let in-flight tasks finish writing before tearing down.
     while inflight.join_next().await.is_some() {}
-    if let Some(h) = event_pusher {
-        h.abort();
-    }
     result
-}
-
-/// Background task: poll log_events for new rows since `since` and push
-/// them as Event frames (request_id = None) until the writer breaks.
-async fn push_events<W>(pool: Arc<SqlitePool>, mut since: u64, writer: Arc<Mutex<BufWriter<W>>>)
-where
-    W: AsyncWrite + Unpin + Send + 'static,
-{
-    use std::time::Duration;
-    let poll_interval = Duration::from_millis(500);
-    loop {
-        let rows = match crate::state::log_events::since(&pool, since as i64, 256).await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(error = %e, "control: log_events poll failed");
-                tokio::time::sleep(poll_interval).await;
-                continue;
-            }
-        };
-        for row in &rows {
-            let ev = EventWire {
-                id: row.id as u64,
-                timestamp: row.timestamp,
-                level: row.level.clone(),
-                job_name: row.job_name.clone(),
-                message: row.message.clone(),
-            };
-            let frame = ResponseFrame {
-                request_id: None,
-                body: Response::Event(ev),
-            };
-            let mut w = writer.lock().await;
-            if write_response(&mut *w, &frame).await.is_err() {
-                return;
-            }
-            if w.flush().await.is_err() {
-                return;
-            }
-            since = row.id as u64;
-        }
-        tokio::time::sleep(poll_interval).await;
-    }
 }
 
 async fn dispatch(
@@ -226,7 +127,6 @@ async fn dispatch(
             }
             handle_discard_partial_recv(runner, acl, &dataset).await
         }
-        Request::SubscribeEvents { .. } => unreachable!("handled in run()"),
         Request::GetLogCursor => {
             if let Err(r) = enforce_control_acl(acl, "control:get_log_cursor", true) {
                 return r;
@@ -635,16 +535,6 @@ mod tests {
                 assert_eq!(code, ErrorCode::Unauthorized);
                 assert!(message.contains("control:discard_partial_recv"));
             }
-            other => panic!("expected Error, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn unimplemented_subscribe_events_reports_internal_error() {
-        let runner = Arc::new(RecordingRunner::new());
-        let r = rpc(runner, acl(None), Request::SubscribeEvents { since: None }).await;
-        match r {
-            Response::Error { code, .. } => assert_eq!(code, ErrorCode::Internal),
             other => panic!("expected Error, got {other:?}"),
         }
     }

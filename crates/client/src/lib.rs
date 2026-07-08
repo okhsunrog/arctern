@@ -86,6 +86,63 @@ pub async fn raw(
     Ok((status.as_u16(), bytes))
 }
 
+/// Open a streaming GET (the daemon's SSE endpoint) and forward each
+/// `data: <json>` payload line into the returned channel. The
+/// connection lives until the receiver is dropped or the daemon closes
+/// the stream. Used by the stdinserver events channel to bridge the
+/// daemon's event bus onto its stdout.
+pub async fn stream_sse_data(
+    socket: &Path,
+    path: &str,
+) -> Result<tokio::sync::mpsc::Receiver<String>, ClientError> {
+    use http_body_util::BodyExt as _;
+    let stream = UnixStream::connect(socket).await?;
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
+    tokio::spawn(async move {
+        if let Err(e) = conn.await {
+            tracing_log_or_eprintln(format_args!("hyper connection: {e}"));
+        }
+    });
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(path)
+        .header("host", "_")
+        .body(Full::new(Bytes::new()))?;
+    let response = sender.send_request(req).await?;
+    if !response.status().is_success() {
+        return Err(ClientError::Status {
+            code: response.status().as_u16(),
+            body: format!("streaming GET {path}"),
+        });
+    }
+    let (tx, rx) = tokio::sync::mpsc::channel::<String>(64);
+    tokio::spawn(async move {
+        // `sender` must outlive the body or hyper aborts the request.
+        let _sender = sender;
+        let mut body = response.into_body();
+        let mut buf = String::new();
+        while let Some(frame) = body.frame().await {
+            let Ok(frame) = frame else { break };
+            let Some(data) = frame.data_ref() else {
+                continue;
+            };
+            buf.push_str(&String::from_utf8_lossy(data));
+            // SSE events are separated by blank lines; payload lines
+            // are `data: {...}`. Keep-alive comments start with ':'.
+            while let Some(nl) = buf.find('\n') {
+                let line: String = buf.drain(..=nl).collect();
+                let line = line.trim_end();
+                if let Some(payload) = line.strip_prefix("data: ")
+                    && tx.send(payload.to_string()).await.is_err()
+                {
+                    return;
+                }
+            }
+        }
+    });
+    Ok(rx)
+}
+
 async fn request(
     socket: &Path,
     method: Method,

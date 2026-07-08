@@ -22,6 +22,9 @@ pub enum DispatchAction {
     Recv {
         job: String,
     },
+    /// One-way NDJSON event stream. Rides the control read scope: any
+    /// identity allowed `control` (or explicitly `events`) may watch.
+    Events,
     /// Returned for unsupported / not-yet-implemented operations. Caller
     /// should log + exit cleanly with a non-zero code.
     Unsupported {
@@ -88,6 +91,14 @@ pub async fn run_with(
                 .map_err(|e| eyre::eyre!("recv channel: {e}"))?;
             Ok(())
         }
+        DispatchAction::Events => {
+            tracing::info!(identity, "stdinserver events: opening stream");
+            let stdout = tokio::io::stdout();
+            super::events::run(config, pool, stdout)
+                .await
+                .map_err(|e| eyre::eyre!("events channel: {e}"))?;
+            Ok(())
+        }
         DispatchAction::Unsupported { reason } => {
             tracing::warn!(identity, reason, "stdinserver-dispatch unsupported op");
             Ok(())
@@ -129,7 +140,11 @@ pub fn decide(
             job: job.to_string(),
         });
     }
-    if !acl.operations.iter().any(|o| o == op) {
+    // `events` is read-only observability — implicitly granted with
+    // the `control` scope so existing configs need no edit.
+    let op_allowed = acl.operations.iter().any(|o| o == op)
+        || (op == "events" && acl.operations.iter().any(|o| o == "control"));
+    if !op_allowed {
         return Err(DispatchError::OpNotAllowed {
             identity: identity.to_string(),
             op: op.to_string(),
@@ -142,6 +157,7 @@ pub fn decide(
         "recv" => Ok(DispatchAction::Recv {
             job: job.to_string(),
         }),
+        "events" => Ok(DispatchAction::Events),
         other => Ok(DispatchAction::Unsupported {
             reason: format!("operation {other:?} has no handler"),
         }),

@@ -262,10 +262,10 @@ fn validate_allowed_client(idx: usize, client: &AllowedClient) -> Result<(), Str
     // otherwise silently grant nothing and skip the root_fs requirement.
     // Recognised: "recv", "control", and fine-grained "control:*" ops.
     for op in &client.operations {
-        let known = op == "recv" || op == "control" || op.starts_with("control:");
+        let known = op == "recv" || op == "control" || op == "events" || op.starts_with("control:");
         if !known {
             return Err(format!(
-                "allowed_clients[{idx}].operations: unknown operation {op:?} (expected \"recv\", \"control\", or \"control:*\")"
+                "allowed_clients[{idx}].operations: unknown operation {op:?} (expected \"recv\", \"control\", \"events\", or \"control:*\")"
             ));
         }
     }

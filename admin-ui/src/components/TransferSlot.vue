@@ -3,7 +3,12 @@ import { computed, ref, watch } from 'vue'
 import type { TransferInfo } from '../client'
 import { formatBytes } from '../utils/format'
 
-const props = defineProps<{ transfer: TransferInfo }>()
+const props = defineProps<{
+  transfer: TransferInfo
+  /** Name the destination peer in the stats line — only useful when the
+   * job replicates to more than one target. */
+  showPeer?: boolean
+}>()
 
 // Speed: seeded from the server's `started_at` (whole-transfer average,
 // meaningful even on the first poll), then EMA-refined from bytes_sent
@@ -58,19 +63,21 @@ const elapsed = computed(() => {
 </script>
 
 <template>
-  <div class="space-y-1">
-    <div class="flex items-center justify-between text-sm">
-      <span class="font-mono truncate" :title="transfer.dataset">
-        {{ transfer.dataset }}
-        <span class="text-muted">→ {{ transfer.peer }} ({{ transfer.kind }})</span>
-      </span>
-      <span class="text-muted shrink-0 ml-2 font-mono text-xs">
-        {{ formatBytes(transfer.bytes_sent)
-        }}<template v-if="transfer.total_bytes"> / {{ formatBytes(transfer.total_bytes) }}</template>
-        <template v-if="rate"> · {{ formatBytes(rate) }}/s</template>
-        <template v-if="eta"> · ~{{ eta }} left</template>
-        <template v-else-if="elapsed"> · {{ elapsed }} elapsed</template>
-      </span>
+  <!-- Two-line layout: a one-line row let the stats squeeze the dataset
+       name into "novafs…" in narrow cards. Name and destination get the
+       first line; metrics breathe on their own line below. -->
+  <div class="space-y-1.5">
+    <div class="flex items-center justify-between gap-2 text-sm min-w-0">
+      <span class="font-mono truncate" :title="transfer.dataset">{{ transfer.dataset }}</span>
+      <span class="text-muted shrink-0 text-xs">{{ transfer.kind }}</span>
+    </div>
+    <div class="text-muted font-mono text-xs">
+      <template v-if="showPeer">→ {{ transfer.peer }} · </template
+      >{{ formatBytes(transfer.bytes_sent)
+      }}<template v-if="transfer.total_bytes"> / {{ formatBytes(transfer.total_bytes) }}</template>
+      <template v-if="rate"> · {{ formatBytes(rate) }}/s</template>
+      <template v-if="eta"> · ~{{ eta }} left</template>
+      <template v-else-if="elapsed"> · {{ elapsed }} elapsed</template>
     </div>
     <UProgress v-if="pct != null" :model-value="pct" size="sm" />
     <UProgress v-else size="sm" animation="carousel" />

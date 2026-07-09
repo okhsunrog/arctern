@@ -48,12 +48,13 @@ function targetLine(tg: {
 
 <template>
   <div class="space-y-3">
-    <!-- In-flight transfers, one row per parallel send slot -->
-    <div v-if="job.transfers?.length" class="space-y-2">
+    <!-- In-flight transfers, one block per parallel send slot -->
+    <div v-if="job.transfers?.length" class="space-y-3">
       <TransferSlot
         v-for="t in job.transfers"
         :key="`${t.peer}:${t.dataset}`"
         :transfer="t"
+        :show-peer="(job.targets?.length ?? 0) > 1"
       />
     </div>
 

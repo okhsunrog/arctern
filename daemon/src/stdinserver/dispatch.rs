@@ -127,14 +127,15 @@ pub fn decide(
     let acl = lookup_identity(config, identity)
         .ok_or_else(|| DispatchError::UnknownIdentity(identity.to_string()))?;
     verify_fingerprint(identity, acl, auth_info)?;
-    // The control channel is per-peer, not per-job: one long-lived channel
-    // carries RPC for every job the peer serves, and individual control
-    // operations are gated separately (the `operations` list here, plus
-    // fine-grained `control:*` checks in the control handler). Only
-    // replication ops (recv) are bound to a specific `<job>`, so the
-    // job-membership check applies to those alone. The active side passes
-    // the literal `control` as `<job>` when opening the control channel.
-    if op != "control" && !acl.jobs.iter().any(|j| j == job) {
+    // The control and events channels are per-peer, not per-job: one
+    // long-lived channel of each kind serves every job the peer runs,
+    // and individual control operations are gated separately (the
+    // `operations` list here, plus fine-grained `control:*` checks in
+    // the control handler). Only replication ops (recv) are bound to a
+    // specific `<job>`, so the job-membership check applies to those
+    // alone. The active side passes the literal `control` as `<job>`
+    // when opening either channel.
+    if !matches!(op, "control" | "events") && !acl.jobs.iter().any(|j| j == job) {
         return Err(DispatchError::JobNotAllowed {
             identity: identity.to_string(),
             job: job.to_string(),
@@ -446,6 +447,21 @@ mod tests {
                 job: "control".into()
             }
         );
+    }
+
+    #[test]
+    fn events_channel_is_not_job_scoped() {
+        // The events stream is opened as `stdinserver control events` —
+        // the pseudo-job must not need to appear in the ACL's job list.
+        let c = cfg("laptop_nova", &["backup"], &["control"]);
+        let a = decide(
+            "laptop_nova",
+            "arctern stdinserver control events",
+            None,
+            &c,
+        )
+        .unwrap();
+        assert_eq!(a, DispatchAction::Events);
     }
 
     #[test]

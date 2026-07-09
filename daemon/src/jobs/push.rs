@@ -122,18 +122,12 @@ pub enum PlanError {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct LocalSnap {
-    name: String,
-    guid: u64,
-    createtxg: u64,
-}
 
 pub async fn list_sender_snaps(
     runner: &dyn CommandRunner,
     sender_dataset: &str,
     filter: &CompiledFilter,
-) -> Result<Vec<SnapshotRef>, PlanError> {
+) -> Result<Vec<SnapshotEntry>, PlanError> {
     let opts = ListOptions {
         recursive: false,
         types: vec![DatasetType::Snapshot],
@@ -147,7 +141,7 @@ pub async fn list_sender_snaps(
             dataset: sender_dataset.to_string(),
             source,
         })?;
-    let mut snaps: Vec<LocalSnap> = entries
+    let mut snaps: Vec<SnapshotEntry> = entries
         .into_iter()
         .filter_map(|e| {
             let snap_name = e.snapshot_name.clone()?;
@@ -159,7 +153,7 @@ pub async fn list_sender_snaps(
                 .get("guid")
                 .and_then(|p| p.value.parse::<u64>().ok())?;
             let createtxg = e.createtxg.parse::<u64>().ok()?;
-            Some(LocalSnap {
+            Some(SnapshotEntry {
                 name: snap_name,
                 guid,
                 createtxg,
@@ -167,21 +161,22 @@ pub async fn list_sender_snaps(
         })
         .collect();
     snaps.sort_by_key(|s| s.createtxg);
-    Ok(snaps
-        .into_iter()
-        .map(|s| SnapshotRef {
-            name: s.name,
-            guid: s.guid,
-        })
-        .collect())
+    Ok(snaps)
 }
 
-pub fn pick_plan(sender: &[SnapshotRef], receiver: &[SnapshotEntry]) -> SnapshotPlan {
+fn snap_ref(s: &SnapshotEntry) -> SnapshotRef {
+    SnapshotRef {
+        name: s.name.clone(),
+        guid: s.guid,
+    }
+}
+
+pub fn pick_plan(sender: &[SnapshotEntry], receiver: &[SnapshotEntry]) -> SnapshotPlan {
     pick_plan_with_discard(sender, receiver, false)
 }
 
 fn pick_plan_with_discard(
-    sender: &[SnapshotRef],
+    sender: &[SnapshotEntry],
     receiver: &[SnapshotEntry],
     discard_partial_recv: bool,
 ) -> SnapshotPlan {
@@ -190,13 +185,13 @@ fn pick_plan_with_discard(
     };
     if receiver.is_empty() {
         return SnapshotPlan::Full {
-            to: latest.clone(),
+            to: snap_ref(latest),
             discard_partial_recv,
         };
     }
     use std::collections::BTreeSet;
     let recv_guids: BTreeSet<u64> = receiver.iter().map(|s| s.guid).collect();
-    let mut from: Option<&SnapshotRef> = None;
+    let mut from: Option<&SnapshotEntry> = None;
     for s in sender.iter().rev() {
         if recv_guids.contains(&s.guid) {
             from = Some(s);
@@ -205,51 +200,72 @@ fn pick_plan_with_discard(
     }
     match from {
         None => SnapshotPlan::Full {
-            to: latest.clone(),
+            to: snap_ref(latest),
             discard_partial_recv,
         },
         Some(f) if f.guid == latest.guid => SnapshotPlan::Nothing,
         Some(f) => SnapshotPlan::Incremental {
-            from: f.clone(),
-            to: latest.clone(),
+            from: snap_ref(f),
+            to: snap_ref(latest),
             discard_partial_recv,
         },
     }
 }
 
-/// Fallback for the "no common snapshot" case: if the base plan is a
-/// Full send but some sender bookmark's GUID is present on the
-/// receiver, downgrade to an incremental from that bookmark (the
-/// youngest matching one). Any bookmark qualifies — arctern's own
-/// cursors, zrepl's `#zrepl_CURSOR_*` left over from a migration, or a
-/// hand-made `zfs bookmark`. Plans other than Full pass through.
+/// Prefer a sender bookmark as the incremental base when it is a
+/// STRICTLY newer common point than any common snapshot (or when there
+/// is no common snapshot at all and the plan degraded to Full). Any
+/// bookmark qualifies — arctern's own cursors, zrepl's
+/// `#zrepl_CURSOR_*` left over from a migration, or a hand-made
+/// `zfs bookmark`.
+///
+/// The Incremental upgrade matters: after retention prunes the
+/// sender's copy of the receiver's newest snapshot, an OLDER snapshot
+/// may still be common — but an incremental from it is unreceivable
+/// (the receiver's head is newer than the base, so `zfs recv` refuses
+/// with "destination has been modified"). The cursor bookmark IS the
+/// receiver's head; sending from it is the only plan that applies.
+/// Resume / Nothing plans pass through untouched.
 pub fn apply_bookmark_fallback(
     plan: SnapshotPlan,
+    sender: &[SnapshotEntry],
     receiver: &[SnapshotEntry],
     bookmarks: &[BookmarkRef],
 ) -> SnapshotPlan {
-    let SnapshotPlan::Full {
-        to,
-        discard_partial_recv,
-    } = plan
-    else {
-        return plan;
-    };
+    // First replication — Full is correct, not a degraded case.
     if receiver.is_empty() {
-        // First replication — Full is correct, not a degraded case.
-        return SnapshotPlan::Full {
+        return plan;
+    }
+    let (to, discard_partial_recv, base_txg) = match &plan {
+        SnapshotPlan::Full {
             to,
             discard_partial_recv,
-        };
-    }
+        } => (to.clone(), *discard_partial_recv, None),
+        SnapshotPlan::Incremental {
+            from,
+            to,
+            discard_partial_recv,
+        } => {
+            let txg = sender
+                .iter()
+                .find(|s| s.guid == from.guid)
+                .map(|s| s.createtxg);
+            (to.clone(), *discard_partial_recv, txg)
+        }
+        _ => return plan,
+    };
     use std::collections::BTreeSet;
     let recv_guids: BTreeSet<u64> = receiver.iter().map(|s| s.guid).collect();
-    let base = bookmarks
+    let best = bookmarks
         .iter()
         .filter(|b| recv_guids.contains(&b.guid))
         .max_by_key(|b| b.createtxg);
-    match base {
-        Some(b) => SnapshotPlan::IncrementalFromBookmark {
+    match (best, base_txg) {
+        // A common snapshot base at least as new as the bookmark wins:
+        // snapshots can carry holds, bookmarks cannot.
+        (Some(b), Some(txg)) if b.createtxg <= txg => plan,
+        (Some(b), _) if b.guid == to.guid => SnapshotPlan::Nothing,
+        (Some(b), _) => SnapshotPlan::IncrementalFromBookmark {
             from: SnapshotRef {
                 name: b.leaf.clone(),
                 guid: b.guid,
@@ -257,10 +273,7 @@ pub fn apply_bookmark_fallback(
             to,
             discard_partial_recv,
         },
-        None => SnapshotPlan::Full {
-            to,
-            discard_partial_recv,
-        },
+        (None, _) => plan,
     }
 }
 
@@ -303,7 +316,7 @@ pub async fn list_sender_bookmarks(
 }
 
 pub fn pick_plan_with_token(
-    sender: &[SnapshotRef],
+    sender: &[SnapshotEntry],
     receiver: &[SnapshotEntry],
     token: Option<&str>,
     decoded: Option<&zfskit::resume_token::ResumeToken>,
@@ -484,7 +497,7 @@ async fn plan_one_filesystem(
     sender_dataset: &str,
     target_dataset: &str,
     filter: &CompiledFilter,
-) -> Result<(SnapshotPlan, Vec<SnapshotRef>), String> {
+) -> Result<(SnapshotPlan, Vec<SnapshotEntry>), String> {
     let sender = list_sender_snaps(runner, sender_dataset, filter)
         .await
         .map_err(|e| format!("{e}"))?;
@@ -525,7 +538,8 @@ async fn plan_one_filesystem(
                     "push: receiver token failed to decode, treating as stale"
                 );
                 let plan = pick_plan_with_discard(&sender, &receiver, true);
-                let plan = maybe_bookmark_fallback(runner, sender_dataset, plan, &receiver).await;
+                let plan =
+                    maybe_bookmark_fallback(runner, sender_dataset, plan, &sender, &receiver).await;
                 return Ok((plan, sender));
             }
         },
@@ -548,26 +562,32 @@ async fn plan_one_filesystem(
         decoded.as_ref(),
         &bookmarks,
     );
-    let plan = maybe_bookmark_fallback(runner, sender_dataset, plan, &receiver).await;
+    let plan = maybe_bookmark_fallback(runner, sender_dataset, plan, &sender, &receiver).await;
     Ok((plan, sender))
 }
 
 /// Wrap `apply_bookmark_fallback` with the bookmark listing, skipping
 /// the extra `zfs list` entirely when the plan can't benefit. A listing
-/// failure degrades to the original Full plan with a warning — a full
-/// resend is correct, just expensive.
+/// failure degrades to the original plan with a warning — a full resend
+/// (or a refused incremental retried next cycle) is correct, just
+/// expensive.
 async fn maybe_bookmark_fallback(
     runner: &dyn CommandRunner,
     sender_dataset: &str,
     plan: SnapshotPlan,
+    sender: &[SnapshotEntry],
     receiver: &[SnapshotEntry],
 ) -> SnapshotPlan {
-    if !matches!(plan, SnapshotPlan::Full { .. }) || receiver.is_empty() {
+    if !matches!(
+        plan,
+        SnapshotPlan::Full { .. } | SnapshotPlan::Incremental { .. }
+    ) || receiver.is_empty()
+    {
         return plan;
     }
     match list_sender_bookmarks(runner, sender_dataset).await {
         Ok(bookmarks) => {
-            let plan = apply_bookmark_fallback(plan, receiver, &bookmarks);
+            let plan = apply_bookmark_fallback(plan, sender, receiver, &bookmarks);
             if let SnapshotPlan::IncrementalFromBookmark { from, .. } = &plan {
                 tracing::info!(
                     dataset = %sender_dataset,
@@ -579,7 +599,7 @@ async fn maybe_bookmark_fallback(
             plan
         }
         Err(e) => {
-            warn!(dataset = %sender_dataset, error = %e, "push: bookmark listing failed; keeping full-send plan");
+            warn!(dataset = %sender_dataset, error = %e, "push: bookmark listing failed; keeping the snapshot-based plan");
             plan
         }
     }
@@ -784,7 +804,7 @@ async fn run_one_filesystem(
     sender_dataset: &str,
     target_dataset: &str,
     plan: &SnapshotPlan,
-    sender_snaps: &[SnapshotRef],
+    sender_snaps: &[SnapshotEntry],
     flags: &SendFlagsConfig,
     limiter: Option<&RateLimiter>,
     cancel: &CancellationToken,
@@ -898,7 +918,7 @@ async fn advance_cursor(
 async fn sweep_step_holds(
     runner: &dyn CommandRunner,
     sender_dataset: &str,
-    sender_snaps: &[SnapshotRef],
+    sender_snaps: &[SnapshotEntry],
     to_snap_full: &str,
     tag: &str,
 ) {
@@ -1690,7 +1710,14 @@ impl PushJob {
 mod tests {
     use super::*;
 
-    fn s(name: &str, guid: u64) -> SnapshotRef {
+    fn s(name: &str, guid: u64) -> SnapshotEntry {
+        SnapshotEntry {
+            name: name.into(),
+            guid,
+            createtxg: guid,
+        }
+    }
+    fn r(name: &str, guid: u64) -> SnapshotRef {
         SnapshotRef {
             name: name.into(),
             guid,
@@ -1716,7 +1743,7 @@ mod tests {
         assert_eq!(
             pick_plan(&sender, &[]),
             SnapshotPlan::Full {
-                to: s("b", 2),
+                to: r("b", 2),
                 discard_partial_recv: false,
             }
         );
@@ -1736,8 +1763,8 @@ mod tests {
         assert_eq!(
             pick_plan(&sender, &receiver),
             SnapshotPlan::Incremental {
-                from: s("b", 2),
-                to: s("c", 3),
+                from: r("b", 2),
+                to: r("c", 3),
                 discard_partial_recv: false,
             }
         );
@@ -1754,8 +1781,8 @@ mod tests {
         assert_eq!(
             pick_plan(&sender, &receiver),
             SnapshotPlan::Incremental {
-                from: s("zrepl_001", 11587258101628135412),
-                to: s("manual_001", 14719774020884296672),
+                from: r("zrepl_001", 11587258101628135412),
+                to: r("manual_001", 14719774020884296672),
                 discard_partial_recv: false,
             }
         );
@@ -1775,7 +1802,7 @@ mod tests {
     #[test]
     fn build_send_args_full_with_all_flags() {
         let plan = SnapshotPlan::Full {
-            to: s("snap1", 1),
+            to: r("snap1", 1),
             discard_partial_recv: false,
         };
         let args = build_send_args(&plan, "tank/data", &SendFlagsConfig::default()).unwrap();
@@ -1873,7 +1900,7 @@ mod tests {
         // Mirrors the zrepl-migration shape: receiver's newest snapshot
         // was pruned on the sender, but the cursor bookmark survives.
         let plan = SnapshotPlan::Full {
-            to: s("zrepl_new", 42),
+            to: r("zrepl_new", 42),
             discard_partial_recv: false,
         };
         let receiver = vec![e("zrepl_old", 13681249742552200977, 100)];
@@ -1889,7 +1916,7 @@ mod tests {
                 createtxg: 999,
             },
         ];
-        let got = apply_bookmark_fallback(plan, &receiver, &bookmarks);
+        let got = apply_bookmark_fallback(plan, &[], &receiver, &bookmarks);
         assert_eq!(
             got,
             SnapshotPlan::IncrementalFromBookmark {
@@ -1897,7 +1924,7 @@ mod tests {
                     name: "zrepl_CURSOR_G_bddd90278c3a7711_J_push_to_local".into(),
                     guid: 13681249742552200977,
                 },
-                to: s("zrepl_new", 42),
+                to: r("zrepl_new", 42),
                 discard_partial_recv: false,
             }
         );
@@ -1906,7 +1933,7 @@ mod tests {
     #[test]
     fn bookmark_fallback_picks_youngest_matching_base() {
         let plan = SnapshotPlan::Full {
-            to: s("new", 42),
+            to: r("new", 42),
             discard_partial_recv: true,
         };
         let receiver = vec![e("a", 1, 10), e("b", 2, 20)];
@@ -1922,7 +1949,7 @@ mod tests {
                 createtxg: 20,
             },
         ];
-        let got = apply_bookmark_fallback(plan, &receiver, &bookmarks);
+        let got = apply_bookmark_fallback(plan, &[], &receiver, &bookmarks);
         let SnapshotPlan::IncrementalFromBookmark {
             from,
             discard_partial_recv,
@@ -1940,7 +1967,7 @@ mod tests {
     #[test]
     fn bookmark_fallback_keeps_full_when_no_guid_matches() {
         let plan = SnapshotPlan::Full {
-            to: s("new", 42),
+            to: r("new", 42),
             discard_partial_recv: false,
         };
         let receiver = vec![e("a", 1, 10)];
@@ -1949,7 +1976,7 @@ mod tests {
             guid: 999,
             createtxg: 10,
         }];
-        let got = apply_bookmark_fallback(plan.clone(), &receiver, &bookmarks);
+        let got = apply_bookmark_fallback(plan.clone(), &[], &receiver, &bookmarks);
         assert_eq!(got, plan);
     }
 
@@ -1957,7 +1984,7 @@ mod tests {
     fn bookmark_fallback_ignores_first_replication_and_non_full_plans() {
         // Empty receiver: Full is the correct first-replication plan.
         let full = SnapshotPlan::Full {
-            to: s("new", 42),
+            to: r("new", 42),
             discard_partial_recv: false,
         };
         let bookmarks = vec![BookmarkRef {
@@ -1965,17 +1992,101 @@ mod tests {
             guid: 42,
             createtxg: 10,
         }];
-        assert_eq!(apply_bookmark_fallback(full.clone(), &[], &bookmarks), full);
-        // Non-Full plans pass through untouched.
+        assert_eq!(
+            apply_bookmark_fallback(full.clone(), &[], &[], &bookmarks),
+            full
+        );
+        // An Incremental whose bookmarks share no GUID with the receiver
+        // passes through untouched.
         let incr = SnapshotPlan::Incremental {
-            from: s("a", 1),
-            to: s("b", 2),
+            from: r("a", 1),
+            to: r("b", 2),
             discard_partial_recv: false,
         };
+        let sender = vec![s("a", 1), s("b", 2)];
         let receiver = vec![e("a", 1, 10)];
         assert_eq!(
-            apply_bookmark_fallback(incr.clone(), &receiver, &bookmarks),
+            apply_bookmark_fallback(incr.clone(), &sender, &receiver, &bookmarks),
             incr
+        );
+    }
+
+    /// The 2026-07-09 production incident: retention pruned the sender's
+    /// copy of the receiver's newest snapshots, an OLDER snapshot was
+    /// still common, and the planner sent an incremental from it — which
+    /// the receiver refused ("destination has been modified": its head
+    /// was newer than the base). The cursor bookmark carried the
+    /// receiver's head GUID the whole time and must win as the base.
+    #[test]
+    fn bookmark_newer_than_common_snapshot_replaces_incremental_base() {
+        // Sender: old common snapshot (txg 10) + brand-new one (txg 40).
+        let sender = vec![s("old_common", 10), s("new", 40)];
+        // Receiver also has GUID 30 — the pruned-on-sender head.
+        let receiver = vec![e("", 10, 0), e("", 30, 0)];
+        let bookmarks = vec![BookmarkRef {
+            leaf: "arctern_cursor_G_1e_J_push_P_mira".into(),
+            guid: 30,
+            createtxg: 30,
+        }];
+        let plan = pick_plan(&sender, &receiver);
+        // Baseline picks the (unreceivable) old snapshot base...
+        assert_eq!(
+            plan,
+            SnapshotPlan::Incremental {
+                from: r("old_common", 10),
+                to: r("new", 40),
+                discard_partial_recv: false,
+            }
+        );
+        // ...and the fallback upgrades it to the cursor bookmark.
+        assert_eq!(
+            apply_bookmark_fallback(plan, &sender, &receiver, &bookmarks),
+            SnapshotPlan::IncrementalFromBookmark {
+                from: SnapshotRef {
+                    name: "arctern_cursor_G_1e_J_push_P_mira".into(),
+                    guid: 30,
+                },
+                to: r("new", 40),
+                discard_partial_recv: false,
+            }
+        );
+    }
+
+    #[test]
+    fn common_snapshot_at_least_as_new_as_bookmark_keeps_snapshot_base() {
+        // Snapshots can carry holds; bookmarks cannot — prefer the
+        // snapshot when it is the same replication point.
+        let sender = vec![s("common", 30), s("new", 40)];
+        let receiver = vec![e("", 30, 0)];
+        let bookmarks = vec![BookmarkRef {
+            leaf: "cursor_same_point".into(),
+            guid: 30,
+            createtxg: 30,
+        }];
+        let plan = pick_plan(&sender, &receiver);
+        assert_eq!(
+            apply_bookmark_fallback(plan.clone(), &sender, &receiver, &bookmarks),
+            plan
+        );
+    }
+
+    #[test]
+    fn bookmark_of_latest_snapshot_means_nothing_to_do() {
+        // The receiver already holds the sender's newest GUID; the only
+        // sender-side witness of that is the bookmark. Sending an
+        // incremental to the same point would be an empty stream.
+        let sender = vec![s("old_common", 10), s("new", 40)];
+        let receiver = vec![e("", 10, 0), e("", 40, 0)];
+        let bookmarks = vec![BookmarkRef {
+            leaf: "cursor_at_head".into(),
+            guid: 40,
+            createtxg: 40,
+        }];
+        let plan = pick_plan(&sender, &receiver);
+        assert_eq!(plan, SnapshotPlan::Nothing);
+        assert_eq!(
+            apply_bookmark_fallback(plan, &sender, &receiver, &bookmarks),
+            SnapshotPlan::Nothing
         );
     }
 
@@ -1986,7 +2097,7 @@ mod tests {
                 name: "zrepl_CURSOR_G_bddd_J_push".into(),
                 guid: 1,
             },
-            to: s("zrepl_new", 2),
+            to: r("zrepl_new", 2),
             discard_partial_recv: false,
         };
         let args = build_send_args(&plan, "tank/data", &SendFlagsConfig::default()).unwrap();
@@ -2013,7 +2124,7 @@ mod tests {
                 name: "zrepl_CURSOR_G_bddd_J_push".into(),
                 guid: 1,
             },
-            to: s("zrepl_new", 2),
+            to: r("zrepl_new", 2),
             discard_partial_recv: false,
         };
         let h = build_send_header(&plan, &SendFlagsConfig::default()).unwrap();

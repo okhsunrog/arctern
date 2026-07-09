@@ -17,10 +17,10 @@
 
 ![Dashboard](docs/screenshots/dashboard.png)
 
-> **Status:** pre-1.0, but real. The design is settled (see
-> [`ARCHITECTURE.md`](ARCHITECTURE.md)) and arctern runs in production on the
-> author's machines, where it replaced zrepl for laptop→NAS backups. The HTTP
-> API and TOML config schema may still change before 1.0.
+> **Status:** in production — arctern replaced zrepl for the author's
+> laptop→NAS backups and ships as static binaries. The design is settled
+> ([`ARCHITECTURE.md`](ARCHITECTURE.md)); pre-1.0 only in the sense that
+> the TOML config schema and HTTP API may still change between releases.
 
 ## What it is
 

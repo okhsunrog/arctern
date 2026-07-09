@@ -19,7 +19,41 @@
 }
 
 /* Faint blueprint grid behind the whole console — atmosphere without
-   noise. Dark mode only; light mode stays clean paper. */
+   noise, in both themes. Light mode is "engineering paper in daylight":
+   a cool tinted sheet with the same grid, so the white cards float
+   above it instead of dissolving into a flat white page. */
+html:not(.dark) body {
+  background-color: color-mix(in oklab, var(--ui-primary) 2.5%, var(--ui-color-neutral-50));
+  background-image:
+    radial-gradient(
+      ellipse 80% 50% at 50% -10%,
+      color-mix(in oklab, var(--ui-primary) 6%, transparent),
+      transparent
+    ),
+    linear-gradient(
+      color-mix(in oklab, var(--ui-color-neutral-400) 22%, transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      90deg,
+      color-mix(in oklab, var(--ui-color-neutral-400) 22%, transparent) 1px,
+      transparent 1px
+    );
+  background-size:
+    100% 100%,
+    32px 32px,
+    32px 32px;
+  background-attachment: fixed;
+}
+
+/* Cards and panels get a whisper of elevation in light mode — the
+   ring alone reads flat against the tinted sheet. */
+html:not(.dark) .ring.ring-default {
+  box-shadow:
+    0 1px 2px rgb(16 24 40 / 0.04),
+    0 1px 3px rgb(16 24 40 / 0.06);
+}
+
 .dark body {
   background-image:
     radial-gradient(
@@ -65,6 +99,9 @@
   border-inline-start-color: var(--ui-info);
 }
 .rail-idle {
+  border-inline-start-color: var(--ui-color-neutral-300);
+}
+.dark .rail-idle {
   border-inline-start-color: var(--ui-color-neutral-700);
 }
 

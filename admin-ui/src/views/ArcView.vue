@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import {
   CategoryScale,
   Chart as ChartJS,
+  Filler,
   Legend,
   LineController,
   LineElement,
@@ -10,7 +11,10 @@ import {
   PointElement,
   Tooltip,
 } from 'chart.js'
+import type { ChartData, ChartOptions } from 'chart.js'
 import { Line } from 'vue-chartjs'
+import { useColorMode } from '@vueuse/core'
+import { areaGradient, baseOptions, chartColors, lineDataset } from '../utils/chartTheme'
 import { useHost } from '../composables/useHost'
 import { useArc } from '../composables/useArc'
 import { formatBytes } from '../utils/format'
@@ -22,10 +26,12 @@ ChartJS.register(
   LineController,
   LineElement,
   PointElement,
+  Filler,
   Tooltip,
   Legend,
 )
 
+const mode = useColorMode({ emitAuto: false })
 const { host, baseUrl } = useHost()
 const { arc, history, error, loading } = useArc(5000, true, 720, baseUrl.value)
 const title = computed(() => (host.value ? `${host.value} · ARC` : 'ARC'))
@@ -33,9 +39,9 @@ const title = computed(() => (host.value ? `${host.value} · ARC` : 'ARC'))
 // Reverse so the chart goes oldest → newest.
 const ordered = computed(() => [...history.value].reverse())
 
-const labels = computed(() =>
-  ordered.value.map((p) => new Date(p.timestamp * 1000).toLocaleTimeString()),
-)
+const hhmm = (ts: number) =>
+  new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+const labels = computed(() => ordered.value.map((p) => hhmm(p.timestamp)))
 
 // Hit ratio is computed *per-sample-delta* — kernel counters are
 // monotonic since boot, so the running ratio drifts toward whatever
@@ -53,79 +59,83 @@ const hitRateSeries = computed(() => {
     const total = dh + dm
     if (total === 0) continue
     out.push({
-      x: new Date(cur.timestamp * 1000).toLocaleTimeString(),
+      x: hhmm(cur.timestamp),
       y: Math.round((dh / total) * 1000) / 10,
     })
   }
   return out
 })
 
-const sizeData = computed(() => ({
-  labels: labels.value,
-  datasets: [
-    {
-      label: 'size',
-      data: ordered.value.map((p) => Number(p.size)),
-      borderColor: '#3b82f6',
-      backgroundColor: 'rgba(59, 130, 246, 0.15)',
-      tension: 0.25,
-      fill: true,
-    },
-    {
-      label: 'c (target)',
-      data: ordered.value.map((p) => Number(p.c)),
-      borderColor: '#94a3b8',
-      borderDash: [4, 4],
-      tension: 0,
-      fill: false,
-    },
-  ],
-}))
+const sizeData = computed(() => {
+  void mode.value
+  const c = chartColors()
+  return {
+    labels: labels.value,
+    datasets: [
+      lineDataset({
+        label: 'size',
+        data: ordered.value.map((p) => Number(p.size)),
+        borderColor: c.primary,
+        backgroundColor: areaGradient(c.primary),
+        fill: true,
+      }),
+      lineDataset({
+        label: 'c (target)',
+        data: ordered.value.map((p) => Number(p.c)),
+        borderColor: c.neutral,
+        borderWidth: 1.5,
+        borderDash: [5, 5],
+        tension: 0,
+        fill: false,
+      }),
+    ],
+  } as ChartData<'line', number[], string>
+})
 
-const rateData = computed(() => ({
-  labels: hitRateSeries.value.map((p) => p.x),
-  datasets: [
-    {
-      label: 'hit rate (delta %)',
-      data: hitRateSeries.value.map((p) => p.y),
-      borderColor: '#10b981',
-      backgroundColor: 'rgba(16, 185, 129, 0.15)',
-      tension: 0.25,
-      fill: true,
-    },
-  ],
-}))
+const rateData = computed(() => {
+  void mode.value
+  const c = chartColors()
+  return {
+    labels: hitRateSeries.value.map((p) => p.x),
+    datasets: [
+      lineDataset({
+        label: 'hit rate',
+        data: hitRateSeries.value.map((p) => p.y),
+        borderColor: c.success,
+        backgroundColor: areaGradient(c.success),
+        fill: true,
+      }),
+    ],
+  } as ChartData<'line', number[], string>
+})
 
-const sizeOpts = {
-  responsive: true,
-  maintainAspectRatio: false,
-  plugins: {
-    legend: { position: 'top' as const },
-    tooltip: {
-      callbacks: {
-        label: (ctx: { dataset: { label?: string }; parsed: { y: number | null } }) =>
-          `${ctx.dataset.label}: ${ctx.parsed.y == null ? '—' : formatBytes(ctx.parsed.y)}`,
-      },
-    },
-  },
-  scales: {
-    y: {
-      beginAtZero: true,
-      ticks: {
-        callback: (v: string | number) => formatBytes(typeof v === 'number' ? v : Number(v)),
-      },
-    },
-  },
-}
+const sizeOpts = computed(() => {
+  void mode.value
+  const o = baseOptions({
+    yTick: (v) => formatBytes(v),
+    tooltipValue: (ctx) =>
+      ` ${ctx.dataset.label}: ${ctx.parsed.y == null ? '—' : formatBytes(ctx.parsed.y)}`,
+  })
+  o.scales.y = { ...o.scales.y, beginAtZero: true } as typeof o.scales.y
+  return o as unknown as ChartOptions<'line'>
+})
 
-const rateOpts = {
-  responsive: true,
-  maintainAspectRatio: false,
-  plugins: { legend: { display: false } },
-  scales: {
-    y: { beginAtZero: true, max: 100, ticks: { callback: (v: string | number) => `${v}%` } },
-  },
-}
+const rateOpts = computed(() => {
+  void mode.value
+  const o = baseOptions({
+    yTick: (v) => `${v}%`,
+    tooltipValue: (ctx) => ` hit rate: ${ctx.parsed.y}%`,
+  })
+  // Zoom into where the signal lives: pinning the axis at 0-100 flattens
+  // a cache that hovers near 100% into a line glued to the ceiling.
+  const floor = Math.min(90, ...hitRateSeries.value.map((p) => p.y))
+  o.scales.y = {
+    ...o.scales.y,
+    min: Math.max(0, Math.floor(floor / 10) * 10 - 5),
+    max: 100,
+  } as typeof o.scales.y
+  return o as unknown as ChartOptions<'line'>
+})
 </script>
 
 <template>
@@ -148,7 +158,20 @@ const rateOpts = {
         <div v-else class="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <UCard>
             <template #header>
-              <div class="font-semibold">Size vs. target</div>
+              <div class="flex items-center justify-between">
+                <div class="font-semibold">Size vs. target</div>
+                <div class="flex items-center gap-3 text-xs text-muted">
+                  <span class="inline-flex items-center gap-1.5">
+                    <span class="inline-block w-3 h-0.5 rounded bg-primary" /> size
+                  </span>
+                  <span class="inline-flex items-center gap-1.5">
+                    <span
+                      class="inline-block w-3 border-t-2 border-dashed border-neutral-400 dark:border-neutral-500"
+                    />
+                    c (target)
+                  </span>
+                </div>
+              </div>
             </template>
             <div class="h-64">
               <Line :data="sizeData" :options="sizeOpts" />

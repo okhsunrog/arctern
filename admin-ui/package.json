@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vp dev",
-    "build": "vp exec vue-tsc --build && vp build",
+    "build": "vp build && vp exec vue-tsc --build",
     "preview": "vp preview",
     "openapi-ts": "openapi-ts"
   },

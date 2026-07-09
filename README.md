@@ -19,8 +19,8 @@
 
 > **Status:** in production — arctern replaced zrepl for the author's
 > laptop→NAS backups and ships as static binaries. The design is settled
-> ([`ARCHITECTURE.md`](ARCHITECTURE.md)); pre-1.0 only in the sense that
-> the TOML config schema and HTTP API may still change between releases.
+> ([`ARCHITECTURE.md`](ARCHITECTURE.md)); the TOML config schema and HTTP
+> API may still change between releases.
 
 ## What it is
 

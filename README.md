@@ -11,6 +11,7 @@
 <p align="center">
   <a href="https://github.com/okhsunrog/arctern/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/okhsunrog/arctern/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://github.com/okhsunrog/arctern/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/okhsunrog/arctern"></a>
+  <a href="https://aur.archlinux.org/packages/arctern-bin"><img alt="AUR version" src="https://img.shields.io/aur/version/arctern-bin"></a>
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
   <img alt="OpenZFS" src="https://img.shields.io/badge/OpenZFS-%E2%89%A5%202.2-lightgrey.svg">
 </p>
@@ -121,9 +122,25 @@ SSH):
 
 ## Install
 
-Grab a static binary from the [latest release](https://github.com/okhsunrog/arctern/releases/latest) —
-musl-linked with the web console embedded, so there is nothing else to
-install (no libraries, no glibc version requirements):
+### Arch Linux
+
+[`arctern-bin`](https://aur.archlinux.org/packages/arctern-bin) is available
+from the AUR for x86_64 and aarch64:
+
+```sh
+paru -S arctern-bin   # or use another AUR helper
+```
+
+The package installs the static binary, systemd unit, and an example config at
+`/usr/share/doc/arctern/example-config.toml`. Create your production config at
+`/etc/arctern/arctern.toml`, then continue with the quick start below.
+
+### Other Linux distributions
+
+Grab a static binary from the
+[latest release](https://github.com/okhsunrog/arctern/releases/latest) —
+musl-linked with the web console embedded, so there is nothing else to install
+(no libraries or glibc version requirements):
 
 ```sh
 arch=$(uname -m)   # x86_64 or aarch64

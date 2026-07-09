@@ -137,7 +137,6 @@ impl SnapJob {
     /// Per-dataset failures are logged and accumulated into a summary
     /// string; the cycle still completes the work it can.
     async fn run_cycle(&self, ctx: &JobContext) -> Result<(), String> {
-        let runner = ctx.runner.as_ref();
         // 1. List every filesystem + volume under any pool a filter
         //    references. Scoping to those pools (rather than a global
         //    list) keeps unrelated pools out of the result and makes
@@ -154,7 +153,9 @@ impl SnapJob {
             roots,
             ..ListOptions::default()
         };
-        let entries = zfskit::dataset::list(runner, &list_opts)
+        let entries = ctx
+            .zfs
+            .list_datasets(&list_opts)
             .await
             .map_err(|e| format!("list datasets: {e}"))?;
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
@@ -169,8 +170,14 @@ impl SnapJob {
         for ds in &targets {
             let full = format!("{ds}@{tag}");
             tracing::info!(dataset = %ds, snapshot = %tag, "creating snapshot");
-            match zfskit::dataset::snapshot(runner, &full, &SnapshotOptions::new()).await {
-                Ok(()) => {}
+            match ctx
+                .zfs
+                .dataset(*ds)
+                .map_err(|e| e.to_string())?
+                .snapshot(&tag, &SnapshotOptions::new())
+                .await
+            {
+                Ok(_) => {}
                 Err(zfskit::ZfsError::SnapshotExists { .. }) => {
                     warn!(snapshot = %full, "snapshot already exists; treating as no-op");
                 }
@@ -186,7 +193,7 @@ impl SnapJob {
         //    local (so a stale dataset's youngest snapshot does not
         //    skew the bucket math for an active dataset).
         for ds in &targets {
-            if let Err(e) = super::prune_dataset(runner, &self.config.pruning().keep, ds).await {
+            if let Err(e) = super::prune_dataset(&ctx.zfs, &self.config.pruning().keep, ds).await {
                 warn!(dataset = %ds, error = %e, "prune cycle errored");
                 errors.push(format!("prune {ds}: {e}"));
             }

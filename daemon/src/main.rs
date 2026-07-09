@@ -13,10 +13,13 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+use std::future::Future;
 use std::io::{ErrorKind, Write};
+use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
@@ -33,6 +36,62 @@ mod peer;
 mod router;
 mod state;
 mod stdinserver;
+
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(20);
+const SHUTDOWN_STAGE_SERVERS: u8 = 0;
+const SHUTDOWN_STAGE_JOBS: u8 = 1;
+const SHUTDOWN_STAGE_PEERS: u8 = 2;
+const SHUTDOWN_STAGE_ARC: u8 = 3;
+const SHUTDOWN_STAGE_RETENTION: u8 = 4;
+const SHUTDOWN_STAGE_SOCKET: u8 = 5;
+const SHUTDOWN_STAGE_COMPLETE: u8 = 6;
+
+fn shutdown_stage_name(stage: u8) -> &'static str {
+    match stage {
+        SHUTDOWN_STAGE_SERVERS => "HTTP and UNIX server drain",
+        SHUTDOWN_STAGE_JOBS => "job shutdown",
+        SHUTDOWN_STAGE_PEERS => "peer reconnect shutdown",
+        SHUTDOWN_STAGE_ARC => "ARC sweeper shutdown",
+        SHUTDOWN_STAGE_RETENTION => "retention sweeper shutdown",
+        SHUTDOWN_STAGE_SOCKET => "UNIX socket cleanup",
+        SHUTDOWN_STAGE_COMPLETE => "complete",
+        _ => "unknown",
+    }
+}
+
+async fn supervise_shutdown<F>(
+    cancellation: tokio_util::sync::CancellationToken,
+    shutdown: F,
+    stage: Arc<AtomicU8>,
+    timeout: Duration,
+    socket_path: PathBuf,
+) -> eyre::Result<()>
+where
+    F: Future<Output = eyre::Result<()>>,
+{
+    tokio::pin!(shutdown);
+    tokio::select! {
+        result = &mut shutdown => result,
+        _ = cancellation.cancelled() => {
+            match tokio::time::timeout(timeout, &mut shutdown).await {
+                Ok(result) => result,
+                Err(_) => {
+                    let stage = shutdown_stage_name(stage.load(Ordering::SeqCst));
+                    tracing::error!(stage, timeout_seconds = timeout.as_secs(), "shutdown deadline exceeded");
+                    if let Err(error) = std::fs::remove_file(&socket_path)
+                        && error.kind() != ErrorKind::NotFound
+                    {
+                        tracing::warn!(path = %socket_path.display(), %error, "remove UNIX socket after shutdown timeout failed");
+                    }
+                    Err(eyre::eyre!(
+                        "shutdown timed out after {}s during {stage}",
+                        timeout.as_secs()
+                    ))
+                }
+            }
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "arctern", version, about = "ZFS replication daemon")]
@@ -56,6 +115,11 @@ enum Command {
         /// without a readable, valid config.
         #[arg(long, default_value = "/etc/arctern/arctern.toml")]
         config: PathBuf,
+
+        /// Loopback address for the admin UI and HTTP API.
+        /// Port 0 is useful for isolated test instances.
+        #[arg(long, default_value = "127.0.0.1:7878")]
+        http_address: SocketAddr,
     },
     /// SSH transport entry point invoked by sshd via authorized_keys
     /// `command="..."`. The single positional is the identity name —
@@ -78,7 +142,11 @@ enum Command {
 fn main() -> eyre::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Daemon { socket, config } => run_daemon(socket, config),
+        Command::Daemon {
+            socket,
+            config,
+            http_address,
+        } => run_daemon(socket, config, http_address),
         Command::StdinserverDispatch { identity, config } => {
             run_stdinserver_dispatch(identity, config)
         }
@@ -184,7 +252,11 @@ pub(crate) fn default_socket_path() -> PathBuf {
 }
 
 #[tokio::main(flavor = "multi_thread")]
-async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::Result<()> {
+async fn run_daemon(
+    socket_arg: Option<PathBuf>,
+    config_path: PathBuf,
+    http_address: SocketAddr,
+) -> eyre::Result<()> {
     // Load and validate the config BEFORE binding any socket — fail
     // loudly if the operator's file is missing or malformed.
     let config = arctern_config::load_from_path(&config_path)
@@ -210,12 +282,12 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
     // host, so its local CommandRunner is RealRunner. SshCommandRunner
     // is kept as a dev/test override: setting ZFSKIT_SSH_TARGET
     // selects it, matching the integration-test harness convention.
-    let runner: Arc<dyn zfskit::runner::CommandRunner> = match std::env::var("ZFSKIT_SSH_TARGET") {
-        Ok(s) if !s.is_empty() => Arc::new(
+    let zfs = match std::env::var("ZFSKIT_SSH_TARGET") {
+        Ok(s) if !s.is_empty() => zfskit::Zfs::with_runner(
             zfskit::SshCommandRunner::from_env()
                 .map_err(|e| eyre::eyre!("ZFSKIT_SSH_TARGET configuration: {e}"))?,
         ),
-        _ => Arc::new(zfskit::runner::RealRunner),
+        _ => zfskit::Zfs::new(),
     };
 
     // Resolve the state directory and ensure it exists; SQLite + the
@@ -226,6 +298,9 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
         .unwrap_or_else(|| PathBuf::from("/var/lib/arctern"));
     std::fs::create_dir_all(&state_dir)
         .map_err(|e| eyre::eyre!("create state_dir {}: {e}", state_dir.display()))?;
+
+    let admin_auth = auth::AdminAuth::load_or_create(&state_dir)
+        .map_err(|e| eyre::eyre!("load or create admin token in {}: {e}", state_dir.display()))?;
 
     let pool = Arc::new(
         state::open(&state_dir)
@@ -265,7 +340,7 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
 
     let manager = Arc::new(jobs::JobManager::new());
     let ctx = jobs::JobContext {
-        runner: runner.clone(),
+        zfs: zfs.clone(),
         state: Some(pool.clone()),
     };
     // One eager-reconnect background task per [[peers]] entry. Each
@@ -324,11 +399,12 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
 
     let shutdown_token = tokio_util::sync::CancellationToken::new();
     let app_state = app_state::AppState {
+        auth: admin_auth.clone(),
         manager: manager.clone(),
         peers: peers_state.clone(),
         events: events_tx,
         state: pool.clone(),
-        runner: runner.clone(),
+        zfs: zfs.clone(),
         config_path: config_path
             .canonicalize()
             .unwrap_or_else(|_| config_path.clone()),
@@ -337,14 +413,15 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
     let app = router::build_router(app_state.clone());
     let loopback_app = router::build_loopback_router(app_state);
 
-    // Loopback TCP serves the embedded admin UI + the same API; the
-    // perimeter is the 127.0.0.1 bind. Hardcoded port matches the
-    // dev-proxy in admin-ui/vite.config.ts.
-    let loopback_addr: std::net::SocketAddr = "127.0.0.1:7878".parse().unwrap();
-    let loopback_listener = tokio::net::TcpListener::bind(loopback_addr).await?;
+    // Loopback TCP serves the embedded admin UI + the same API. The default
+    // port matches the dev proxy; tests use port 0 to avoid colliding with an
+    // installed daemon.
+    let loopback_listener = tokio::net::TcpListener::bind(http_address).await?;
+    let loopback_addr = loopback_listener.local_addr()?;
 
     println!("LISTEN unix:{}", socket_path.display());
     println!("LISTEN http://{loopback_addr}");
+    println!("ADMIN_TOKEN_FILE {}", admin_auth.token_path().display());
     std::io::stdout().flush().ok();
 
     tracing::info!(path = %socket_path.display(), "arctern daemon listening");
@@ -355,6 +432,8 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
     let cleanup_path = socket_path.clone();
     let shutdown_token_uds = shutdown_token.clone();
     let shutdown_token_tcp = shutdown_token.clone();
+    let shutdown_deadline_token = shutdown_token.clone();
+    let shutdown_after_server_token = shutdown_token.clone();
     tokio::spawn(async move {
         tokio::select! {
             _ = sigterm.recv() => tracing::info!("SIGTERM"),
@@ -362,21 +441,6 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
         }
         shutdown_token.cancel();
     });
-    // Watchdog: if orderly teardown (connection drain, job joins, ssh
-    // session closes) hasn't finished shortly after the signal, exit
-    // anyway — better a clean forced exit than systemd's SIGKILL after
-    // TimeoutStopSec with the unit landing in `failed`.
-    {
-        let watchdog_token = shutdown_token_uds.clone();
-        let watchdog_socket = socket_path.clone();
-        tokio::spawn(async move {
-            watchdog_token.cancelled().await;
-            tokio::time::sleep(Duration::from_secs(20)).await;
-            tracing::warn!("shutdown watchdog fired; forcing exit");
-            let _ = std::fs::remove_file(&watchdog_socket);
-            std::process::exit(0);
-        });
-    }
 
     let uds_serve = axum::serve(
         listener,
@@ -387,17 +451,104 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
     let tcp_serve = axum::serve(loopback_listener, loopback_app.into_make_service())
         .with_graceful_shutdown(async move { shutdown_token_tcp.cancelled().await });
 
-    let result = tokio::try_join!(uds_serve.into_future(), tcp_serve.into_future()).map(|_| ());
-    manager.shutdown(Duration::from_secs(5)).await;
-    peers_cancel.cancel();
-    for h in reconnect_handles {
-        let _ = h.await;
+    let shutdown_stage = Arc::new(AtomicU8::new(SHUTDOWN_STAGE_SERVERS));
+    let orderly_stage = shutdown_stage.clone();
+    let timeout_cleanup_path = cleanup_path.clone();
+    let orderly_shutdown = async move {
+        let result = tokio::try_join!(uds_serve.into_future(), tcp_serve.into_future()).map(|_| ());
+        // A listener can also terminate independently of SIGTERM/SIGINT.
+        // Start the same bounded cleanup deadline in that case.
+        shutdown_after_server_token.cancel();
+
+        orderly_stage.store(SHUTDOWN_STAGE_JOBS, Ordering::SeqCst);
+        manager.shutdown(Duration::from_secs(5)).await;
+
+        orderly_stage.store(SHUTDOWN_STAGE_PEERS, Ordering::SeqCst);
+        peers_cancel.cancel();
+        for handle in reconnect_handles {
+            let _ = handle.await;
+        }
+
+        orderly_stage.store(SHUTDOWN_STAGE_ARC, Ordering::SeqCst);
+        arc_cancel.cancel();
+        let _ = arc_sweeper.await;
+
+        orderly_stage.store(SHUTDOWN_STAGE_RETENTION, Ordering::SeqCst);
+        trim_cancel.cancel();
+        let _ = trim_sweeper.await;
+
+        orderly_stage.store(SHUTDOWN_STAGE_SOCKET, Ordering::SeqCst);
+        let _ = std::fs::remove_file(&cleanup_path);
+        orderly_stage.store(SHUTDOWN_STAGE_COMPLETE, Ordering::SeqCst);
+
+        result?;
+        Ok(())
+    };
+
+    supervise_shutdown(
+        shutdown_deadline_token,
+        orderly_shutdown,
+        shutdown_stage,
+        SHUTDOWN_TIMEOUT,
+        timeout_cleanup_path,
+    )
+    .await
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+
+    fn temp_socket_path() -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "arctern-shutdown-test-{}-{nonce}.sock",
+            std::process::id()
+        ))
     }
-    arc_cancel.cancel();
-    let _ = arc_sweeper.await;
-    trim_cancel.cancel();
-    let _ = trim_sweeper.await;
-    let _ = std::fs::remove_file(&cleanup_path);
-    result?;
-    Ok(())
+
+    #[tokio::test]
+    async fn shutdown_completes_without_waiting_for_cancellation() {
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let stage = Arc::new(AtomicU8::new(SHUTDOWN_STAGE_SERVERS));
+        let socket_path = temp_socket_path();
+
+        supervise_shutdown(
+            cancellation,
+            async { Ok(()) },
+            stage,
+            Duration::from_millis(20),
+            socket_path,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_timeout_reports_stage_and_removes_socket() {
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let cancellation_from_shutdown = cancellation.clone();
+        let stage = Arc::new(AtomicU8::new(SHUTDOWN_STAGE_PEERS));
+        let socket_path = temp_socket_path();
+        std::fs::write(&socket_path, b"test socket placeholder").unwrap();
+
+        let error = supervise_shutdown(
+            cancellation,
+            async move {
+                cancellation_from_shutdown.cancel();
+                std::future::pending().await
+            },
+            stage,
+            Duration::from_millis(20),
+            socket_path.clone(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("peer reconnect shutdown"));
+        assert!(!socket_path.exists());
+    }
 }

@@ -121,7 +121,6 @@ async fn run_and_record(job: &PruneJob, ctx: &JobContext, job_name: &str, interv
 
 impl PruneJob {
     async fn run_cycle(&self, ctx: &JobContext) -> Result<(), String> {
-        let runner = ctx.runner.as_ref();
         let mut pools: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for f in &self.config.filesystems {
             let pool = f.path.split('/').next().unwrap_or(&f.path).to_string();
@@ -134,7 +133,9 @@ impl PruneJob {
             roots,
             ..ListOptions::default()
         };
-        let entries = zfskit::dataset::list(runner, &list_opts)
+        let entries = ctx
+            .zfs
+            .list_datasets(&list_opts)
             .await
             .map_err(|e| format!("list datasets: {e}"))?;
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
@@ -144,7 +145,7 @@ impl PruneJob {
         }
         let mut errors: Vec<String> = Vec::new();
         for ds in &targets {
-            if let Err(e) = super::prune_dataset(runner, &self.config.pruning().keep, ds).await {
+            if let Err(e) = super::prune_dataset(&ctx.zfs, &self.config.pruning().keep, ds).await {
                 warn!(dataset = %ds, error = %e, "prune cycle errored");
                 errors.push(format!("prune {ds}: {e}"));
             }

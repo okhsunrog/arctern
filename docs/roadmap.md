@@ -272,8 +272,5 @@ Things arctern deliberately won't do, so feature creep stays bounded:
 - **GUI for the full TOML schema.** The config stays a text file the
   operator owns. Read-only display in the UI is fine; a structured
   editor would re-implement TOML semantics badly.
-- **Authentication for the loopback UI itself.** Loopback bind + SSH
-  tunnel is the perimeter. If you need multi-user, that's a different
-  product (a federation gateway).
 - **Wrapping non-OpenZFS implementations** (TrueNAS-specific tooling,
   Btrfs comparisons, etc.). arctern is OpenZFS ≥ 2.2 on Linux.

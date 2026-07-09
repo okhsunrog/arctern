@@ -287,6 +287,27 @@ composables it uses locally, just with a per-peer base URL. The sidebar's
 Hosts group switches scope; the browser talks to one endpoint (the sender's
 loopback bind) regardless of which host it is looking at.
 
+### Browser authentication
+
+The two local listeners have deliberately different authentication:
+
+- The UNIX socket keeps its `0600` mode plus `SO_PEERCRED` same-UID check and
+  requires no HTTP credential. Internal peer proxies and local automation use
+  this path.
+- The loopback TCP API requires an `arctern_session_<daemon>` cookie. The
+  daemon-specific suffix prevents sessions from colliding when multiple UIs
+  are forwarded to different ports on the same browser host. Static SPA
+  assets and `/api/v1/auth/{login,session,logout}` remain public so a
+  logged-out browser can render the login gate.
+
+On first daemon start, 32 random bytes are written atomically to
+`<state_dir>/admin.token` with mode `0600`. A successful login exchanges that
+master token for a separate random session ID. Sessions live only in daemon
+memory, expire after 12 hours, and are all revoked on restart. The cookie is
+host-only, `HttpOnly`, `SameSite=Strict`, and never contains the master token.
+The Host and Fetch Metadata checks remain defense in depth against DNS
+rebinding and CSRF.
+
 ### PeerLink shape
 
 ```rust
@@ -474,9 +495,6 @@ admin-ui/                    Vue 3 + Nuxt UI SPA; host-scoped console under
 - Federation beyond a handful of peers. The PeerLink design extends naturally
   but don't generalise speculatively.
 - Hooks (pre/post-replication scripts).
-- Auth on the local UI's loopback bind. UNIX socket permissions + loopback +
-  the Sec-Fetch-Site guard are the perimeter; multi-user access is a
-  different product.
 - `arctern status` / `signal` / `wakeup` / `list` subcommands. The web UI
   replaces them; only `daemon`, `stdinserver-dispatch`, `configcheck`,
   `openapi` are CLI surface.

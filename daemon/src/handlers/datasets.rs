@@ -7,9 +7,8 @@ use zfskit::dataset::ListOptions;
 use crate::app_state::AppState;
 use crate::error::ApiError;
 
-/// List datasets reachable through the daemon's shared `CommandRunner`
-/// (`AppState::runner`). RealRunner in production; SshCommandRunner
-/// only when `ZFSKIT_SSH_TARGET` is set for dev/test.
+/// List datasets through the daemon's shared typed ZFS facade. It uses
+/// RealRunner in production and the SSH test runner only for dev/integration.
 #[utoipa::path(
     get,
     path = "/api/v1/datasets",
@@ -29,7 +28,7 @@ pub async fn list_datasets(
         properties: vec!["used".into(), "usedbysnapshots".into(), "referenced".into()],
         ..ListOptions::default()
     };
-    let entries = zfskit::dataset::list(state.runner.as_ref(), &opts).await?;
+    let entries = state.zfs.list_datasets(&opts).await?;
     let summaries: Vec<DatasetSummary> = entries.into_iter().map(DatasetSummary::from).collect();
     Ok(Json(summaries))
 }

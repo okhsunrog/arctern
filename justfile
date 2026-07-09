@@ -28,16 +28,16 @@ fmt:
 fmt-check:
     cargo fmt --all -- --check
 
-# Full pre-push gate: rust fmt + clippy + tests + UI typecheck/lint.
+# Full pre-push gate: Rust checks plus the complete Vite+ frontend workflow.
 ci: fmt-check lint test
-    cd admin-ui && vp check
+    cd admin-ui && vp install && vp check && vp test && vp run build
 
 # ─── Admin UI ──────────────────────────────────────────
 
 # Install JS deps + typecheck + build the Vue SPA into admin-ui/dist.
 # The daemon's build.rs embeds that directory via memory-serve.
 build-ui:
-    cd admin-ui && vp install && vp exec vue-tsc --build && vp build
+    cd admin-ui && vp install && vp run build
 
 # Release artifact: UI bundle first, then cargo release build.
 build: build-ui
@@ -90,5 +90,9 @@ test-openssh: vm-up
 
 # One-shot: vm-up + integration + vm-down. For CI / clean checks.
 test-vm: vm-up
-    just test-integration
+    #!/usr/bin/env bash
+    set -uo pipefail
+    rc=0
+    just test-integration || rc=$?
     just vm-down
+    exit "$rc"

@@ -50,7 +50,6 @@ name = "snap_test"
 [[jobs.filesystems]]
 path = "{target}"
 [jobs.snapshotting]
-type = "periodic"
 interval = "1s"
 prefix = "{prefix}"
 [[jobs.pruning.keep]]

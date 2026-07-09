@@ -141,16 +141,21 @@ dependencies = [
  "arctern-transport",
  "async-trait",
  "axum",
+ "axum-extra",
+ "base64",
  "clap",
  "eyre",
  "futures-util",
+ "getrandom 0.3.4",
  "libc",
  "memory-serve",
  "mimalloc",
  "openssh",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
+ "subtle",
  "tarpc",
  "thiserror",
  "time",
@@ -258,6 +263,28 @@ dependencies = [
  "mime",
  "pin-project-lite",
  "sync_wrapper",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
+name = "axum-extra"
+version = "0.12.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be44683b41ccb9ab2d23a5230015c9c3c55be97a25e4428366de8873103f7970"
+dependencies = [
+ "axum",
+ "axum-core",
+ "bytes",
+ "cookie",
+ "futures-core",
+ "futures-util",
+ "http",
+ "http-body",
+ "http-body-util",
+ "mime",
+ "pin-project-lite",
  "tower-layer",
  "tower-service",
  "tracing",
@@ -408,6 +435,17 @@ name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
+
+[[package]]
+name = "cookie"
+version = "0.18.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ddef33a339a91ea89fb53151bd0a4689cfce27055c291dfa69945475d22c747"
+dependencies = [
+ "percent-encoding",
+ "time",
+ "version_check",
+]
 
 [[package]]
 name = "cpufeatures"
@@ -3087,9 +3125,9 @@ dependencies = [
 
 [[package]]
 name = "zfskit"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd1338c35f08bc74356ade46047904893047fc1116212b1348df5363a961f034"
+checksum = "2c151d75d62ac48d7efddc512d1670ab821acea68335f2c86eab3747be81b2d9"
 dependencies = [
  "async-trait",
  "regex",
@@ -3097,6 +3135,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]

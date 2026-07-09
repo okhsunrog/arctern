@@ -151,6 +151,7 @@ ships in the repo):
 ```sh
 arctern configcheck /etc/arctern/arctern.toml   # validate first
 sudo systemctl enable --now arctern             # console on 127.0.0.1:7878
+sudo cat /var/lib/arctern/admin.token            # paste once into the login screen
 ```
 
 A minimal sender config with a two-route peer:

@@ -16,7 +16,6 @@ use std::time::Duration;
 use time::OffsetDateTime;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use zfskit::runner::CommandRunner;
 
 #[derive(Debug, Clone, Default)]
 pub struct JobStatusInner {
@@ -39,7 +38,7 @@ pub struct JobStatusInner {
 
 #[derive(Clone)]
 pub struct JobContext {
-    pub runner: Arc<dyn CommandRunner>,
+    pub zfs: zfskit::Zfs,
     /// Per-daemon SQLite pool. None inside test-only `JobManager` setups
     /// that don't care about persistence; production code paths always
     /// pass `Some(pool)` from `daemon::main::run_daemon`.
@@ -96,7 +95,7 @@ struct JobHandle {
 /// destroy the victims. Shared by the snap job (post-snapshot prune)
 /// and the standalone prune job. Held snapshots are skipped, not fatal.
 pub(crate) async fn prune_dataset(
-    runner: &dyn CommandRunner,
+    zfs: &zfskit::Zfs,
     keep: &[arctern_config::KeepRule],
     dataset: &str,
 ) -> Result<(), String> {
@@ -110,7 +109,8 @@ pub(crate) async fn prune_dataset(
         properties: vec!["creation".into()],
         ..ListOptions::default()
     };
-    let snaps = zfskit::dataset::list(runner, &opts)
+    let snaps = zfs
+        .list_datasets(&opts)
         .await
         .map_err(|e| format!("list snapshots: {e}"))?;
     let mut entries: Vec<arctern_config::SnapshotEntry> = Vec::with_capacity(snaps.len());
@@ -141,7 +141,12 @@ pub(crate) async fn prune_dataset(
     for i in destroy_idx {
         let target = &full_names[i];
         tracing::info!(snapshot = %target, "destroying snapshot");
-        match zfskit::dataset::destroy(runner, target, &DestroyOptions::new()).await {
+        match zfs
+            .snapshot(target.clone())
+            .map_err(|e| e.to_string())?
+            .destroy(&DestroyOptions::new())
+            .await
+        {
             Ok(()) => {}
             Err(zfskit::ZfsError::SnapshotHeld { .. }) => {
                 tracing::warn!(snapshot = %target, "snapshot is held; skipping");
@@ -273,6 +278,7 @@ impl JobManager {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use zfskit::runner::CommandRunner;
 
     struct NoopJob {
         flag: AtomicBool,
@@ -326,7 +332,7 @@ mod tests {
         mgr.spawn(
             job.clone(),
             JobContext {
-                runner: Arc::new(FakeRunner) as Arc<dyn CommandRunner>,
+                zfs: zfskit::Zfs::with_runner(FakeRunner),
                 state: None,
             },
         );
@@ -354,7 +360,7 @@ mod tests {
         mgr.spawn(
             job.clone(),
             JobContext {
-                runner: Arc::new(FakeRunner) as Arc<dyn CommandRunner>,
+                zfs: zfskit::Zfs::with_runner(FakeRunner),
                 state: None,
             },
         );

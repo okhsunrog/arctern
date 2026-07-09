@@ -27,10 +27,13 @@ jobs:
       # so the real UI must be built before cargo.
       - uses: voidzero-dev/setup-vp@v1
         with:
+          node-version: "24.18.0"
           cache: true
           working-directory: admin-ui
       - run: vp install
         working-directory: admin-ui
+        env:
+          VITE_GIT_HOOKS: "0"
       - run: vp run build
         working-directory: admin-ui
 

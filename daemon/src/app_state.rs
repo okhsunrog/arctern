@@ -8,13 +8,16 @@ use std::sync::Arc;
 use arctern_api::LogEvent;
 use sqlx::SqlitePool;
 use tokio::sync::broadcast;
-use zfskit::runner::CommandRunner;
 
+use crate::auth::AdminAuth;
 use crate::jobs::JobManager;
 use crate::peer::state::PeersState;
 
 #[derive(Clone)]
 pub struct AppState {
+    /// Browser authentication for the loopback TCP listener. The UNIX
+    /// listener deliberately ignores it and authenticates via SO_PEERCRED.
+    pub auth: AdminAuth,
     pub manager: Arc<JobManager>,
     pub peers: PeersState,
     /// Broadcast of locally-generated log events. The poller spawned in
@@ -24,10 +27,9 @@ pub struct AppState {
     /// SQLite pool for `job_runs` / `log_events`. Handlers that read
     /// historical state (e.g. /api/v1/jobs/{name}/runs) query through this.
     pub state: Arc<SqlitePool>,
-    /// The shared local CommandRunner — RealRunner in production, or
-    /// SshCommandRunner when ZFSKIT_SSH_TARGET is set. Local ZFS
-    /// handlers borrow this rather than spawning a per-request runner.
-    pub runner: Arc<dyn CommandRunner>,
+    /// Shared typed ZFS facade — RealRunner in production, or an SSH-backed
+    /// facade when ZFSKIT_SSH_TARGET is set for development/integration tests.
+    pub zfs: zfskit::Zfs,
     /// Absolute path the daemon was started with (`--config <path>`),
     /// surfaced by `GET /api/v1/config` so the UI can show "you're
     /// editing the file at …".

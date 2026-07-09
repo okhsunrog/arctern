@@ -7,6 +7,12 @@
 //!   via authorized_keys `command="..."`. Stub through slice 003.
 //! - `configcheck <path>` validates a config file for CI / pre-deploy.
 
+// musl's allocator is noticeably slower under multithreaded load than
+// glibc's; mimalloc levels the static-musl release builds with the
+// glibc ones (and is a mild win there too).
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::io::{ErrorKind, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;

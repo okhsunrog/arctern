@@ -35,6 +35,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 utoipa = { version = "5.5.0", features = ["axum_extras"] }
 utoipa-axum = "0.2.0"
+mimalloc = "0.1.52"
 
 [dev-dependencies]
 arctern-client = { path = "../crates/client" }

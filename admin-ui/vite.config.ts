@@ -70,6 +70,14 @@ export default defineConfig({
   },
   build: {
     chunkSizeWarningLimit: 5000,
+    rolldownOptions: {
+      onLog(level, log, handler) {
+        if (log.code === 'INVALID_ANNOTATION' && log.id?.includes('@vueuse/core/dist/index.js')) {
+          return
+        }
+        handler(level, log)
+      },
+    },
   },
   test: {
     include: ['src/**/*.test.ts'],

@@ -21,7 +21,7 @@ jobs:
           - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-musl
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # The daemon embeds admin-ui/dist at compile time (memory-serve),
       # so the real UI must be built before cargo.
@@ -60,7 +60,7 @@ jobs:
           tar -C dist -czf "arctern-${short}.tar.gz" arctern
           rm dist/arctern
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: arctern-${{ matrix.target }}
           path: arctern-*.tar.gz
@@ -72,13 +72,13 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
 
       - run: sha256sum arctern-*.tar.gz > SHA256SUMS
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: |
             arctern-*.tar.gz

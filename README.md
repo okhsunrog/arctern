@@ -112,40 +112,38 @@ SSH):
 - **Cancellable and pausable transfers** — partial receive state keeps them
   resumable.
 
-## Requirements
+## Install
 
-- OpenZFS ≥ 2.2 and OpenSSH on both hosts.
-- Rust stable (edition 2024) to build.
-- The ZFS toolkit underneath is [`zfskit`](https://crates.io/crates/zfskit)
-  (same author) — pulled from crates.io like any other dependency.
-
-## Build
-
-The daemon **embeds the built admin UI** (`build.rs` bundles `admin-ui/dist`),
-so build the UI first.
+Grab a static binary from the [latest release](https://github.com/okhsunrog/arctern/releases/latest) —
+musl-linked with the web console embedded, so there is nothing else to
+install (no libraries, no glibc version requirements):
 
 ```sh
-git clone https://github.com/okhsunrog/arctern
-cd arctern
-
-# 1. build the admin UI  (uses Vite+ / bun — see admin-ui/package.json)
-cd admin-ui && vp install && vp build && cd ..
-
-# 2. build the daemon (binary: target/release/arctern)
-cargo build --release
+arch=$(uname -m)   # x86_64 or aarch64
+curl -LO "https://github.com/okhsunrog/arctern/releases/latest/download/arctern-${arch}-linux-musl.tar.gz"
+curl -LO "https://github.com/okhsunrog/arctern/releases/latest/download/SHA256SUMS"
+sha256sum --check --ignore-missing SHA256SUMS
+tar -xzf "arctern-${arch}-linux-musl.tar.gz"
+sudo install -m 755 arctern /usr/local/bin/arctern
 ```
 
-For UI development, `vp dev` runs the SPA with its `/api` calls proxied to a
-running daemon on `127.0.0.1:7878`.
+The hosts themselves need OpenZFS ≥ 2.2 (`zfs`/`zpool` on `PATH`) and
+OpenSSH — that's the whole dependency list.
 
-## Run
+**[The installation guide](docs/install.md)** walks through the full
+setup end to end: the dedicated SSH key and `~/.ssh/config` alias on
+the sender, the `authorized_keys` forced command and ACL on the
+receiver, the systemd unit, fingerprint pinning, verification, and
+updating.
+
+## Quick start
+
+The sender runs the daemon ([systemd unit](packaging/systemd/arctern.service)
+ships in the repo):
 
 ```sh
-# Validate a config (for CI / pre-deploy)
-arctern configcheck /etc/arctern/arctern.toml
-
-# Run the daemon (API over a UNIX socket + web UI on 127.0.0.1:7878)
-arctern daemon --config /etc/arctern/arctern.toml
+arctern configcheck /etc/arctern/arctern.toml   # validate first
+sudo systemctl enable --now arctern             # console on 127.0.0.1:7878
 ```
 
 A minimal sender config with a two-route peer:
@@ -178,14 +176,14 @@ filesystems = { "novafs/arch0/data/home" = true, "novafs/arch0/data/root" = true
 root_fs = "okdata/backups/nova"
 ```
 
-On the **receiver**, instead of running a daemon, add the sender's key to
-`~/.ssh/authorized_keys` with a forced command:
+The **receiver runs no service at all** — sshd spawns arctern on
+demand via a forced command in `~/.ssh/authorized_keys`:
 
 ```
 command="/usr/local/bin/arctern stdinserver-dispatch laptop_nova",restrict ssh-ed25519 AAAA…
 ```
 
-and authorize the identity in the receiver's config:
+and an ACL in its config bounds what that key may do:
 
 ```toml
 [[allowed_clients]]
@@ -196,14 +194,13 @@ operations = ["control", "control:discard_partial_recv", "recv",
 root_fs = "okdata/backups/nova"
 ```
 
-The receiver's own `arctern daemon` is optional — run it if the host should
-take its own snapshots, prune what it received, or be manageable through the
-sender's console.
+The receiver's own `arctern daemon` is optional — run it if the host
+should take its own snapshots, prune what it received, or be
+manageable through the sender's console.
 
-See [`docs/example-config.toml`](docs/example-config.toml) for the annotated
-full schema, and [`docs/deploy-snap-only.md`](docs/deploy-snap-only.md) /
-[`docs/deploy-full-mirror.md`](docs/deploy-full-mirror.md) for staged
-deployment guides.
+See [`docs/install.md`](docs/install.md) for the step-by-step version
+of all of the above, and [`docs/example-config.toml`](docs/example-config.toml)
+for the annotated full schema.
 
 ## CLI
 
@@ -215,6 +212,34 @@ The web UI *is* the administration surface; the CLI stays deliberately small.
 | `stdinserver-dispatch <identity>` | SSH transport entry point, invoked by sshd via `ForcedCommand`. |
 | `configcheck <path>` | Validate a config file and exit. |
 | `openapi` | Print the OpenAPI spec (used to regenerate the UI's typed client). |
+
+## Building from source
+
+<details>
+<summary>Only needed for development — releases cover users.</summary>
+
+The daemon embeds the built admin UI (`build.rs` bundles
+`admin-ui/dist`), so build the UI first. The UI toolchain is
+[Vite+](https://vite.dev/plus) (`vp`) over bun.
+
+```sh
+git clone https://github.com/okhsunrog/arctern
+cd arctern
+
+# 1. build the admin UI
+cd admin-ui && vp install && vp run build && cd ..
+
+# 2. build the daemon (binary: target/release/arctern)
+cargo build --release
+
+# static musl build (what the releases ship):
+CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release --target x86_64-unknown-linux-musl
+```
+
+For UI development, `vp dev` runs the SPA with its `/api` calls
+proxied to a running daemon on `127.0.0.1:7878`.
+
+</details>
 
 ## Project layout
 

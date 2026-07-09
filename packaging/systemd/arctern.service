@@ -9,12 +9,14 @@ Type=simple
 ExecStart=/usr/local/bin/arctern daemon --config /etc/arctern/arctern.toml --socket /run/arctern/arctern.sock
 Restart=on-failure
 RestartSec=5s
+# The daemon reports its own staged shutdown timeout after 20 seconds.
+TimeoutStopSec=30s
 
 # Needs root for zfs(8)/zpool(8) and to spawn ssh with the replication key.
 User=root
 Group=root
 
-# SQLite observability state (state.db) and the replication SSH key live here.
+# SQLite state, the private admin token, and the replication SSH key live here.
 StateDirectory=arctern
 StateDirectoryMode=0700
 

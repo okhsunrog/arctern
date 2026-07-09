@@ -18,8 +18,8 @@ bottom; this doc is then descriptive only.
   declares `packageManager = "bun@..."` in `package.json` so
   `vp install` uses bun under the hood.
 - **`vp` invocations** (the only ones we use): `install`, `dev`,
-  `build`, `check`, `lint`, `fmt`, `exec` (for `vue-tsc`,
-  `openapi-ts`), `dlx`. Never call vite/vitest/eslint/prettier
+  `build`, `check`, `test`, `lint`, `fmt`, `run`, `exec` (for
+  `vue-tsc`, `openapi-ts`), `dlx`. Never call vite/vitest/eslint/prettier
   directly.
 - **AGENTS.md** copied verbatim from claude-proxy-rs's
   `admin-ui/AGENTS.md`. Tells future contributors and AI agents
@@ -29,7 +29,7 @@ bottom; this doc is then descriptive only.
   and `fmt:` keys — no separate `.eslintrc`, no `.prettierrc`.
   Settings copied from claude-proxy-rs:
   - lint plugins: eslint, typescript, unicorn, oxc, vue
-  - typeAware: true
+  - typeAware: true, typeCheck: true
   - ignored: `**/dist/**`, `**/src/client/**`
   - fmt: no semicolons, single quotes, 100-col, no
     sortPackageJson, ignore `**/src/client/**`
@@ -83,12 +83,12 @@ Dev server `proxy:` forwards `/api/v1` and `/api-docs` to
 `localhost:7878` (the daemon's loopback bind per
 `ARCHITECTURE.md`).
 
-### No auth flow
+### Auth flow (superseded)
 
-claude-proxy-rs has `LoginView`, `useAuth`, 401-redirect interceptor.
-arctern's `ARCHITECTURE.md` puts auth on the local UI's loopback bind
-explicitly out of scope — UNIX socket permissions and loopback are
-the perimeter. So skip:
+This original plan deferred browser authentication. The shipped console now
+uses a generated administrator token, an in-memory session, and a 401 login
+gate; `ARCHITECTURE.md` is the source of truth. The items below describe the
+old decision and are retained only as design history:
 
 - `LoginView.vue`
 - `composables/useAuth.ts`

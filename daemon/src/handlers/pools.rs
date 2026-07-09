@@ -74,7 +74,7 @@ fn entry_to_summary(e: &ZpoolStatusEntry) -> PoolSummary {
     ),
 )]
 pub async fn list_pools(State(state): State<AppState>) -> Result<Json<Vec<PoolSummary>>, ApiError> {
-    let entries = zfskit::pool::status_all(state.runner.as_ref()).await?;
+    let entries = state.zfs.pool_status_all().await?;
     let mut out: Vec<PoolSummary> = entries.iter().map(entry_to_summary).collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(Json(out))
@@ -96,7 +96,7 @@ pub async fn get_pool(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<PoolStatus>, ApiError> {
-    let entry = zfskit::pool::status(state.runner.as_ref(), &name).await?;
+    let entry = state.zfs.pool(name)?.status().await?;
     // The status response's `vdevs` is keyed by name. The root vdev's
     // name equals the pool name; render the *children* of that root as
     // the top-level vdev list, since the root is an implementation
@@ -149,6 +149,6 @@ pub async fn pool_scrub(
             )));
         }
     };
-    zfskit::pool::scrub(state.runner.as_ref(), &name, action).await?;
+    state.zfs.pool(name)?.scrub(action).await?;
     Ok(StatusCode::NO_CONTENT)
 }

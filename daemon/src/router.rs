@@ -2,10 +2,11 @@
 
 use axum::{
     Json, Router,
+    extract::DefaultBodyLimit,
     http::{StatusCode, header},
     middleware,
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
 };
 use utoipa::OpenApi;
 use utoipa_axum::{router::OpenApiRouter, routes};
@@ -98,9 +99,9 @@ pub fn build_router(state: AppState) -> Router {
     build_api_router(state).layer(middleware::from_fn(auth::enforce_same_uid))
 }
 
-/// Router for the loopback TCP bind: API routes plus the embedded
-/// admin UI from `memory-serve`. No auth layer — the perimeter is the
-/// 127.0.0.1 bind itself, per ARCHITECTURE.md.
+/// Router for the loopback TCP bind: authenticated API routes plus the
+/// embedded admin UI from `memory-serve`. Static assets and the login
+/// endpoints remain public so a logged-out browser can render the gate.
 /// index.html is bundled at compile time so the SPA fallback handler
 /// has bytes to serve regardless of debug-vs-release memory-serve mode.
 const SPA_INDEX_HTML: &[u8] = include_bytes!("../../admin-ui/dist/index.html");
@@ -125,6 +126,17 @@ async fn spa_fallback(request: axum::extract::Request) -> axum::response::Respon
 }
 
 pub fn build_loopback_router(state: AppState) -> Router {
+    let auth = state.auth.clone();
+    let protected_api = build_api_router(state).layer(middleware::from_fn_with_state(
+        auth.clone(),
+        auth::require_admin_session,
+    ));
+    let auth_routes = Router::new()
+        .route("/api/v1/auth/login", post(auth::login))
+        .route("/api/v1/auth/session", get(auth::session))
+        .route("/api/v1/auth/logout", post(auth::logout))
+        .layer(DefaultBodyLimit::max(4096))
+        .with_state(auth);
     let static_routes: Router = memory_serve::load!()
         .index_file(Some("/index.html"))
         .into_router();
@@ -139,7 +151,8 @@ pub fn build_loopback_router(state: AppState) -> Router {
     //   only acts on mutating methods); mutating /api/v1/* requests
     //   must originate same-origin (or carry no Sec-Fetch-Site, i.e.
     //   be a non-browser CLI client).
-    build_api_router(state)
+    protected_api
+        .merge(auth_routes)
         .merge(static_routes)
         .fallback(spa_fallback)
         .layer(middleware::from_fn(set_csp))
@@ -183,6 +196,8 @@ mod tests {
     use crate::state;
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use std::sync::Arc;
     use tower::ServiceExt;
 
@@ -190,11 +205,12 @@ mod tests {
         let pool = Arc::new(state::open_in_memory().await.unwrap());
         let (events, _rx) = tokio::sync::broadcast::channel(16);
         AppState {
+            auth: auth::AdminAuth::for_tests([7; 32]),
             manager: Arc::new(JobManager::new()),
             peers: new_state(),
             events,
             state: pool,
-            runner: Arc::new(zfskit::runner::RealRunner),
+            zfs: zfskit::Zfs::new(),
             config_path: std::path::PathBuf::from("/dev/null"),
             shutdown: tokio_util::sync::CancellationToken::new(),
         }
@@ -206,6 +222,36 @@ mod tests {
             b = b.header("sec-fetch-site", v);
         }
         b.body(Body::empty()).unwrap()
+    }
+
+    async fn login_cookie(app: &Router) -> String {
+        let token = URL_SAFE_NO_PAD.encode([7u8; 32]);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/auth/login")
+            .header("content-type", "application/json")
+            .header("sec-fetch-site", "same-origin")
+            .body(Body::from(format!(r#"{{"token":"{token}"}}"#)))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        response
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .expect("login set-cookie")
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string()
+    }
+
+    fn with_cookie(mut request: Request<Body>, cookie: &str) -> Request<Body> {
+        request
+            .headers_mut()
+            .insert(axum::http::header::COOKIE, cookie.parse().unwrap());
+        request
     }
 
     #[tokio::test]
@@ -239,15 +285,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn same_origin_post_passes_csrf() {
+    async fn same_origin_authenticated_post_passes_csrf() {
         // No job named "no_such_job" is registered, so the wakeup handler
         // returns 404 — that's the signal that CSRF didn't shortcut us.
         let app = build_loopback_router(test_state().await);
+        let cookie = login_cookie(&app).await;
         let resp = app
-            .oneshot(req(
-                Method::POST,
-                "/api/v1/jobs/no_such_job/wakeup",
-                Some("same-origin"),
+            .oneshot(with_cookie(
+                req(
+                    Method::POST,
+                    "/api/v1/jobs/no_such_job/wakeup",
+                    Some("same-origin"),
+                ),
+                &cookie,
             ))
             .await
             .unwrap();
@@ -255,28 +305,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cli_caller_without_header_passes_csrf() {
-        // No Sec-Fetch-Site → assumed non-browser (curl, arctern-client,
-        // reqwest). Same 404 from the handler proves we got past the guard.
+    async fn unauthenticated_cli_caller_is_rejected() {
         let app = build_loopback_router(test_state().await);
         let resp = app
             .oneshot(req(Method::POST, "/api/v1/jobs/no_such_job/wakeup", None))
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
-    async fn cross_site_get_is_allowed() {
-        // GETs have no side effects; the rule must not block them or the
-        // SSE event stream + UI bootstrap break under strict referrer-
-        // policy regimes.
+    async fn unauthenticated_cross_site_get_is_rejected_by_auth() {
         let app = build_loopback_router(test_state().await);
         let resp = app
             .oneshot(req(Method::GET, "/api/v1/jobs", Some("cross-site")))
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     fn req_with_host(method: Method, uri: &str, host: &str) -> Request<Body> {
@@ -342,10 +387,68 @@ mod tests {
         ] {
             let app = build_loopback_router(test_state().await);
             let resp = app
-                .oneshot(req_with_host(Method::GET, "/api/v1/jobs", host))
+                .oneshot(req_with_host(Method::GET, "/", host))
                 .await
                 .unwrap();
             assert_eq!(resp.status(), StatusCode::OK, "host {host}");
         }
+    }
+
+    #[tokio::test]
+    async fn login_session_and_logout_flow() {
+        let app = build_loopback_router(test_state().await);
+
+        let bad = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/auth/login")
+            .header("content-type", "application/json")
+            .header("sec-fetch-site", "same-origin")
+            .body(Body::from(r#"{"token":"wrong"}"#))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(bad).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let cookie = login_cookie(&app).await;
+        let session = with_cookie(req(Method::GET, "/api/v1/auth/session", None), &cookie);
+        assert_eq!(
+            app.clone().oneshot(session).await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+
+        let jobs = with_cookie(req(Method::GET, "/api/v1/jobs", None), &cookie);
+        assert_eq!(
+            app.clone().oneshot(jobs).await.unwrap().status(),
+            StatusCode::OK
+        );
+
+        let logout = with_cookie(
+            req(Method::POST, "/api/v1/auth/logout", Some("same-origin")),
+            &cookie,
+        );
+        assert_eq!(
+            app.clone().oneshot(logout).await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+
+        let expired = with_cookie(req(Method::GET, "/api/v1/jobs", None), &cookie);
+        assert_eq!(
+            app.oneshot(expired).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn unix_router_does_not_require_http_session() {
+        let app = build_router(test_state().await);
+        let mut request = req(Method::GET, "/api/v1/jobs", None);
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(auth::PeerCredentials {
+                uid: unsafe { libc::geteuid() },
+            }));
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

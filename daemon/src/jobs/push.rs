@@ -417,20 +417,7 @@ pub fn build_send_args(
     flags: &SendFlagsConfig,
 ) -> Option<SendArgs> {
     if let SnapshotPlan::Resume { token, .. } = plan {
-        let mut args = SendArgs::new("ignored").resume_token(token);
-        if flags.encrypted {
-            args = args.raw();
-        }
-        if flags.embedded_data {
-            args = args.embedded();
-        }
-        if flags.compressed {
-            args = args.compressed();
-        }
-        if flags.large_blocks {
-            args = args.large_blocks();
-        }
-        return Some(args);
+        return Some(SendArgs::resume(token));
     }
     let to_full = match plan {
         SnapshotPlan::Nothing => return None,
@@ -688,18 +675,8 @@ async fn execute_one_plan(
         .await
         .map_err(|e| format!("spawn zfs send: {e}"))?;
     let mut child_stdout = child
-        .stdout
-        .take()
+        .take_stdout()
         .ok_or_else(|| "no stdout on send child".to_string())?;
-    let mut child_stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "no stderr on send child".to_string())?;
-    let stderr_drain = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        let _ = child_stderr.read_to_end(&mut buf).await;
-        buf
-    });
 
     let mut channel_stdin = channel
         .stdin
@@ -752,31 +729,20 @@ async fn execute_one_plan(
         Ok(copied)
     }
     .await;
-    if copy_res.is_err() {
+    if let Err(error) = copy_res {
         let _ = channel_stdin.shutdown().await;
-        let _ = child.start_kill();
+        let _ = child.cancel().await;
         if cancel.is_cancelled() {
-            let _ = child.wait().await;
             return Err("cancelled".into());
         }
+        return Err(format!("stream copy: {error}"));
     }
     let _ = channel_stdin.shutdown().await;
     drop(channel_stdin);
-    let stderr_bytes = stderr_drain.await.unwrap_or_default();
-    let exit = child.wait().await.map_err(|e| format!("send wait: {e}"))?;
-    if let Err(e) = copy_res {
-        return Err(format!(
-            "stream copy: {e}; send stderr: {}",
-            String::from_utf8_lossy(&stderr_bytes).trim()
-        ));
-    }
-    if !exit.success() {
-        return Err(format!(
-            "zfs send failed (exit {:?}): {}",
-            exit.code(),
-            String::from_utf8_lossy(&stderr_bytes).trim()
-        ));
-    }
+    child
+        .finish()
+        .await
+        .map_err(|e| format!("zfs send failed: {e}"))?;
     let resp = channel
         .finish()
         .await
@@ -1275,7 +1241,7 @@ impl PushJob {
         peer: &Arc<PeerLink>,
         errors: &mut Vec<String>,
     ) -> u64 {
-        let runner = ctx.runner.as_ref();
+        let runner = ctx.zfs.command_runner();
         let sender_paths = match self.expand_filesystems(runner).await {
             Ok(p) => p,
             Err(e) => {
@@ -1324,7 +1290,7 @@ impl PushJob {
         peer: &Arc<PeerLink>,
         sender_path: &str,
     ) -> (u64, Option<String>) {
-        let runner = ctx.runner.as_ref();
+        let runner = ctx.zfs.command_runner();
         // FR-005: literal concat — target = root_fs/sender_path.
         let target = format!("{}/{}", self.config.target.root_fs, sender_path);
         tracing::info!(sender = %sender_path, target = %target, "push: planning");
@@ -1824,7 +1790,7 @@ mod tests {
         };
         let args = build_send_args(&plan, "tank/data", &SendFlagsConfig::default()).unwrap();
         let v = args.build_args(false).unwrap();
-        assert_eq!(v, vec!["send", "-w", "-c", "-L", "-e", "-t", "1-abc"]);
+        assert_eq!(v, vec!["send", "-t", "1-abc"]);
     }
 
     #[test]

@@ -28,13 +28,14 @@ repo owner. You are free to improve the design — this is a proposal, not a con
 - Monorepo: `crates/{api,config,transport,client}`, `daemon/` (binary `arctern-daemon`),
   `admin-ui/` (Vue SPA embedded into the daemon at build time via `build.rs` + `memory-serve`).
 - Sibling crate `zfskit` at `../zfskit` (ZFS toolkit; add primitives there first if missing).
-- `justfile`: `just build` = `build-ui` (`vp install && vp exec vue-tsc --build && vp build`)
+- `justfile`: `just build` = `build-ui` (`vp install && vp run build`)
   then `cargo build --release -p arctern-daemon`. `just openapi` regenerates
   `admin-ui/openapi.json` + the typed client (`admin-ui/src/client/`, **never hand-edit**).
   `just check|test|lint|fmt`, `just ci`.
-- **`vp check` (eslint+prettier) does NOT run `vue-tsc`** — the real typecheck gate is
-  `vue-tsc --build` inside `just build`. The project has `noUncheckedIndexedAccess` on; guard
-  array indexing. Nuxt UI components are globally auto-registered (`main.ts` + `<UApp>` in `App.vue`).
+- **`vp check` runs Oxfmt, type-aware Oxlint, and Vite+'s TypeScript checker.** The build script
+  also runs `vue-tsc --build` as the Vue SFC-specific typecheck gate. The project has
+  `noUncheckedIndexedAccess` on; guard array indexing. Nuxt UI components are globally
+  auto-registered (`main.ts` + `<UApp>` in `App.vue`).
 - Deploy nova (glibc): `just build` → install `target/release/arctern` to `/usr/local/bin/arctern`
   via temp+atomic `mv` (a running executable can't be overwritten in place — ETXTBSY) → `systemctl restart arctern.service`.
 - Deploy mira (Debian, static musl): `CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release

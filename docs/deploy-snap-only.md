@@ -136,10 +136,17 @@ ssh -L 7878:127.0.0.1:7878 root@server
 # then open http://127.0.0.1:7878/ in a local browser
 ```
 
+Retrieve the administrator token on the server and paste it into the login
+screen:
+
+```bash
+ssh root@server cat /var/lib/arctern/admin.token
+```
+
 The UI exposes Dashboard / Jobs / Snapshots / Peers / Events views
 backed by the same `/api/v1/*` routes you can `curl --unix-socket`
-below. No auth — the perimeter is the loopback bind plus your SSH
-tunnel.
+below. The browser-facing TCP API requires an authenticated session; the
+same-UID UNIX socket deliberately does not require HTTP credentials.
 
 ## 5. Verify it's actually doing the right thing
 

@@ -160,7 +160,16 @@ manages `/var/lib/arctern` and `/run/arctern` via
 (`ProtectSystem=full`, `NoNewPrivileges`, ...).
 
 The console is now at `http://127.0.0.1:7878/` — loopback only, by
-design. From another machine, tunnel it:
+design. The daemon creates a private administrator token on first start;
+retrieve it with:
+
+```sh
+sudo cat /var/lib/arctern/admin.token
+```
+
+Paste that token into the login screen. Browser sessions last 12 hours and
+are revoked whenever the daemon restarts. From another machine, tunnel the
+console as usual; authentication still applies through the tunnel:
 
 ```sh
 ssh -L 7878:127.0.0.1:7878 you@sender

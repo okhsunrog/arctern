@@ -1,9 +1,6 @@
 import { fileURLToPath, URL } from 'node:url'
 
-import { defineConfig } from 'vite-plus'
-import vue from '@vitejs/plugin-vue'
-import vueDevTools from 'vite-plugin-vue-devtools'
-import ui from '@nuxt/ui/vite'
+import { defineConfig, lazyPlugins } from 'vite-plus'
 
 export default defineConfig({
   staged: {
@@ -59,6 +56,7 @@ export default defineConfig({
     ],
     options: {
       typeAware: true,
+      typeCheck: true,
     },
   },
   fmt: {
@@ -71,21 +69,31 @@ export default defineConfig({
     ignorePatterns: ['**/src/client/**', '**/openapi.json'],
   },
   build: {
-    chunkSizeWarningLimit: 1000,
+    chunkSizeWarningLimit: 5000,
+  },
+  test: {
+    include: ['src/**/*.test.ts'],
   },
   base: '/',
-  plugins: [
-    vue(),
-    vueDevTools(),
-    ui({
-      ui: {
-        colors: {
-          primary: 'cyan',
-          neutral: 'zinc',
+  plugins: lazyPlugins(async () => {
+    const [{ default: vue }, { default: vueDevTools }, { default: ui }] = await Promise.all([
+      import('@vitejs/plugin-vue'),
+      import('vite-plugin-vue-devtools'),
+      import('@nuxt/ui/vite'),
+    ])
+    return [
+      vue(),
+      vueDevTools(),
+      ui({
+        ui: {
+          colors: {
+            primary: 'cyan',
+            neutral: 'zinc',
+          },
         },
-      },
-    }),
-  ],
+      }),
+    ]
+  }),
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),

@@ -49,8 +49,17 @@ jobs:
 
       - uses: voidzero-dev/setup-vp@v1
         with:
+          node-version: "24.18.0"
           cache: true
           working-directory: admin-ui
 
+      - run: vp install
+        working-directory: admin-ui
+        env:
+          VITE_GIT_HOOKS: "0"
       - run: vp check
+        working-directory: admin-ui
+      - run: vp test
+        working-directory: admin-ui
+      - run: vp run build
         working-directory: admin-ui

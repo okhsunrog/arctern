@@ -51,41 +51,15 @@ async fn snapshot_guid(runner: &dyn CommandRunner, full_snap: &str) -> Option<u6
 async fn pipe_send_to_recv(runner: &dyn CommandRunner, send_args: SendArgs, recv_args: RecvArgs) {
     let mut send_child = zfs_send(runner, &send_args).await.expect("spawn zfs send");
     let mut recv_child = zfs_recv(runner, &recv_args).await.expect("spawn zfs recv");
-    let mut send_stdout = send_child.stdout.take().expect("send stdout");
-    let mut recv_stdin = recv_child.stdin.take().expect("recv stdin");
-    let mut recv_stderr = recv_child.stderr.take().expect("recv stderr");
-    let mut send_stderr = send_child.stderr.take().expect("send stderr");
-    let recv_stderr_drain = tokio::spawn(async move {
-        use tokio::io::AsyncReadExt;
-        let mut buf = Vec::new();
-        let _ = recv_stderr.read_to_end(&mut buf).await;
-        buf
-    });
-    let send_stderr_drain = tokio::spawn(async move {
-        use tokio::io::AsyncReadExt;
-        let mut buf = Vec::new();
-        let _ = send_stderr.read_to_end(&mut buf).await;
-        buf
-    });
+    let mut send_stdout = send_child.take_stdout().expect("send stdout");
+    let mut recv_stdin = recv_child.take_stdin().expect("recv stdin");
     tokio::io::copy(&mut send_stdout, &mut recv_stdin)
         .await
         .expect("copy send -> recv");
     recv_stdin.shutdown().await.expect("shutdown recv stdin");
     drop(recv_stdin);
-    let send_status = send_child.wait().await.expect("send wait");
-    let recv_status = recv_child.wait().await.expect("recv wait");
-    let send_err = send_stderr_drain.await.unwrap_or_default();
-    let recv_err = recv_stderr_drain.await.unwrap_or_default();
-    assert!(
-        send_status.success(),
-        "zfs send failed: {}",
-        String::from_utf8_lossy(&send_err)
-    );
-    assert!(
-        recv_status.success(),
-        "zfs recv failed: {}",
-        String::from_utf8_lossy(&recv_err)
-    );
+    send_child.finish().await.expect("send finish");
+    recv_child.finish().await.expect("recv finish");
 }
 
 #[tokio::test(flavor = "multi_thread")]

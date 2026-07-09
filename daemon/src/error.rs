@@ -37,11 +37,26 @@ impl From<ZfsError> for ApiError {
     }
 }
 
+impl From<zfskit::NameError> for ApiError {
+    fn from(error: zfskit::NameError) -> Self {
+        Self::Zfs(ZfsError::from(error))
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, category, message) = match self {
             ApiError::Zfs(e) => {
                 let (status, category) = match &e {
+                    ZfsError::InvalidName(_) | ZfsError::InvalidInput { .. } => {
+                        (StatusCode::BAD_REQUEST, "invalid_input")
+                    }
+                    ZfsError::Parse { .. } | ZfsError::IncompatibleOutput { .. } => {
+                        (StatusCode::BAD_GATEWAY, "incompatible_output")
+                    }
+                    ZfsError::BookmarkConflict { .. } => {
+                        (StatusCode::CONFLICT, "bookmark_conflict")
+                    }
                     ZfsError::Spawn(_) => (StatusCode::SERVICE_UNAVAILABLE, "spawn"),
                     ZfsError::DatasetNotFound { .. } => {
                         (StatusCode::NOT_FOUND, "dataset_not_found")
@@ -54,6 +69,7 @@ impl IntoResponse for ApiError {
                     ZfsError::KeyNotLoaded { .. } => (StatusCode::FORBIDDEN, "key_not_loaded"),
                     ZfsError::NoSpace => (StatusCode::INSUFFICIENT_STORAGE, "no_space"),
                     ZfsError::Other { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "other"),
+                    _ => (StatusCode::INTERNAL_SERVER_ERROR, "zfs"),
                 };
                 (status, category, e.to_string())
             }

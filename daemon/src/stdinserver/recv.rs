@@ -22,7 +22,7 @@ use arctern_transport::{
     ErrorCode, RecvHeader, Response, ResponseFrame, read_header, write_response,
 };
 use sqlx::SqlitePool;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use zfskit::dataset::ListOptions;
 use zfskit::models::DatasetType;
 use zfskit::recv::{RecvArgs, recv as zfs_recv};
@@ -196,45 +196,20 @@ where
         .await
         .map_err(|e| (ErrorCode::Zfs, format!("spawn zfs recv: {e}")))?;
     let mut child_stdin = handle
-        .stdin
-        .take()
+        .take_stdin()
         .ok_or((ErrorCode::Internal, "no stdin on recv child".into()))?;
-    let mut child_stderr = handle
-        .stderr
-        .take()
-        .ok_or((ErrorCode::Internal, "no stderr on recv child".into()))?;
-    let stderr_drain = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        let _ = child_stderr.read_to_end(&mut buf).await;
-        buf
-    });
     // `copy` returns the byte count — that IS the transfer size report.
     let copy_res = tokio::io::copy(reader, &mut child_stdin).await;
     let _ = child_stdin.shutdown().await;
     drop(child_stdin);
-    let stderr_bytes = stderr_drain.await.unwrap_or_default();
-    let exit = handle
-        .wait()
-        .await
-        .map_err(|e| (ErrorCode::Zfs, format!("recv wait: {e}")))?;
     if let Err(e) = copy_res {
-        let stderr_text = String::from_utf8_lossy(&stderr_bytes);
-        return Err((
-            ErrorCode::Zfs,
-            format!("stream copy: {e}; recv stderr: {}", stderr_text.trim()),
-        ));
+        let _ = handle.cancel().await;
+        return Err((ErrorCode::Zfs, format!("stream copy: {e}")));
     }
-    if !exit.success() {
-        let stderr_text = String::from_utf8_lossy(&stderr_bytes);
-        return Err((
-            ErrorCode::Zfs,
-            format!(
-                "zfs recv failed (exit {:?}): {}",
-                exit.code(),
-                stderr_text.trim()
-            ),
-        ));
-    }
+    handle
+        .finish()
+        .await
+        .map_err(|e| (ErrorCode::Zfs, format!("zfs recv failed: {e}")))?;
     Ok(copy_res.unwrap_or(0))
 }
 

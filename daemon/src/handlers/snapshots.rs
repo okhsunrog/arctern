@@ -66,7 +66,7 @@ pub async fn list_snapshots(
         properties: vec!["creation".into(), "used".into()],
         ..ListOptions::default()
     };
-    let mut entries = zfskit::dataset::list(state.runner.as_ref(), &opts).await?;
+    let mut entries = state.zfs.list_datasets(&opts).await?;
     if let Some(prefix) = q.prefix.as_deref() {
         let pat = format!("@{prefix}");
         entries.retain(|e| e.name.contains(&pat));
@@ -100,7 +100,6 @@ pub async fn create_snapshot(
 ) -> Result<(StatusCode, Json<DatasetSummary>), ApiError> {
     check_dataset(&name)?;
     check_snapshot_leaf(&req.snapshot_name)?;
-    let runner = state.runner.as_ref();
     let full = format!("{name}@{}", req.snapshot_name);
 
     let mut opts = SnapshotOptions::new();
@@ -110,14 +109,18 @@ pub async fn create_snapshot(
     for (k, v) in &req.properties {
         opts = opts.property(k, v);
     }
-    zfskit::dataset::snapshot(runner, &full, &opts).await?;
+    state
+        .zfs
+        .dataset(name)?
+        .snapshot(&req.snapshot_name, &opts)
+        .await?;
 
     let list_opts = ListOptions {
         roots: vec![full.clone()],
         types: vec![DatasetType::Snapshot],
         ..ListOptions::default()
     };
-    let entries = zfskit::dataset::list(runner, &list_opts).await?;
+    let entries = state.zfs.list_datasets(&list_opts).await?;
     let entry = entries.into_iter().next().ok_or_else(|| {
         ApiError::internal(format!(
             "snapshot {full} created but not visible to subsequent list"
@@ -152,7 +155,11 @@ pub async fn destroy_snapshot(
     check_dataset(&name)?;
     check_snapshot_leaf(&snapshot)?;
     let full = format!("{name}@{snapshot}");
-    zfskit::dataset::destroy(state.runner.as_ref(), &full, &DestroyOptions::default()).await?;
+    state
+        .zfs
+        .snapshot(full)?
+        .destroy(&DestroyOptions::default())
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -181,7 +188,7 @@ pub async fn list_holds(
     check_dataset(&name)?;
     check_snapshot_leaf(&snapshot)?;
     let full = format!("{name}@{snapshot}");
-    let holds = zfskit::hold::list_holds(state.runner.as_ref(), &full).await?;
+    let holds = state.zfs.snapshot(full)?.list_holds().await?;
     let mut out: Vec<SnapshotHold> = holds
         .into_iter()
         .map(|h| SnapshotHold {
@@ -233,7 +240,7 @@ pub async fn create_hold(
         ));
     }
     let full = format!("{name}@{snapshot}");
-    zfskit::hold::hold(state.runner.as_ref(), &full, &req.tag).await?;
+    state.zfs.snapshot(full)?.hold(&req.tag).await?;
     Ok(StatusCode::CREATED)
 }
 
@@ -263,6 +270,6 @@ pub async fn release_hold(
     check_snapshot_leaf(&snapshot)?;
     check_hold_tag(&tag)?;
     let full = format!("{name}@{snapshot}");
-    zfskit::hold::release(state.runner.as_ref(), &full, &tag).await?;
+    state.zfs.snapshot(full)?.release(&tag).await?;
     Ok(StatusCode::NO_CONTENT)
 }

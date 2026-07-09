@@ -280,6 +280,12 @@ ssh -L 7879:127.0.0.1:7878 root@server  # 7879 to avoid clashing with the laptop
 # then open http://127.0.0.1:7879/
 ```
 
+Each daemon has its own administrator token at
+`/var/lib/arctern/admin.token`. The sender token authenticates the sender's
+host-scoped console, including views proxied to configured peers. Session
+cookies are namespaced per daemon, so the two forwarded ports can remain
+logged in independently.
+
 "Peer links" on the laptop should show `home: connected` with the
 active route; picking the peer in the sidebar's Hosts group opens the
 same console scoped to the server (read-only with the ACL above — add

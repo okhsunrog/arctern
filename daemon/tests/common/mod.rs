@@ -302,6 +302,8 @@ fn spawn_daemon_full(
         .arg(&socket_path)
         .arg("--config")
         .arg(&config_path)
+        .arg("--http-address")
+        .arg("127.0.0.1:0")
         .env(
             "ZFSKIT_SSH_TARGET",
             std::env::var("ZFSKIT_SSH_TARGET").expect("ZFSKIT_SSH_TARGET must be set"),

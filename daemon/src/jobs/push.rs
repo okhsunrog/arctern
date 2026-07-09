@@ -122,7 +122,6 @@ pub enum PlanError {
     },
 }
 
-
 pub async fn list_sender_snaps(
     runner: &dyn CommandRunner,
     sender_dataset: &str,

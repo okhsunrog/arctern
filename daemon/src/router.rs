@@ -142,8 +142,36 @@ pub fn build_loopback_router(state: AppState) -> Router {
     build_api_router(state)
         .merge(static_routes)
         .fallback(spa_fallback)
+        .layer(middleware::from_fn(set_csp))
         .layer(middleware::from_fn(auth::enforce_csrf))
         .layer(middleware::from_fn(auth::enforce_loopback_host))
+}
+
+/// The console is fully self-contained (fonts, icons, everything rides
+/// in the binary), so the browser may load resources from NOWHERE else.
+/// This is the backstop for that guarantee: even if bundled code grows
+/// a network path (e.g. @iconify/vue falling back to its API for an
+/// icon missing from the vendored set), the browser refuses it.
+/// 'unsafe-inline' for styles only — Vue binds inline style attributes.
+/// The script-src hash allowlists the one inline script Nuxt UI
+/// injects (its colour-variables cleanup); if a Nuxt UI upgrade
+/// changes that snippet the worst case is a console warning and a
+/// leftover <style> tag, not a broken console.
+async fn set_csp(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        axum::http::HeaderValue::from_static(
+            "default-src 'self'; img-src 'self' data:; font-src 'self' data:; \
+             style-src 'self' 'unsafe-inline'; connect-src 'self'; \
+             script-src 'self' 'sha256-tYCcUbFfjZ9QESuTWESGWrFg2SmiEdyD2MYUfRWUgK0='; \
+             object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+        ),
+    );
+    response
 }
 
 #[cfg(test)]

@@ -13,7 +13,7 @@
   <a href="https://github.com/okhsunrog/arctern/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/okhsunrog/arctern"></a>
   <a href="https://aur.archlinux.org/packages/arctern-bin"><img alt="AUR version" src="https://img.shields.io/aur/version/arctern-bin"></a>
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
-  <img alt="OpenZFS" src="https://img.shields.io/badge/OpenZFS-%E2%89%A5%202.2-lightgrey.svg">
+  <img alt="OpenZFS" src="https://img.shields.io/badge/OpenZFS-%E2%89%A5%202.3-lightgrey.svg">
 </p>
 
 ![Dashboard](docs/screenshots/dashboard.png)
@@ -151,8 +151,8 @@ tar -xzf "arctern-${arch}-linux-musl.tar.gz"
 sudo install -m 755 arctern /usr/local/bin/arctern
 ```
 
-The hosts themselves need OpenZFS ≥ 2.2 (`zfs`/`zpool` on `PATH`) and
-OpenSSH — that's the whole dependency list.
+The hosts themselves need OpenZFS ≥ 2.3 for structured JSON output
+(`zfs`/`zpool` on `PATH`) and OpenSSH — that's the whole dependency list.
 
 **[The installation guide](docs/install.md)** walks through the full
 setup end to end: the dedicated SSH key and `~/.ssh/config` alias on

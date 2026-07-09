@@ -7,9 +7,9 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
-use palimpsest::dataset::{DestroyOptions, ListOptions, SnapshotOptions};
-use palimpsest::models::DatasetType;
 use serde::Deserialize;
+use zfskit::dataset::{DestroyOptions, ListOptions, SnapshotOptions};
+use zfskit::models::DatasetType;
 
 use crate::app_state::AppState;
 use crate::error::ApiError;
@@ -66,7 +66,7 @@ pub async fn list_snapshots(
         properties: vec!["creation".into(), "used".into()],
         ..ListOptions::default()
     };
-    let mut entries = palimpsest::dataset::list(state.runner.as_ref(), &opts).await?;
+    let mut entries = zfskit::dataset::list(state.runner.as_ref(), &opts).await?;
     if let Some(prefix) = q.prefix.as_deref() {
         let pat = format!("@{prefix}");
         entries.retain(|e| e.name.contains(&pat));
@@ -76,7 +76,7 @@ pub async fn list_snapshots(
 }
 
 /// Create a snapshot of `{name}` named `req.snapshot_name`.
-/// `palimpsest::ZfsError::SnapshotExists` maps to 409 — the caller
+/// `zfskit::ZfsError::SnapshotExists` maps to 409 — the caller
 /// decides whether already-exists is fatal.
 #[utoipa::path(
     post,
@@ -110,14 +110,14 @@ pub async fn create_snapshot(
     for (k, v) in &req.properties {
         opts = opts.property(k, v);
     }
-    palimpsest::dataset::snapshot(runner, &full, &opts).await?;
+    zfskit::dataset::snapshot(runner, &full, &opts).await?;
 
     let list_opts = ListOptions {
         roots: vec![full.clone()],
         types: vec![DatasetType::Snapshot],
         ..ListOptions::default()
     };
-    let entries = palimpsest::dataset::list(runner, &list_opts).await?;
+    let entries = zfskit::dataset::list(runner, &list_opts).await?;
     let entry = entries.into_iter().next().ok_or_else(|| {
         ApiError::internal(format!(
             "snapshot {full} created but not visible to subsequent list"
@@ -152,7 +152,7 @@ pub async fn destroy_snapshot(
     check_dataset(&name)?;
     check_snapshot_leaf(&snapshot)?;
     let full = format!("{name}@{snapshot}");
-    palimpsest::dataset::destroy(state.runner.as_ref(), &full, &DestroyOptions::default()).await?;
+    zfskit::dataset::destroy(state.runner.as_ref(), &full, &DestroyOptions::default()).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -181,7 +181,7 @@ pub async fn list_holds(
     check_dataset(&name)?;
     check_snapshot_leaf(&snapshot)?;
     let full = format!("{name}@{snapshot}");
-    let holds = palimpsest::hold::list_holds(state.runner.as_ref(), &full).await?;
+    let holds = zfskit::hold::list_holds(state.runner.as_ref(), &full).await?;
     let mut out: Vec<SnapshotHold> = holds
         .into_iter()
         .map(|h| SnapshotHold {
@@ -233,7 +233,7 @@ pub async fn create_hold(
         ));
     }
     let full = format!("{name}@{snapshot}");
-    palimpsest::hold::hold(state.runner.as_ref(), &full, &req.tag).await?;
+    zfskit::hold::hold(state.runner.as_ref(), &full, &req.tag).await?;
     Ok(StatusCode::CREATED)
 }
 
@@ -263,6 +263,6 @@ pub async fn release_hold(
     check_snapshot_leaf(&snapshot)?;
     check_hold_tag(&tag)?;
     let full = format!("{name}@{snapshot}");
-    palimpsest::hold::release(state.runner.as_ref(), &full, &tag).await?;
+    zfskit::hold::release(state.runner.as_ref(), &full, &tag).await?;
     Ok(StatusCode::NO_CONTENT)
 }

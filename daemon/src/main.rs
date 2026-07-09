@@ -202,16 +202,15 @@ async fn run_daemon(socket_arg: Option<PathBuf>, config_path: PathBuf) -> eyre::
 
     // Under the SSH-transport pivot the daemon runs on the actual ZFS
     // host, so its local CommandRunner is RealRunner. SshCommandRunner
-    // is kept as a dev/test override: setting PALIMPSEST_SSH_TARGET
+    // is kept as a dev/test override: setting ZFSKIT_SSH_TARGET
     // selects it, matching the integration-test harness convention.
-    let runner: Arc<dyn palimpsest::runner::CommandRunner> =
-        match std::env::var("PALIMPSEST_SSH_TARGET") {
-            Ok(s) if !s.is_empty() => Arc::new(
-                palimpsest::SshCommandRunner::from_env()
-                    .map_err(|e| eyre::eyre!("PALIMPSEST_SSH_TARGET configuration: {e}"))?,
-            ),
-            _ => Arc::new(palimpsest::runner::RealRunner),
-        };
+    let runner: Arc<dyn zfskit::runner::CommandRunner> = match std::env::var("ZFSKIT_SSH_TARGET") {
+        Ok(s) if !s.is_empty() => Arc::new(
+            zfskit::SshCommandRunner::from_env()
+                .map_err(|e| eyre::eyre!("ZFSKIT_SSH_TARGET configuration: {e}"))?,
+        ),
+        _ => Arc::new(zfskit::runner::RealRunner),
+    };
 
     // Resolve the state directory and ensure it exists; SQLite + the
     // tracing layer's table both live under this path.

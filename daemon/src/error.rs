@@ -1,6 +1,6 @@
 //! HTTP error mapping. The single `IntoResponse` impl here is the *only*
 //! place arctern translates handler failures to wire responses; handlers
-//! `?` their way through palimpsest calls (via `From<ZfsError>`) or
+//! `?` their way through zfskit calls (via `From<ZfsError>`) or
 //! construct the request-shape variants explicitly.
 
 use arctern_api::ApiErrorBody;
@@ -9,7 +9,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use palimpsest::ZfsError;
+use zfskit::ZfsError;
 
 pub enum ApiError {
     /// Underlying ZFS operation failed; status derives from the

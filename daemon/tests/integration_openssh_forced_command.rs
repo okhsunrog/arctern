@@ -34,13 +34,13 @@ fn shell_quote(s: &str) -> String {
 }
 
 fn run_remote_shell_best_effort(remote_cmd: &str) {
-    let Ok(raw_target) = std::env::var("PALIMPSEST_SSH_TARGET") else {
+    let Ok(raw_target) = std::env::var("ZFSKIT_SSH_TARGET") else {
         return;
     };
-    let Ok(target) = palimpsest::runner::SshTarget::parse(&raw_target) else {
+    let Ok(target) = zfskit::runner::SshTarget::parse(&raw_target) else {
         return;
     };
-    let password = std::env::var("PALIMPSEST_SSH_PASSWORD").ok();
+    let password = std::env::var("ZFSKIT_SSH_PASSWORD").ok();
     let mut cmd = match password.as_deref() {
         Some(pw) => {
             let mut c = Command::new("sshpass");
@@ -108,8 +108,8 @@ fn remove_local_path_best_effort(path: &Path) {
     }
 }
 
-fn remote_ssh_command(target: &palimpsest::runner::SshTarget, args: &[String]) -> Command {
-    let password = std::env::var("PALIMPSEST_SSH_PASSWORD").ok();
+fn remote_ssh_command(target: &zfskit::runner::SshTarget, args: &[String]) -> Command {
+    let password = std::env::var("ZFSKIT_SSH_PASSWORD").ok();
     let mut cmd = match password.as_deref() {
         Some(pw) => {
             let mut c = Command::new("sshpass");
@@ -134,12 +134,12 @@ fn remote_ssh_command(target: &palimpsest::runner::SshTarget, args: &[String]) -
     cmd
 }
 
-fn run_remote_command_capture(target: &palimpsest::runner::SshTarget, args: &[String]) -> String {
+fn run_remote_command_capture(target: &zfskit::runner::SshTarget, args: &[String]) -> String {
     let output = run_local_command(remote_ssh_command(target, args));
     String::from_utf8(output.stdout).expect("remote command stdout is utf8")
 }
 
-fn zfs_snapshot_guid(target: &palimpsest::runner::SshTarget, snapshot: &str) -> u64 {
+fn zfs_snapshot_guid(target: &zfskit::runner::SshTarget, snapshot: &str) -> u64 {
     let stdout = run_remote_command_capture(
         target,
         &[
@@ -159,7 +159,7 @@ fn zfs_snapshot_guid(target: &palimpsest::runner::SshTarget, snapshot: &str) -> 
         .unwrap_or_else(|e| panic!("parse guid for {snapshot}: {e}; stdout={stdout:?}"))
 }
 
-fn zfs_snapshot_exists(target: &palimpsest::runner::SshTarget, snapshot: &str) {
+fn zfs_snapshot_exists(target: &zfskit::runner::SshTarget, snapshot: &str) {
     run_local_command(remote_ssh_command(
         target,
         &[
@@ -175,7 +175,7 @@ fn zfs_snapshot_exists(target: &palimpsest::runner::SshTarget, snapshot: &str) {
     ));
 }
 
-fn zfs_send_stream(target: &palimpsest::runner::SshTarget, args: &[String]) -> Vec<u8> {
+fn zfs_send_stream(target: &zfskit::runner::SshTarget, args: &[String]) -> Vec<u8> {
     let mut remote_args = vec!["zfs".to_string(), "send".to_string()];
     remote_args.extend(args.iter().cloned());
     run_local_command(remote_ssh_command(target, &remote_args)).stdout

@@ -5,7 +5,7 @@
 //! This test does not exercise the openssh::Session multi-channel
 //! wire (that needs the arctern binary installed inside the VM and
 //! key-based auth). It does exercise:
-//! - palimpsest send + recv against real ZFS, including raw bytes
+//! - zfskit send + recv against real ZFS, including raw bytes
 //!   piped through a tokio duplex (stand-in for the SSH channel),
 //! - GUID intersection between sender/receiver inventories,
 //! - step hold placement before send and release after success,
@@ -20,12 +20,12 @@
 
 mod common;
 
-use palimpsest::dataset::{CreateOptions, ListOptions, SnapshotOptions};
-use palimpsest::models::DatasetType;
-use palimpsest::recv::{RecvArgs, recv as zfs_recv};
-use palimpsest::runner::CommandRunner;
-use palimpsest::send::{SendArgs, send as zfs_send};
 use tokio::io::AsyncWriteExt;
+use zfskit::dataset::{CreateOptions, ListOptions, SnapshotOptions};
+use zfskit::models::DatasetType;
+use zfskit::recv::{RecvArgs, recv as zfs_recv};
+use zfskit::runner::CommandRunner;
+use zfskit::send::{SendArgs, send as zfs_send};
 
 use common::{LoopbackPool, ssh_runner_from_env};
 
@@ -40,7 +40,7 @@ async fn snapshot_guid(runner: &dyn CommandRunner, full_snap: &str) -> Option<u6
         properties: vec!["guid".into()],
         ..ListOptions::default()
     };
-    let entries = palimpsest::dataset::list(runner, &opts).await.ok()?;
+    let entries = zfskit::dataset::list(runner, &opts).await.ok()?;
     let entry = entries.into_iter().next()?;
     entry
         .properties
@@ -107,17 +107,17 @@ async fn ssh_push_full_then_incremental_with_hold_and_cursor() {
     let create_opts = CreateOptions::new()
         .create_parents()
         .property("mountpoint", "none");
-    palimpsest::dataset::create(runner_dyn, &sender_root, &create_opts)
+    zfskit::dataset::create(runner_dyn, &sender_root, &create_opts)
         .await
         .expect("create sender dataset");
-    palimpsest::dataset::create(runner_dyn, &receiver_root, &create_opts)
+    zfskit::dataset::create(runner_dyn, &receiver_root, &create_opts)
         .await
         .expect("create receiver root");
     // The recv handler in production creates the parent of the target
     // dataset; we replicate that pre-step here so recv has a place to
     // land the new leaf.
     if let Some((parent, _)) = target_dataset.rsplit_once('/') {
-        palimpsest::dataset::create(runner_dyn, parent, &create_opts)
+        zfskit::dataset::create(runner_dyn, parent, &create_opts)
             .await
             .expect("create receiver target parent");
     }
@@ -125,7 +125,7 @@ async fn ssh_push_full_then_incremental_with_hold_and_cursor() {
     // Snap 1.
     let snap1_name = "s1";
     let snap1_full = format!("{sender_root}@{snap1_name}");
-    palimpsest::dataset::snapshot(runner_dyn, &snap1_full, &SnapshotOptions::new())
+    zfskit::dataset::snapshot(runner_dyn, &snap1_full, &SnapshotOptions::new())
         .await
         .expect("snap1");
     let snap1_guid = snapshot_guid(runner_dyn, &snap1_full)
@@ -133,7 +133,7 @@ async fn ssh_push_full_then_incremental_with_hold_and_cursor() {
         .expect("snap1 guid");
 
     // Step hold before send (push.rs's pattern).
-    palimpsest::hold::hold(runner_dyn, &snap1_full, STEP_HOLD_TAG)
+    zfskit::hold::hold(runner_dyn, &snap1_full, STEP_HOLD_TAG)
         .await
         .expect("step hold on snap1");
 
@@ -155,13 +155,13 @@ async fn ssh_push_full_then_incremental_with_hold_and_cursor() {
 
     // Cursor + release on success.
     let cursor = format!("{sender_root}#{CURSOR_BOOKMARK_LEAF}");
-    palimpsest::bookmark::create(runner_dyn, &snap1_full, &cursor)
+    zfskit::bookmark::create(runner_dyn, &snap1_full, &cursor)
         .await
         .expect("create cursor bookmark");
-    palimpsest::hold::release(runner_dyn, &snap1_full, STEP_HOLD_TAG)
+    zfskit::hold::release(runner_dyn, &snap1_full, STEP_HOLD_TAG)
         .await
         .expect("release step hold");
-    let holds = palimpsest::hold::list_holds(runner_dyn, &snap1_full)
+    let holds = zfskit::hold::list_holds(runner_dyn, &snap1_full)
         .await
         .expect("list holds");
     assert!(
@@ -172,13 +172,13 @@ async fn ssh_push_full_then_incremental_with_hold_and_cursor() {
     // Snap 2 + incremental.
     let snap2_name = "s2";
     let snap2_full = format!("{sender_root}@{snap2_name}");
-    palimpsest::dataset::snapshot(runner_dyn, &snap2_full, &SnapshotOptions::new())
+    zfskit::dataset::snapshot(runner_dyn, &snap2_full, &SnapshotOptions::new())
         .await
         .expect("snap2");
     let snap2_guid = snapshot_guid(runner_dyn, &snap2_full)
         .await
         .expect("snap2 guid");
-    palimpsest::hold::hold(runner_dyn, &snap2_full, STEP_HOLD_TAG)
+    zfskit::hold::hold(runner_dyn, &snap2_full, STEP_HOLD_TAG)
         .await
         .expect("step hold on snap2");
 
@@ -195,13 +195,13 @@ async fn ssh_push_full_then_incremental_with_hold_and_cursor() {
     assert_eq!(recv_snap2_guid, snap2_guid);
 
     // Advance cursor + release step hold.
-    palimpsest::bookmark::destroy(runner_dyn, &cursor)
+    zfskit::bookmark::destroy(runner_dyn, &cursor)
         .await
         .expect("destroy old cursor");
-    palimpsest::bookmark::create(runner_dyn, &snap2_full, &cursor)
+    zfskit::bookmark::create(runner_dyn, &snap2_full, &cursor)
         .await
         .expect("create new cursor");
-    palimpsest::hold::release(runner_dyn, &snap2_full, STEP_HOLD_TAG)
+    zfskit::hold::release(runner_dyn, &snap2_full, STEP_HOLD_TAG)
         .await
         .expect("release step hold on snap2");
 

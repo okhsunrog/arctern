@@ -1,6 +1,6 @@
 //! arctern configuration loader.
 //!
-//! Leaf crate: no `tokio`, no `palimpsest`, no `axum`. Both the daemon
+//! Leaf crate: no `tokio`, no `zfskit`, no `axum`. Both the daemon
 //! and `arctern configcheck` consume this; future slices' tooling will
 //! too. Per CLAUDE.md / spec NFR-002, this is the only place in arctern
 //! source allowed to use `regex::` — config parsing, not ZFS invocation.

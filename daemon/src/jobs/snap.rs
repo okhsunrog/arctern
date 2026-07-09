@@ -19,13 +19,13 @@ use std::sync::Mutex;
 use std::time::Duration as StdDuration;
 
 use arctern_config::{SnapJobConfig, filter::resolve_all};
-use palimpsest::dataset::{ListOptions, SnapshotOptions};
-use palimpsest::models::DatasetType;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info_span, warn};
+use zfskit::dataset::{ListOptions, SnapshotOptions};
+use zfskit::models::DatasetType;
 
 use super::{Job, JobContext, JobStatusInner};
 
@@ -154,7 +154,7 @@ impl SnapJob {
             roots,
             ..ListOptions::default()
         };
-        let entries = palimpsest::dataset::list(runner, &list_opts)
+        let entries = zfskit::dataset::list(runner, &list_opts)
             .await
             .map_err(|e| format!("list datasets: {e}"))?;
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
@@ -169,9 +169,9 @@ impl SnapJob {
         for ds in &targets {
             let full = format!("{ds}@{tag}");
             tracing::info!(dataset = %ds, snapshot = %tag, "creating snapshot");
-            match palimpsest::dataset::snapshot(runner, &full, &SnapshotOptions::new()).await {
+            match zfskit::dataset::snapshot(runner, &full, &SnapshotOptions::new()).await {
                 Ok(()) => {}
-                Err(palimpsest::ZfsError::SnapshotExists { .. }) => {
+                Err(zfskit::ZfsError::SnapshotExists { .. }) => {
                     warn!(snapshot = %full, "snapshot already exists; treating as no-op");
                 }
                 Err(e) => {

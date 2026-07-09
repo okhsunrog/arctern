@@ -27,7 +27,7 @@ repo owner. You are free to improve the design — this is a proposal, not a con
 
 - Monorepo: `crates/{api,config,transport,client}`, `daemon/` (binary `arctern-daemon`),
   `admin-ui/` (Vue SPA embedded into the daemon at build time via `build.rs` + `memory-serve`).
-- Sibling crate `palimpsest` at `../palimpsest` (ZFS toolkit; add primitives there first if missing).
+- Sibling crate `zfskit` at `../zfskit` (ZFS toolkit; add primitives there first if missing).
 - `justfile`: `just build` = `build-ui` (`vp install && vp exec vue-tsc --build && vp build`)
   then `cargo build --release -p arctern-daemon`. `just openapi` regenerates
   `admin-ui/openapi.json` + the typed client (`admin-ui/src/client/`, **never hand-edit**).
@@ -158,7 +158,7 @@ Implement B1–B7 as in §4: **B1** peer log levels (`peer/mod.rs:116,235` — p
 matching level tagged with peer/route, route into the peer event stream, not blanket `warn!`); **B2** unfiltered planner
 GUIDs; **B3** reconnect probe under load; **B4** JoinSet reap; **B5** peer-jobs UDS federation via `arctern-client`;
 **B6** new endpoints — `GET /api/v1/peers/{peer}/datasets` (proxied) and snapshot **hold create/release**
-(`POST`/`DELETE` under the holds path; palimpsest has hold support); **B7** the minor-hygiene set.
+(`POST`/`DELETE` under the holds path; zfskit has hold support); **B7** the minor-hygiene set.
 
 ## 6. Part C — peer-routes model + production migration
 

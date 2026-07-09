@@ -22,7 +22,7 @@ use crate::error::ApiError;
     ),
 )]
 pub async fn get_arc() -> Result<Json<ArcStats>, ApiError> {
-    let s = palimpsest::system::arc_stats()
+    let s = zfskit::system::arc_stats()
         .map_err(|e| ApiError::internal(format!("arcstats read: {e}")))?;
     Ok(Json(ArcStats::from(s)))
 }

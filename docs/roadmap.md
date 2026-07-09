@@ -59,7 +59,7 @@ The first ZFS-console slice — replaces the current admin UI's "yeah,
 it has replication" framing with "here's your pool's health, here's
 its scrub state, click to start one."
 
-**palimpsest additions:**
+**zfskit additions:**
 
 - `pool::status_json(name) -> PoolStatus` parsing `zpool status -j
   <name>` (added in OpenZFS 2.3 — verify on host first; if absent on
@@ -81,16 +81,16 @@ its scrub state, click to start one."
   faulted), capacity ring, Scrub button + live progress bar when
   active, recent scrub history (date + duration + errors).
 
-### 3. ARC stats — `palimpsest::system` module — DONE
+### 3. ARC stats — `zfskit::system` module — DONE
 
 ARC stats live in `/proc/spl/kstat/zfs/arcstats`, not in `zfs(8)`. This
-breaks palimpsest's "CLI-only" rule by design — add a new sibling
+breaks zfskit's "CLI-only" rule by design — add a new sibling
 module that owns `/proc/spl/kstat/...` parsing:
 
-- `palimpsest::system::arc_stats() -> ArcStats { size, target_size,
+- `zfskit::system::arc_stats() -> ArcStats { size, target_size,
   hits, misses, demand_hits, mfu_hits, mru_hits, l2_size, ... }`.
   Parse the kstat text format (`name TYPE value` per line).
-- `palimpsest::system::pool_io(pool) -> PoolIo { read_ops, write_ops,
+- `zfskit::system::pool_io(pool) -> PoolIo { read_ops, write_ops,
   read_bytes, write_bytes }` from `/proc/spl/kstat/zfs/<pool>/io`.
 
 The constitution note (no FFI, CLI-only) gets a "kstat files are not
@@ -124,7 +124,7 @@ data density.
 
 ### 5. Hold inspection on snapshots — DONE
 
-palimpsest already has `hold::holds(snapshot)`. Wire it through:
+zfskit already has `hold::holds(snapshot)`. Wire it through:
 
 - `GET /api/v1/datasets/{name}/snapshots/{snap}/holds`.
 - In SnapshotsView, clicking a row reveals who's holding it; the
@@ -141,7 +141,7 @@ for another day).
 
 ### 7. Encrypted dataset key management
 
-palimpsest::encryption already wraps load-key / unload-key /
+zfskit::encryption already wraps load-key / unload-key /
 change-key / change-keylocation. Add per-encrypted-dataset rows in
 the UI:
 
@@ -188,7 +188,7 @@ the tab is open. Pause when the tab is hidden.
 
 `zpool import` with no args lists importable pools. Pick one,
 provide altroot, click import. Useful for disaster recovery; the
-palimpsest primitives already exist from the archinstall_zfs
+zfskit primitives already exist from the archinstall_zfs
 side of the project.
 
 ### 14. Real `bytes_sent` from push jobs — DONE
@@ -234,7 +234,7 @@ These shape multiple roadmap items above:
 
 ### Where kstat-reading lives
 
-Decided: new `palimpsest::system` module. Sibling to the CLI wrappers,
+Decided: new `zfskit::system` module. Sibling to the CLI wrappers,
 clearly scoped to "things ZFS exposes outside of `zfs(8)`/`zpool(8)`."
 
 ### Mutation auth perimeter
@@ -256,7 +256,7 @@ shipping #3.
 
 Today every read endpoint borrows `AppState::runner` (which is a
 single `Arc<RealRunner>` — fine, the runner is internally
-concurrency-safe per palimpsest's design). When we add live polling
+concurrency-safe per zfskit's design). When we add live polling
 endpoints (iostat, scrub progress), per-request runner spawning is
 still cheap; revisit only if `zfs(8)` exec time dominates a frame.
 

@@ -6,9 +6,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use arctern_api::LogEvent;
-use palimpsest::runner::CommandRunner;
 use sqlx::SqlitePool;
 use tokio::sync::broadcast;
+use zfskit::runner::CommandRunner;
 
 use crate::jobs::JobManager;
 use crate::peer::state::PeersState;
@@ -25,7 +25,7 @@ pub struct AppState {
     /// historical state (e.g. /api/v1/jobs/{name}/runs) query through this.
     pub state: Arc<SqlitePool>,
     /// The shared local CommandRunner — RealRunner in production, or
-    /// SshCommandRunner when PALIMPSEST_SSH_TARGET is set. Local ZFS
+    /// SshCommandRunner when ZFSKIT_SSH_TARGET is set. Local ZFS
     /// handlers borrow this rather than spawning a per-request runner.
     pub runner: Arc<dyn CommandRunner>,
     /// Absolute path the daemon was started with (`--config <path>`),

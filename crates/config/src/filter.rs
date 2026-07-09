@@ -1,6 +1,6 @@
 //! Resolve a `FilesystemFilter` against a flat list of dataset names.
 //!
-//! The snap job calls `palimpsest::dataset::list` once per cycle (with
+//! The snap job calls `zfskit::dataset::list` once per cycle (with
 //! `recursive = true`) to materialize every dataset under each filter's
 //! `path`, then asks `resolve_all` to compute the union the job should
 //! act on. Doing the matching in-process means we never have to issue

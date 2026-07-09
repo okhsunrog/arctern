@@ -1,9 +1,9 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
-# Shared test VM is managed by palimpsest's justfile (one VM, port 2226,
+# Shared test VM is managed by zfskit's justfile (one VM, port 2226,
 # both projects' integration tests use it). vm-up / vm-down delegate so
 # there's exactly one source of truth.
-PALIMPSEST_DIR := env_var('HOME') + "/code/palimpsest"
+ZFSKIT_DIR := env_var('HOME') + "/code/zfskit"
 SSH_PORT := "2226"
 SSH_TARGET := "root@localhost:" + SSH_PORT
 
@@ -55,36 +55,36 @@ openapi:
 ui-dev:
     cd admin-ui && vp dev
 
-# ─── VM lifecycle (delegates to palimpsest) ────────────
+# ─── VM lifecycle (delegates to zfskit) ────────────
 
 vm-up:
-    just --justfile {{PALIMPSEST_DIR}}/justfile vm-up
+    just --justfile {{ZFSKIT_DIR}}/justfile vm-up
 
 vm-down:
-    just --justfile {{PALIMPSEST_DIR}}/justfile vm-down
+    just --justfile {{ZFSKIT_DIR}}/justfile vm-down
 
 vm-ssh:
-    just --justfile {{PALIMPSEST_DIR}}/justfile vm-ssh
+    just --justfile {{ZFSKIT_DIR}}/justfile vm-ssh
 
 vm-log:
-    just --justfile {{PALIMPSEST_DIR}}/justfile vm-log
+    just --justfile {{ZFSKIT_DIR}}/justfile vm-log
 
-# Sweep stale palimpsest_test_* pools/files inside the VM.
+# Sweep stale zfskit_test_* pools/files inside the VM.
 test-cleanup:
-    just --justfile {{PALIMPSEST_DIR}}/justfile test-cleanup
+    just --justfile {{ZFSKIT_DIR}}/justfile test-cleanup
 
 # ─── Integration tests ─────────────────────────────────
 
 # Requires the VM to be running (`just vm-up`).
 test-integration:
-    PALIMPSEST_SSH_TARGET={{SSH_TARGET}} \
-    PALIMPSEST_SSH_PASSWORD="" \
+    ZFSKIT_SSH_TARGET={{SSH_TARGET}} \
+    ZFSKIT_SSH_PASSWORD="" \
         cargo test -p arctern-daemon --features integration -- --test-threads=1
 
 # Real OpenSSH forced-command control-channel test. Requires the shared VM.
 test-openssh: vm-up
-    PALIMPSEST_SSH_TARGET={{SSH_TARGET}} \
-    PALIMPSEST_SSH_PASSWORD="" \
+    ZFSKIT_SSH_TARGET={{SSH_TARGET}} \
+    ZFSKIT_SSH_PASSWORD="" \
     ARCTERN_OPENSSH_INTEGRATION=1 \
         cargo test -p arctern-daemon --test integration_openssh_forced_command --features integration -- --nocapture
 

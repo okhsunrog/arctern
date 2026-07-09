@@ -10,7 +10,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use arctern_config::{AllowedClient, Config};
-use palimpsest::runner::{CommandRunner, RealRunner};
+use zfskit::runner::{CommandRunner, RealRunner};
 
 /// Outcome of `dispatch::run`. Encoded so step 7/8 can fork on it
 /// without re-parsing the command.

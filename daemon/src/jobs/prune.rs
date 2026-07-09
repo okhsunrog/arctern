@@ -14,12 +14,12 @@ use std::sync::Mutex;
 use std::time::Duration as StdDuration;
 
 use arctern_config::{PruneJobConfig, filter::resolve_all};
-use palimpsest::dataset::ListOptions;
-use palimpsest::models::DatasetType;
 use time::OffsetDateTime;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info_span, warn};
+use zfskit::dataset::ListOptions;
+use zfskit::models::DatasetType;
 
 use super::{Job, JobContext, JobStatusInner};
 
@@ -134,7 +134,7 @@ impl PruneJob {
             roots,
             ..ListOptions::default()
         };
-        let entries = palimpsest::dataset::list(runner, &list_opts)
+        let entries = zfskit::dataset::list(runner, &list_opts)
             .await
             .map_err(|e| format!("list datasets: {e}"))?;
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();

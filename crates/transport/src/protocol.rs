@@ -65,7 +65,7 @@ pub enum ErrorCode {
     /// configured `[[allowed_clients]]` ACL.
     Unauthorized,
     /// Underlying ZFS operation failed. `message` carries the stderr
-    /// excerpt classified upstream by palimpsest.
+    /// excerpt classified upstream by zfskit.
     Zfs,
     /// Dataset (or snapshot) referenced by the request does not exist.
     NotFound,
@@ -105,7 +105,7 @@ pub struct SendHeader {
     pub to_snap: SnapshotRef,
     pub flags: SendFlagsWire,
     /// Receiver-side directive: when true, run
-    /// `palimpsest::recv::abort_partial` on `target_dataset` before
+    /// `zfskit::recv::abort_partial` on `target_dataset` before
     /// spawning the new `zfs recv`. Set by the planner when a stale
     /// resume token is present on the receiver and the chosen plan is
     /// a fresh Full / Incremental rather than a continuation.
@@ -372,7 +372,7 @@ mod tests {
 
     /// D19 risk verification (preserved from QUIC era): serde_json must
     /// round-trip a u64 GUID above i64::MAX exactly. The captured value
-    /// is the real GUID of `tank/data@zrepl_001` from the palimpsest
+    /// is the real GUID of `tank/data@zrepl_001` from the zfskit
     /// test VM.
     #[test]
     fn guid_above_i64_max_roundtrips() {

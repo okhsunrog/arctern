@@ -15,9 +15,9 @@ mod common;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use palimpsest::dataset::ListOptions;
-use palimpsest::models::DatasetType;
-use palimpsest::runner::{Cmd, CommandRunner};
+use zfskit::dataset::ListOptions;
+use zfskit::models::DatasetType;
+use zfskit::runner::{Cmd, CommandRunner};
 
 use common::{LoopbackPool, spawn_daemon_uds_with_config, ssh_runner_from_env, unique_suffix};
 
@@ -67,7 +67,7 @@ regex = "^{prefix}.*"
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     // List snapshots of the target dataset.
-    let snaps = palimpsest::dataset::list(
+    let snaps = zfskit::dataset::list(
         &runner,
         &ListOptions {
             recursive: false,

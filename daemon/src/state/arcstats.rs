@@ -100,7 +100,7 @@ pub fn spawn_sweeper(
                 _ = cancel.cancelled() => break,
                 _ = tick.tick() => {}
             }
-            match palimpsest::system::arc_stats() {
+            match zfskit::system::arc_stats() {
                 Ok(s) => {
                     let now = time::OffsetDateTime::now_utc().unix_timestamp();
                     if let Err(e) = record(&pool, now, s.size, s.c, s.hits, s.misses).await {

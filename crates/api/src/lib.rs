@@ -1,7 +1,7 @@
 //! Shared request/response types for the arctern HTTP API.
 //!
-//! Wire types decouple the daemon's HTTP surface from `palimpsest`'s
-//! internal models so palimpsest can refactor freely without breaking
+//! Wire types decouple the daemon's HTTP surface from `zfskit`'s
+//! internal models so zfskit can refactor freely without breaking
 //! the API. Both the in-process axum router and the `arctern-client`
 //! crate consume these types.
 
@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-/// Slim projection of [`palimpsest::ZfsListEntry`] suitable for HTTP +
+/// Slim projection of [`zfskit::ZfsListEntry`] suitable for HTTP +
 /// OpenAPI. Native ZFS properties carry typed data (bytes, bool, …) but
 /// `BTreeMap<String, String>` serializes more cleanly through utoipa;
 /// consumers parse property values as needed.
@@ -18,14 +18,14 @@ use utoipa::ToSchema;
 pub struct DatasetSummary {
     pub name: String,
     /// `"filesystem" | "volume" | "snapshot" | "bookmark"` — lowercase
-    /// to match `zfs(8)`'s output and avoid leaking palimpsest's enum repr.
+    /// to match `zfs(8)`'s output and avoid leaking zfskit's enum repr.
     pub dataset_type: String,
     #[serde(default)]
     pub properties: BTreeMap<String, String>,
 }
 
-impl From<palimpsest::dataset::ZfsListEntry> for DatasetSummary {
-    fn from(entry: palimpsest::dataset::ZfsListEntry) -> Self {
+impl From<zfskit::dataset::ZfsListEntry> for DatasetSummary {
+    fn from(entry: zfskit::dataset::ZfsListEntry) -> Self {
         let properties = entry
             .properties
             .into_iter()
@@ -169,7 +169,7 @@ pub struct PoolStatus {
 }
 
 /// Recursive vdev tree as a flat list of trees. Wire-friendlier than
-/// palimpsest's map<name, VdevStatus> for UIs that want to render in
+/// zfskit's map<name, VdevStatus> for UIs that want to render in
 /// declared order.
 ///
 /// `children` carries the `#[schema(no_recursion)]` attribute so
@@ -211,7 +211,7 @@ pub struct SnapshotHold {
 /// `GET /api/v1/system/arc` — a typed echo of the kernel's
 /// `/proc/spl/kstat/zfs/arcstats`, plus a precomputed hit_ratio
 /// (NaN encoded as `null` for empty caches). Fields mirror the
-/// palimpsest `ArcStats` struct; raw map omitted from the wire to
+/// zfskit `ArcStats` struct; raw map omitted from the wire to
 /// keep responses small.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ArcStats {
@@ -243,8 +243,8 @@ pub struct ArcStats {
     pub hit_ratio: Option<f64>,
 }
 
-impl From<palimpsest::system::ArcStats> for ArcStats {
-    fn from(s: palimpsest::system::ArcStats) -> Self {
+impl From<zfskit::system::ArcStats> for ArcStats {
+    fn from(s: zfskit::system::ArcStats) -> Self {
         let ratio = s.hit_ratio();
         Self {
             hit_ratio: if ratio.is_finite() { Some(ratio) } else { None },
@@ -428,11 +428,8 @@ pub struct CreateSnapshotRequest {
 mod tests {
     use super::*;
 
-    fn list_entry(
-        name: &str,
-        kind: palimpsest::models::DatasetType,
-    ) -> palimpsest::dataset::ZfsListEntry {
-        palimpsest::dataset::ZfsListEntry {
+    fn list_entry(name: &str, kind: zfskit::models::DatasetType) -> zfskit::dataset::ZfsListEntry {
+        zfskit::dataset::ZfsListEntry {
             name: name.into(),
             kind,
             pool: name.split('/').next().unwrap().to_string(),
@@ -445,10 +442,7 @@ mod tests {
 
     #[test]
     fn from_zfs_list_entry_lowercases_kind() {
-        let s = DatasetSummary::from(list_entry(
-            "tank",
-            palimpsest::models::DatasetType::Filesystem,
-        ));
+        let s = DatasetSummary::from(list_entry("tank", zfskit::models::DatasetType::Filesystem));
         assert_eq!(s.name, "tank");
         assert_eq!(s.dataset_type, "filesystem");
     }

@@ -5,7 +5,7 @@
 //! the UI proxy's other queries) and responses correlate by tarpc's
 //! request ids, not arrival order.
 //!
-//! Handlers translate `palimpsest::ZfsError` and friends into
+//! Handlers translate `zfskit::ZfsError` and friends into
 //! `WireError { code, message }` rather than letting them escape; the
 //! caller never sees a process exit short of EOF.
 
@@ -18,17 +18,17 @@ use arctern_transport::{
     compile_prefix_regex,
 };
 use futures_util::StreamExt;
-use palimpsest::ZfsError;
-use palimpsest::dataset::ListOptions;
-use palimpsest::models::DatasetType;
-use palimpsest::runner::CommandRunner;
 use sqlx::SqlitePool;
 use tarpc::server::{BaseChannel, Channel};
 use tokio::io::{AsyncRead, AsyncWrite};
+use zfskit::ZfsError;
+use zfskit::dataset::ListOptions;
+use zfskit::models::DatasetType;
+use zfskit::runner::CommandRunner;
 
 /// Run the control channel until stdin EOF or a fatal transport error.
 /// `acl` scopes destroy / discard operations; `runner` is the
-/// palimpsest CommandRunner the dispatch process opened (typically a
+/// zfskit CommandRunner the dispatch process opened (typically a
 /// `RealRunner` invoking local `zfs(8)`).
 pub async fn run<R, W>(
     runner: Arc<dyn CommandRunner>,
@@ -100,7 +100,7 @@ impl ArcternControl for ControlServer {
             )
         })?;
         enforce_root_fs(&self.acl, &dataset)?;
-        palimpsest::recv::abort_partial(self.runner.as_ref(), &dataset)
+        zfskit::recv::abort_partial(self.runner.as_ref(), &dataset)
             .await
             .map_err(|e| {
                 WireError::new(zfs_error_code(&e), format!("abort_partial {dataset}: {e}"))
@@ -206,7 +206,7 @@ async fn collect_receiver_snapshots(
         properties: vec!["guid".into()],
         ..ListOptions::default()
     };
-    let entries = match palimpsest::dataset::list(runner, &opts).await {
+    let entries = match zfskit::dataset::list(runner, &opts).await {
         Ok(v) => v,
         // First-replication shape: receiver dataset doesn't exist yet.
         Err(ZfsError::DatasetNotFound { .. }) => return Ok((vec![], None)),
@@ -238,7 +238,7 @@ async fn collect_receiver_snapshots(
             })
         })
         .collect();
-    let receive_resume_token = match palimpsest::recv::receive_resume_token(runner, dataset).await {
+    let receive_resume_token = match zfskit::recv::receive_resume_token(runner, dataset).await {
         Ok(opt) => opt,
         Err(ZfsError::DatasetNotFound { .. }) => None,
         Err(e) => {
@@ -321,8 +321,8 @@ fn daemon_socket(config: &Config) -> std::path::PathBuf {
 mod tests {
     use super::*;
     use arctern_transport::ArcternControlClient;
-    use palimpsest::runner::{Cmd, RecordingRunner};
     use std::sync::Arc;
+    use zfskit::runner::{Cmd, RecordingRunner};
 
     fn acl(root_fs: Option<&str>) -> AllowedClient {
         acl_with_ops(root_fs, &["control", "recv"])

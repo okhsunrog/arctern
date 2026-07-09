@@ -179,7 +179,7 @@ pub struct AllowedClient {
 
 /// Receiver-side `zfs recv` knobs for a given client. Maps zrepl's
 /// `recv.properties.inherit` / `recv.properties.override` 1:1, and
-/// translates to palimpsest's `RecvArgs::property_inherit` /
+/// translates to zfskit's `RecvArgs::property_inherit` /
 /// `property_override` at recv time.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]

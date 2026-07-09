@@ -14,7 +14,7 @@ use time::OffsetDateTime;
 use super::{GridSpec, KeepCount};
 
 /// Minimal shape the retention algorithm needs. Built by the snap job
-/// from `palimpsest::dataset::list` output.
+/// from `zfskit::dataset::list` output.
 #[derive(Debug, Clone)]
 pub struct SnapshotEntry {
     pub name: String,

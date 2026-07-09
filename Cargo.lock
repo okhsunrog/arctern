@@ -98,10 +98,10 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 name = "arctern-api"
 version = "0.1.0"
 dependencies = [
- "palimpsest",
  "serde",
  "serde_json",
  "utoipa",
+ "zfskit",
 ]
 
 [[package]]
@@ -147,7 +147,6 @@ dependencies = [
  "libc",
  "memory-serve",
  "openssh",
- "palimpsest",
  "serde",
  "serde_json",
  "sqlx",
@@ -162,6 +161,7 @@ dependencies = [
  "tracing-subscriber",
  "utoipa",
  "utoipa-axum",
+ "zfskit",
 ]
 
 [[package]]
@@ -1439,18 +1439,6 @@ dependencies = [
  "percent-encoding",
  "rand 0.9.4",
  "thiserror",
-]
-
-[[package]]
-name = "palimpsest"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "regex",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
 ]
 
 [[package]]
@@ -3238,6 +3226,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "zfskit"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

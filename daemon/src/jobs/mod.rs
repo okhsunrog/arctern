@@ -13,10 +13,10 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use palimpsest::runner::CommandRunner;
 use time::OffsetDateTime;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use zfskit::runner::CommandRunner;
 
 #[derive(Debug, Clone, Default)]
 pub struct JobStatusInner {
@@ -100,8 +100,8 @@ pub(crate) async fn prune_dataset(
     keep: &[arctern_config::KeepRule],
     dataset: &str,
 ) -> Result<(), String> {
-    use palimpsest::dataset::{DestroyOptions, ListOptions};
-    use palimpsest::models::DatasetType;
+    use zfskit::dataset::{DestroyOptions, ListOptions};
+    use zfskit::models::DatasetType;
 
     let opts = ListOptions {
         recursive: false,
@@ -110,7 +110,7 @@ pub(crate) async fn prune_dataset(
         properties: vec!["creation".into()],
         ..ListOptions::default()
     };
-    let snaps = palimpsest::dataset::list(runner, &opts)
+    let snaps = zfskit::dataset::list(runner, &opts)
         .await
         .map_err(|e| format!("list snapshots: {e}"))?;
     let mut entries: Vec<arctern_config::SnapshotEntry> = Vec::with_capacity(snaps.len());
@@ -141,9 +141,9 @@ pub(crate) async fn prune_dataset(
     for i in destroy_idx {
         let target = &full_names[i];
         tracing::info!(snapshot = %target, "destroying snapshot");
-        match palimpsest::dataset::destroy(runner, target, &DestroyOptions::new()).await {
+        match zfskit::dataset::destroy(runner, target, &DestroyOptions::new()).await {
             Ok(()) => {}
-            Err(palimpsest::ZfsError::SnapshotHeld { .. }) => {
+            Err(zfskit::ZfsError::SnapshotHeld { .. }) => {
                 tracing::warn!(snapshot = %target, "snapshot is held; skipping");
             }
             Err(e) => {
@@ -313,7 +313,7 @@ mod tests {
         impl CommandRunner for FakeRunner {
             async fn run(
                 &self,
-                _cmd: palimpsest::runner::Cmd,
+                _cmd: zfskit::runner::Cmd,
             ) -> Result<std::process::Output, std::io::Error> {
                 unreachable!()
             }
@@ -341,7 +341,7 @@ mod tests {
         impl CommandRunner for FakeRunner {
             async fn run(
                 &self,
-                _cmd: palimpsest::runner::Cmd,
+                _cmd: zfskit::runner::Cmd,
             ) -> Result<std::process::Output, std::io::Error> {
                 unreachable!()
             }

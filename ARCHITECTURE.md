@@ -189,7 +189,7 @@ For a push job replicating one target peer:
      GUIDs plus the `receive_resume_token`. Deliberately unfiltered: the
      common base may carry a foreign prefix (zrepl history, a travelled
      manual snapshot).
-   - List local sender snapshots (filtered) and bookmarks via palimpsest.
+   - List local sender snapshots (filtered) and bookmarks via zfskit.
    - Compute the plan via `pick_plan_with_token`: resume, full, incremental
      from snapshot, or incremental from bookmark (the no-common-snapshot
      fallback).
@@ -229,7 +229,7 @@ optional safety-net bound on the blind sleep (default 15m), not a poll rate.
 ## Holds and replication cursor
 
 The hold/bookmark choreography is the protection against the snap-job's prune
-racing the push-job's send. palimpsest exposes `hold`, `release`,
+racing the push-job's send. zfskit exposes `hold`, `release`,
 `list_holds`, `list_holds_many`, `bookmark::create`, `bookmark::destroy`.
 
 Naming conventions, pinned for compatibility (peer-namespaced so a
@@ -461,7 +461,7 @@ admin-ui/                    Vue 3 + Nuxt UI SPA; host-scoped console under
 - Comment WHY, never WHAT.
 - No emojis in code, comments, or commit messages.
 - TS client auto-generated from OpenAPI; never hand-edit `admin-ui/src/client/`.
-- All ZFS work goes through palimpsest; missing primitives are added there
+- All ZFS work goes through zfskit; missing primitives are added there
   first.
 
 ## Out of scope

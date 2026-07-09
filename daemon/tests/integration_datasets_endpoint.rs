@@ -3,8 +3,8 @@
 //! `arctern-client`, assert the test pool appears.
 //!
 //! Gated behind the `integration` cargo feature. Requires
-//! PALIMPSEST_SSH_TARGET + (optional) PALIMPSEST_SSH_PASSWORD pointing at
-//! a ZFS-capable VM — `just vm-up` from either palimpsest or arctern's
+//! ZFSKIT_SSH_TARGET + (optional) ZFSKIT_SSH_PASSWORD pointing at
+//! a ZFS-capable VM — `just vm-up` from either zfskit or arctern's
 //! repo brings one up on port 2226.
 
 #![cfg(feature = "integration")]

@@ -23,7 +23,7 @@ export const getConfig = <ThrowOnError extends boolean = false>(options?: Option
 /**
  * List datasets reachable through the daemon's shared `CommandRunner`
  * (`AppState::runner`). RealRunner in production; SshCommandRunner
- * only when `PALIMPSEST_SSH_TARGET` is set for dev/test.
+ * only when `ZFSKIT_SSH_TARGET` is set for dev/test.
  */
 export const listDatasets = <ThrowOnError extends boolean = false>(options?: Options<ListDatasetsData, ThrowOnError>) => (options?.client ?? client).get<ListDatasetsResponses, ListDatasetsErrors, ThrowOnError>({ url: '/api/v1/datasets', ...options });
 
@@ -35,7 +35,7 @@ export const listSnapshots = <ThrowOnError extends boolean = false>(options: Opt
 
 /**
  * Create a snapshot of `{name}` named `req.snapshot_name`.
- * `palimpsest::ZfsError::SnapshotExists` maps to 409 — the caller
+ * `zfskit::ZfsError::SnapshotExists` maps to 409 — the caller
  * decides whether already-exists is fatal.
  */
 export const createSnapshot = <ThrowOnError extends boolean = false>(options: Options<CreateSnapshotData, ThrowOnError>) => (options.client ?? client).post<CreateSnapshotResponses, CreateSnapshotErrors, ThrowOnError>({

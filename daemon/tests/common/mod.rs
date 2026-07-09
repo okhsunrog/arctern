@@ -1,10 +1,10 @@
 //! Shared helpers for arctern integration tests. Compiled only when the
-//! `integration` feature is on. Mirrors palimpsest's `tests/common/mod.rs`
+//! `integration` feature is on. Mirrors zfskit's `tests/common/mod.rs`
 //! (LoopbackPool inside the VM) and adds a daemon-spawn helper that reads
 //! the LISTEN <addr> handshake line from the daemon's stdout.
 //!
 //! Per slice 001 plan decision D4: this is copied rather than promoted to
-//! a `palimpsest::test_support` module. Promote when a third consumer
+//! a `zfskit::test_support` module. Promote when a third consumer
 //! appears.
 
 #![cfg(feature = "integration")]
@@ -16,14 +16,14 @@ use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use palimpsest::pool::{DestroyOptions, ExportOptions, PoolCreateOptions, Vdev};
-use palimpsest::runner::{Cmd, CommandRunner, SshTarget};
-use palimpsest::{SshCommandRunner, ZfsError};
+use zfskit::pool::{DestroyOptions, ExportOptions, PoolCreateOptions, Vdev};
+use zfskit::runner::{Cmd, CommandRunner, SshTarget};
+use zfskit::{SshCommandRunner, ZfsError};
 
 pub fn ssh_runner_from_env() -> SshCommandRunner {
     SshCommandRunner::from_env().unwrap_or_else(|e| {
         panic!(
-            "integration test requires PALIMPSEST_SSH_TARGET=[user@]host[:port]: {e}\n\
+            "integration test requires ZFSKIT_SSH_TARGET=[user@]host[:port]: {e}\n\
              tip: `just vm-up` boots the archzfs test ISO and exports the right env"
         )
     })
@@ -46,9 +46,9 @@ pub fn openssh_integration_enabled() -> bool {
 }
 
 pub fn ssh_target_from_env() -> SshTarget {
-    let raw = std::env::var("PALIMPSEST_SSH_TARGET")
-        .expect("PALIMPSEST_SSH_TARGET must be set for integration tests");
-    SshTarget::parse(&raw).expect("PALIMPSEST_SSH_TARGET parses")
+    let raw = std::env::var("ZFSKIT_SSH_TARGET")
+        .expect("ZFSKIT_SSH_TARGET must be set for integration tests");
+    SshTarget::parse(&raw).expect("ZFSKIT_SSH_TARGET parses")
 }
 
 pub fn run_local_command(mut cmd: Command) -> Output {
@@ -66,9 +66,9 @@ pub fn run_local_command(mut cmd: Command) -> Output {
 }
 
 pub fn run_remote_shell(remote_cmd: &str) {
-    let target = std::env::var("PALIMPSEST_SSH_TARGET")
-        .expect("PALIMPSEST_SSH_TARGET must be set for integration tests");
-    let password = std::env::var("PALIMPSEST_SSH_PASSWORD").ok();
+    let target = std::env::var("ZFSKIT_SSH_TARGET")
+        .expect("ZFSKIT_SSH_TARGET must be set for integration tests");
+    let password = std::env::var("ZFSKIT_SSH_PASSWORD").ok();
     let status =
         sync_ssh(&target, password.as_deref(), remote_cmd).expect("ssh remote shell command");
     assert!(
@@ -79,7 +79,7 @@ pub fn run_remote_shell(remote_cmd: &str) {
 
 pub fn scp_to_remote(local: &Path, remote: &str) {
     let target = ssh_target_from_env();
-    let password = std::env::var("PALIMPSEST_SSH_PASSWORD").ok();
+    let password = std::env::var("ZFSKIT_SSH_PASSWORD").ok();
     let mut cmd = match password.as_deref() {
         Some(pw) => {
             let mut c = Command::new("sshpass");
@@ -114,7 +114,7 @@ pub struct LoopbackPool {
 impl LoopbackPool {
     pub async fn create(runner: SshCommandRunner) -> Result<Self, ZfsError> {
         let suffix = unique_suffix();
-        let name = format!("palimpsest_test_{suffix}");
+        let name = format!("zfskit_test_{suffix}");
         let img_path = format!("/tmp/{name}.img");
         let altroot = format!("/tmp/{name}_root");
 
@@ -133,7 +133,7 @@ impl LoopbackPool {
             .mountpoint("none")
             .altroot(&altroot)
             .vdev(Vdev::Stripe(vec![img_path.clone().into()]));
-        palimpsest::pool::create(&runner, &opts).await?;
+        zfskit::pool::create(&runner, &opts).await?;
 
         Ok(Self {
             runner,
@@ -150,10 +150,9 @@ impl LoopbackPool {
 
     pub async fn destroy(mut self) -> Result<(), ZfsError> {
         self.destroyed = true;
-        let _ = palimpsest::pool::export(&self.runner, &self.name, &ExportOptions::default()).await;
+        let _ = zfskit::pool::export(&self.runner, &self.name, &ExportOptions::default()).await;
         let _ =
-            palimpsest::pool::destroy(&self.runner, &self.name, &DestroyOptions { force: true })
-                .await;
+            zfskit::pool::destroy(&self.runner, &self.name, &DestroyOptions { force: true }).await;
         let _ = run_check(&self.runner, Cmd::new("rm").args(["-f", &self.img_path])).await;
         let _ = run_check(&self.runner, Cmd::new("rm").args(["-rf", &self.altroot])).await;
         Ok(())
@@ -165,9 +164,9 @@ impl Drop for LoopbackPool {
         if self.destroyed {
             return;
         }
-        let target = std::env::var("PALIMPSEST_SSH_TARGET").ok();
+        let target = std::env::var("ZFSKIT_SSH_TARGET").ok();
         let Some(target) = target else { return };
-        let pw = std::env::var("PALIMPSEST_SSH_PASSWORD").ok();
+        let pw = std::env::var("ZFSKIT_SSH_PASSWORD").ok();
         let cmds = [
             format!("zpool destroy -f {} 2>/dev/null || true", self.name),
             format!("rm -f {} 2>/dev/null || true", self.img_path),
@@ -304,12 +303,12 @@ fn spawn_daemon_full(
         .arg("--config")
         .arg(&config_path)
         .env(
-            "PALIMPSEST_SSH_TARGET",
-            std::env::var("PALIMPSEST_SSH_TARGET").expect("PALIMPSEST_SSH_TARGET must be set"),
+            "ZFSKIT_SSH_TARGET",
+            std::env::var("ZFSKIT_SSH_TARGET").expect("ZFSKIT_SSH_TARGET must be set"),
         )
         .env(
-            "PALIMPSEST_SSH_PASSWORD",
-            std::env::var("PALIMPSEST_SSH_PASSWORD").unwrap_or_default(),
+            "ZFSKIT_SSH_PASSWORD",
+            std::env::var("ZFSKIT_SSH_PASSWORD").unwrap_or_default(),
         )
         .stdout(Stdio::piped())
         .stderr({

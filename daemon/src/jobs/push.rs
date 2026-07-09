@@ -37,16 +37,16 @@ use arctern_transport::{
     PROTOCOL_VERSION, RecvHeader, Response, SendFlagsWire, SendHeader, SendKind, SnapshotEntry,
     SnapshotRef, compile_prefix_regex, regex,
 };
-use palimpsest::dataset::ListOptions;
-use palimpsest::models::DatasetType;
-use palimpsest::runner::CommandRunner;
-use palimpsest::send::{SendArgs, send as zfs_send};
 use thiserror::Error;
 use time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info_span, warn};
+use zfskit::dataset::ListOptions;
+use zfskit::models::DatasetType;
+use zfskit::runner::CommandRunner;
+use zfskit::send::{SendArgs, send as zfs_send};
 
 use super::{Job, JobContext, JobStatusInner};
 use crate::peer::PeerLink;
@@ -80,7 +80,7 @@ pub enum SnapshotPlan {
     },
     Resume {
         token: String,
-        decoded: palimpsest::resume_token::ResumeToken,
+        decoded: zfskit::resume_token::ResumeToken,
     },
 }
 
@@ -118,7 +118,7 @@ pub enum PlanError {
     SenderList {
         dataset: String,
         #[source]
-        source: palimpsest::ZfsError,
+        source: zfskit::ZfsError,
     },
 }
 
@@ -141,7 +141,7 @@ pub async fn list_sender_snaps(
         properties: vec!["guid".into()],
         ..ListOptions::default()
     };
-    let entries = palimpsest::dataset::list(runner, &opts)
+    let entries = zfskit::dataset::list(runner, &opts)
         .await
         .map_err(|source| PlanError::SenderList {
             dataset: sender_dataset.to_string(),
@@ -278,7 +278,7 @@ pub async fn list_sender_bookmarks(
         properties: vec!["guid".into()],
         ..ListOptions::default()
     };
-    let entries = palimpsest::dataset::list(runner, &opts)
+    let entries = zfskit::dataset::list(runner, &opts)
         .await
         .map_err(|source| PlanError::SenderList {
             dataset: sender_dataset.to_string(),
@@ -306,7 +306,7 @@ pub fn pick_plan_with_token(
     sender: &[SnapshotRef],
     receiver: &[SnapshotEntry],
     token: Option<&str>,
-    decoded: Option<&palimpsest::resume_token::ResumeToken>,
+    decoded: Option<&zfskit::resume_token::ResumeToken>,
     sender_bookmarks: &[BookmarkRef],
 ) -> SnapshotPlan {
     let (Some(token), Some(decoded)) = (token, decoded) else {
@@ -476,7 +476,7 @@ fn is_cursor_bookmark_leaf(leaf: &str, job_name: &str, peer: &str) -> bool {
 }
 
 /// Plan one filesystem cycle against the receiver. Pure planner glue
-/// over palimpsest + the control channel. Returns the plan plus the
+/// over zfskit + the control channel. Returns the plan plus the
 /// filtered sender snapshot list (the executor's hold sweep reuses it).
 async fn plan_one_filesystem(
     runner: &dyn CommandRunner,
@@ -516,7 +516,7 @@ async fn plan_one_filesystem(
         })
         .collect();
     let decoded = match token.as_deref() {
-        Some(t) => match palimpsest::resume_token::decode(runner, t).await {
+        Some(t) => match zfskit::resume_token::decode(runner, t).await {
             Ok(d) => Some(d),
             Err(e) => {
                 tracing::info!(
@@ -815,9 +815,9 @@ async fn run_one_filesystem(
         .iter()
         .chain(to_hold_target.iter().map(|(s, _)| s))
     {
-        // hold is idempotent at the palimpsest layer (no-op when the
+        // hold is idempotent at the zfskit layer (no-op when the
         // tag already exists for that snapshot).
-        if let Err(e) = palimpsest::hold::hold(runner, snap, &tag).await {
+        if let Err(e) = zfskit::hold::hold(runner, snap, &tag).await {
             return Err(format!("step hold failed for {snap} with tag {tag}: {e}"));
         }
     }
@@ -858,7 +858,7 @@ async fn advance_cursor(
     to_guid: u64,
 ) {
     let cursor = cursor_bookmark_name(sender_dataset, job_name, peer_name, to_guid);
-    if let Err(e) = palimpsest::bookmark::create(runner, to_snap, &cursor).await {
+    if let Err(e) = zfskit::bookmark::create(runner, to_snap, &cursor).await {
         warn!(snapshot = %to_snap, bookmark = %cursor, error = %e, "create cursor bookmark");
         // Keep the old cursor rather than risk destroying the only one.
         return;
@@ -869,7 +869,7 @@ async fn advance_cursor(
         roots: vec![sender_dataset.to_string()],
         ..ListOptions::default()
     };
-    let bookmarks = match palimpsest::dataset::list(runner, &opts).await {
+    let bookmarks = match zfskit::dataset::list(runner, &opts).await {
         Ok(v) => v,
         Err(e) => {
             warn!(dataset = %sender_dataset, error = %e, "list bookmarks for cursor sweep");
@@ -882,7 +882,7 @@ async fn advance_cursor(
         };
         if b.name != cursor
             && is_cursor_bookmark_leaf(leaf, job_name, peer_name)
-            && let Err(e) = palimpsest::bookmark::destroy(runner, &b.name).await
+            && let Err(e) = zfskit::bookmark::destroy(runner, &b.name).await
         {
             warn!(bookmark = %b.name, error = %e, "destroy stale cursor bookmark");
         }
@@ -910,7 +910,7 @@ async fn sweep_step_holds(
         names.push(to_snap_full.to_string());
     }
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    let holds = match palimpsest::hold::list_holds_many(runner, &refs).await {
+    let holds = match zfskit::hold::list_holds_many(runner, &refs).await {
         Ok(h) => h,
         Err(e) => {
             warn!(dataset = %sender_dataset, error = %e, "step-hold sweep holds query failed");
@@ -918,7 +918,7 @@ async fn sweep_step_holds(
         }
     };
     for h in holds.iter().filter(|h| h.tag == tag) {
-        if let Err(e) = palimpsest::hold::release(runner, &h.dataset, tag).await {
+        if let Err(e) = zfskit::hold::release(runner, &h.dataset, tag).await {
             warn!(snapshot = %h.dataset, tag = %tag, error = %e, "release step hold");
         }
     }
@@ -1085,7 +1085,7 @@ impl PushJob {
             roots: pools.into_iter().collect(),
             ..ListOptions::default()
         };
-        let entries = palimpsest::dataset::list(runner, &opts)
+        let entries = zfskit::dataset::list(runner, &opts)
             .await
             .map_err(|e| format!("list datasets: {e}"))?;
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
@@ -1387,7 +1387,7 @@ impl PushJob {
             SnapshotPlan::Nothing => unreachable!("filtered above"),
         };
         let total = match build_send_args(&plan, sender_path, &self.config.send) {
-            Some(args) if kind != "resume" => palimpsest::send::dry_run(runner, &args)
+            Some(args) if kind != "resume" => zfskit::send::dry_run(runner, &args)
                 .await
                 .ok()
                 .map(|d| d.total_bytes),
@@ -1785,7 +1785,7 @@ mod tests {
 
     #[test]
     fn build_send_args_resume_uses_dash_t() {
-        let decoded = palimpsest::resume_token::ResumeToken {
+        let decoded = zfskit::resume_token::ResumeToken {
             token: "1-abc".into(),
             to_name: "tank/data@snap1".into(),
             to_guid: 42,
@@ -1824,7 +1824,7 @@ mod tests {
         // Interrupted cursor-based send: the token's from_guid is the
         // BOOKMARK guid, absent from the snapshot list. The plan must
         // stay Resume instead of discarding the partial receive.
-        let decoded = palimpsest::resume_token::ResumeToken {
+        let decoded = zfskit::resume_token::ResumeToken {
             token: "1-abc".into(),
             to_name: "tank/data@zrepl_new".into(),
             to_guid: 42,
@@ -1852,7 +1852,7 @@ mod tests {
     fn resume_token_with_vanished_base_discards() {
         // Neither a snapshot nor a bookmark carries the token's
         // from_guid — the partial is genuinely unresumable.
-        let decoded = palimpsest::resume_token::ResumeToken {
+        let decoded = zfskit::resume_token::ResumeToken {
             token: "1-abc".into(),
             to_name: "tank/data@zrepl_new".into(),
             to_guid: 42,
@@ -2027,7 +2027,7 @@ mod tests {
 
     #[test]
     fn build_send_header_resume_does_not_set_discard_and_uses_leaf_name() {
-        let decoded = palimpsest::resume_token::ResumeToken {
+        let decoded = zfskit::resume_token::ResumeToken {
             token: "1-abc".into(),
             to_name: "tank/data@snap1".into(),
             to_guid: 42,

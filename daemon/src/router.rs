@@ -166,7 +166,7 @@ mod tests {
             peers: new_state(),
             events,
             state: pool,
-            runner: Arc::new(palimpsest::runner::RealRunner),
+            runner: Arc::new(zfskit::runner::RealRunner),
             config_path: std::path::PathBuf::from("/dev/null"),
             shutdown: tokio_util::sync::CancellationToken::new(),
         }

@@ -1,9 +1,9 @@
 //! Server-side recv-channel handler. One process per replication step:
 //!
 //!   1. Read a single `RecvHeader` from stdin (length-prefixed JSON).
-//!   2. Optionally `palimpsest::recv::abort_partial` against the target
+//!   2. Optionally `zfskit::recv::abort_partial` against the target
 //!      when `header.send.discard_partial_recv` is set.
-//!   3. Spawn `zfs recv -s -u` via palimpsest's streaming recv.
+//!   3. Spawn `zfs recv -s -u` via zfskit's streaming recv.
 //!   4. Copy stdin bytes into the recv child's stdin until EOF.
 //!   5. Wait for the recv child to exit.
 //!   6. Advance the last-received hold (`arctern_last_J_<job>`) to the
@@ -21,12 +21,12 @@ use arctern_config::zfs_names::{validate_dataset_name, validate_snapshot_leaf};
 use arctern_transport::{
     ErrorCode, RecvHeader, Response, ResponseFrame, read_header, write_response,
 };
-use palimpsest::dataset::ListOptions;
-use palimpsest::models::DatasetType;
-use palimpsest::recv::{RecvArgs, recv as zfs_recv};
-use palimpsest::runner::CommandRunner;
 use sqlx::SqlitePool;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use zfskit::dataset::ListOptions;
+use zfskit::models::DatasetType;
+use zfskit::recv::{RecvArgs, recv as zfs_recv};
+use zfskit::runner::CommandRunner;
 
 /// Drive one recv channel from start to finish. Errors are surfaced as
 /// `Response::Error` written back to the caller; the function only
@@ -102,7 +102,7 @@ async fn advance_last_hold(
 ) {
     let tag = last_hold_tag(job);
     let new_snap = format!("{target_dataset}@{to_leaf}");
-    if let Err(e) = palimpsest::hold::hold(runner, &new_snap, &tag).await {
+    if let Err(e) = zfskit::hold::hold(runner, &new_snap, &tag).await {
         tracing::warn!(snapshot = %new_snap, tag = %tag, error = %e, "recv: last-received hold failed");
         return;
     }
@@ -112,7 +112,7 @@ async fn advance_last_hold(
         roots: vec![target_dataset.to_string()],
         ..ListOptions::default()
     };
-    let snaps = match palimpsest::dataset::list(runner, &opts).await {
+    let snaps = match zfskit::dataset::list(runner, &opts).await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(dataset = %target_dataset, error = %e, "recv: last-hold sweep list failed");
@@ -124,7 +124,7 @@ async fn advance_last_hold(
         .map(|s| s.name.as_str())
         .filter(|n| *n != new_snap)
         .collect();
-    let holds = match palimpsest::hold::list_holds_many(runner, &others).await {
+    let holds = match zfskit::hold::list_holds_many(runner, &others).await {
         Ok(h) => h,
         Err(e) => {
             tracing::warn!(dataset = %target_dataset, error = %e, "recv: last-hold sweep holds query failed");
@@ -132,7 +132,7 @@ async fn advance_last_hold(
         }
     };
     for h in holds.iter().filter(|h| h.tag == tag) {
-        if let Err(e) = palimpsest::hold::release(runner, &h.dataset, &tag).await {
+        if let Err(e) = zfskit::hold::release(runner, &h.dataset, &tag).await {
             tracing::warn!(snapshot = %h.dataset, tag = %tag, error = %e, "recv: release stale last-hold failed");
         }
     }
@@ -156,9 +156,7 @@ where
             target = %header.target_dataset,
             "recv: discarding partial recv per sender request"
         );
-        if let Err(e) =
-            palimpsest::recv::abort_partial(runner.as_ref(), &header.target_dataset).await
-        {
+        if let Err(e) = zfskit::recv::abort_partial(runner.as_ref(), &header.target_dataset).await {
             return Err((
                 ErrorCode::Zfs,
                 format!("abort_partial {}: {e}", header.target_dataset),
@@ -168,10 +166,10 @@ where
     // Ensure the receive parent exists; the leaf dataset is created by
     // `zfs recv` itself.
     if let Some((parent, _)) = header.target_dataset.rsplit_once('/') {
-        let opts = palimpsest::dataset::CreateOptions::new()
+        let opts = zfskit::dataset::CreateOptions::new()
             .create_parents()
             .property("mountpoint", "none");
-        match palimpsest::dataset::create(runner.as_ref(), parent, &opts).await {
+        match zfskit::dataset::create(runner.as_ref(), parent, &opts).await {
             Ok(()) => {}
             Err(e) => {
                 let stderr = format!("{e}");

@@ -6,8 +6,8 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use palimpsest::models::{ScanStatus, VdevStatus, ZpoolStatusEntry};
-use palimpsest::pool::ScrubAction;
+use zfskit::models::{ScanStatus, VdevStatus, ZpoolStatusEntry};
+use zfskit::pool::ScrubAction;
 
 use crate::app_state::AppState;
 use crate::error::ApiError;
@@ -28,7 +28,7 @@ fn scan_to_wire(s: &ScanStatus) -> ScanSummary {
 }
 
 fn vdev_to_wire(v: &VdevStatus) -> VdevNode {
-    // palimpsest models the tree as HashMap<name, VdevStatus>; flatten to a
+    // zfskit models the tree as HashMap<name, VdevStatus>; flatten to a
     // Vec so wire order is deterministic (alphabetical by name). zpool
     // doesn't guarantee map order either, so this is no worse and gives
     // the UI a stable rendering.
@@ -74,7 +74,7 @@ fn entry_to_summary(e: &ZpoolStatusEntry) -> PoolSummary {
     ),
 )]
 pub async fn list_pools(State(state): State<AppState>) -> Result<Json<Vec<PoolSummary>>, ApiError> {
-    let entries = palimpsest::pool::status_all(state.runner.as_ref()).await?;
+    let entries = zfskit::pool::status_all(state.runner.as_ref()).await?;
     let mut out: Vec<PoolSummary> = entries.iter().map(entry_to_summary).collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(Json(out))
@@ -96,7 +96,7 @@ pub async fn get_pool(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<PoolStatus>, ApiError> {
-    let entry = palimpsest::pool::status(state.runner.as_ref(), &name).await?;
+    let entry = zfskit::pool::status(state.runner.as_ref(), &name).await?;
     // The status response's `vdevs` is keyed by name. The root vdev's
     // name equals the pool name; render the *children* of that root as
     // the top-level vdev list, since the root is an implementation
@@ -149,6 +149,6 @@ pub async fn pool_scrub(
             )));
         }
     };
-    palimpsest::pool::scrub(state.runner.as_ref(), &name, action).await?;
+    zfskit::pool::scrub(state.runner.as_ref(), &name, action).await?;
     Ok(StatusCode::NO_CONTENT)
 }

@@ -34,7 +34,7 @@ export type ArcHistoryPoint = {
  * `GET /api/v1/system/arc` — a typed echo of the kernel's
  * `/proc/spl/kstat/zfs/arcstats`, plus a precomputed hit_ratio
  * (NaN encoded as `null` for empty caches). Fields mirror the
- * palimpsest `ArcStats` struct; raw map omitted from the wire to
+ * zfskit `ArcStats` struct; raw map omitted from the wire to
  * keep responses small.
  */
 export type ArcStats = {
@@ -104,7 +104,7 @@ export type CreateSnapshotRequest = {
 };
 
 /**
- * Slim projection of [`palimpsest::ZfsListEntry`] suitable for HTTP +
+ * Slim projection of [`zfskit::ZfsListEntry`] suitable for HTTP +
  * OpenAPI. Native ZFS properties carry typed data (bytes, bool, …) but
  * `BTreeMap<String, String>` serializes more cleanly through utoipa;
  * consumers parse property values as needed.
@@ -113,7 +113,7 @@ export type DatasetSummary = {
     name: string;
     /**
      * `"filesystem" | "volume" | "snapshot" | "bookmark"` — lowercase
-     * to match `zfs(8)`'s output and avoid leaking palimpsest's enum repr.
+     * to match `zfs(8)`'s output and avoid leaking zfskit's enum repr.
      */
     dataset_type: string;
     properties?: {
@@ -396,7 +396,7 @@ export type TransferInfo = {
 
 /**
  * Recursive vdev tree as a flat list of trees. Wire-friendlier than
- * palimpsest's map<name, VdevStatus> for UIs that want to render in
+ * zfskit's map<name, VdevStatus> for UIs that want to render in
  * declared order.
  *
  * `children` carries the `#[schema(no_recursion)]` attribute so

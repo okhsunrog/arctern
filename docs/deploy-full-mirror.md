@@ -127,7 +127,7 @@ sudo zfs create    -o canmount=off okdata/backups/arctern_trial/laptop
 Encryption note: on OpenZFS ≥ 2.4.1, raw-encrypted recv beneath an
 encrypted parent succeeds and the received dataset retains its own
 encryptionroot and key. No `encryption=off` placeholder is required.
-(Verified in the palimpsest test VM.) On OpenZFS < 2.2 you may want
+(Verified in the zfskit test VM.) On OpenZFS < 2.2 you may want
 the `encryption=off` parents zrepl historically used; on modern
 OpenZFS it's defensive but optional.
 

@@ -133,7 +133,7 @@ SSH):
 
 - OpenZFS ≥ 2.2 and OpenSSH on both hosts.
 - Rust stable (edition 2024) to build.
-- Sibling crate [`palimpsest`](https://github.com/okhsunrog/palimpsest) — the
+- Sibling crate [`zfskit`](https://github.com/okhsunrog/zfskit) — the
   ZFS toolkit arctern is built on; cloned next to this repo (path dependency).
 
 ## Build
@@ -143,7 +143,7 @@ so build the UI first.
 
 ```sh
 # 1. clone the sibling dependency next to this repo
-git clone https://github.com/okhsunrog/palimpsest
+git clone https://github.com/okhsunrog/zfskit
 git clone https://github.com/okhsunrog/arctern
 cd arctern
 
@@ -248,7 +248,7 @@ admin-ui/      Vue admin UI (embedded into the daemon at build time)
 ```
 
 The replication primitives (snapshots, sends, holds, bookmarks, resume tokens)
-live in the separate [`palimpsest`](https://github.com/okhsunrog/palimpsest)
+live in the separate [`zfskit`](https://github.com/okhsunrog/zfskit)
 crate.
 
 ## Scope

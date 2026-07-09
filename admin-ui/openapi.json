@@ -44,7 +44,7 @@
         "tags": [
           "datasets"
         ],
-        "summary": "List datasets reachable through the daemon's shared `CommandRunner`\n(`AppState::runner`). RealRunner in production; SshCommandRunner\nonly when `PALIMPSEST_SSH_TARGET` is set for dev/test.",
+        "summary": "List datasets reachable through the daemon's shared `CommandRunner`\n(`AppState::runner`). RealRunner in production; SshCommandRunner\nonly when `ZFSKIT_SSH_TARGET` is set for dev/test.",
         "operationId": "list_datasets",
         "responses": {
           "200": {
@@ -143,7 +143,7 @@
         "tags": [
           "snapshots"
         ],
-        "summary": "Create a snapshot of `{name}` named `req.snapshot_name`.\n`palimpsest::ZfsError::SnapshotExists` maps to 409 — the caller\ndecides whether already-exists is fatal.",
+        "summary": "Create a snapshot of `{name}` named `req.snapshot_name`.\n`zfskit::ZfsError::SnapshotExists` maps to 409 — the caller\ndecides whether already-exists is fatal.",
         "operationId": "create_snapshot",
         "parameters": [
           {
@@ -1156,7 +1156,7 @@
       },
       "ArcStats": {
         "type": "object",
-        "description": "`GET /api/v1/system/arc` — a typed echo of the kernel's\n`/proc/spl/kstat/zfs/arcstats`, plus a precomputed hit_ratio\n(NaN encoded as `null` for empty caches). Fields mirror the\npalimpsest `ArcStats` struct; raw map omitted from the wire to\nkeep responses small.",
+        "description": "`GET /api/v1/system/arc` — a typed echo of the kernel's\n`/proc/spl/kstat/zfs/arcstats`, plus a precomputed hit_ratio\n(NaN encoded as `null` for empty caches). Fields mirror the\nzfskit `ArcStats` struct; raw map omitted from the wire to\nkeep responses small.",
         "required": [
           "size",
           "c",
@@ -1362,7 +1362,7 @@
       },
       "DatasetSummary": {
         "type": "object",
-        "description": "Slim projection of [`palimpsest::ZfsListEntry`] suitable for HTTP +\nOpenAPI. Native ZFS properties carry typed data (bytes, bool, …) but\n`BTreeMap<String, String>` serializes more cleanly through utoipa;\nconsumers parse property values as needed.",
+        "description": "Slim projection of [`zfskit::ZfsListEntry`] suitable for HTTP +\nOpenAPI. Native ZFS properties carry typed data (bytes, bool, …) but\n`BTreeMap<String, String>` serializes more cleanly through utoipa;\nconsumers parse property values as needed.",
         "required": [
           "name",
           "dataset_type"
@@ -1373,7 +1373,7 @@
           },
           "dataset_type": {
             "type": "string",
-            "description": "`\"filesystem\" | \"volume\" | \"snapshot\" | \"bookmark\"` — lowercase\nto match `zfs(8)`'s output and avoid leaking palimpsest's enum repr."
+            "description": "`\"filesystem\" | \"volume\" | \"snapshot\" | \"bookmark\"` — lowercase\nto match `zfs(8)`'s output and avoid leaking zfskit's enum repr."
           },
           "properties": {
             "type": "object",
@@ -1980,7 +1980,7 @@
       },
       "VdevNode": {
         "type": "object",
-        "description": "Recursive vdev tree as a flat list of trees. Wire-friendlier than\npalimpsest's map<name, VdevStatus> for UIs that want to render in\ndeclared order.\n\n`children` carries the `#[schema(no_recursion)]` attribute so\nutoipa's auto-collector stops at the cycle and emits a `$ref` to\n`VdevNode` itself instead of inlining the type — without this\n`ApiDoc::openapi()` infinite-recurses and overflows the stack at\nstartup. See utoipa docs on recursive schemas.",
+        "description": "Recursive vdev tree as a flat list of trees. Wire-friendlier than\nzfskit's map<name, VdevStatus> for UIs that want to render in\ndeclared order.\n\n`children` carries the `#[schema(no_recursion)]` attribute so\nutoipa's auto-collector stops at the cycle and emits a `$ref` to\n`VdevNode` itself instead of inlining the type — without this\n`ApiDoc::openapi()` infinite-recurses and overflows the stack at\nstartup. See utoipa docs on recursive schemas.",
         "required": [
           "name",
           "vdev_type",

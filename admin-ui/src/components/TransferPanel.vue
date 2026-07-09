@@ -26,6 +26,25 @@ function fmtIn(s: number): string {
   return `${Math.round(s / 86400)}d`
 }
 
+/** Effective replication mode for the badge. The config-level policy
+ * alone reads as a contradiction when the active route is manual-only
+ * ("auto" badge next to "route is manual-only") — show what will
+ * actually happen instead. */
+function modeBadge(tg: { mode: string; connected: boolean; route_auto?: boolean }): {
+  label: string
+  color: 'info' | 'neutral'
+  title?: string
+} {
+  if (tg.mode !== 'auto') return { label: 'manual', color: 'neutral' }
+  if (tg.connected && !tg.route_auto)
+    return {
+      label: 'auto paused',
+      color: 'neutral',
+      title: 'Scheduled sync is suspended while the active route is manual-only.',
+    }
+  return { label: 'auto', color: 'info' }
+}
+
 /** One human line per target: last sync + (for auto) when the next
  * automatic sync becomes due. */
 function targetLine(tg: {
@@ -80,10 +99,11 @@ function targetLine(tg: {
           <UBadge
             variant="subtle"
             size="sm"
-            :color="tg.mode === 'auto' ? 'info' : 'neutral'"
+            :color="modeBadge(tg).color"
+            :title="modeBadge(tg).title"
             class="shrink-0"
           >
-            {{ tg.mode }}
+            {{ modeBadge(tg).label }}
           </UBadge>
           <UButton
             size="xs"

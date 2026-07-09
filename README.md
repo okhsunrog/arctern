@@ -227,7 +227,7 @@ The web UI *is* the administration surface; the CLI stays deliberately small.
 
 The daemon embeds the built admin UI (`build.rs` bundles
 `admin-ui/dist`), so build the UI first. The UI toolchain is
-[Vite+](https://vite.dev/plus) (`vp`) over bun.
+[Vite+](https://viteplus.dev/) (`vp`) over bun.
 
 ```sh
 git clone https://github.com/okhsunrog/arctern

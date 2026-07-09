@@ -10,7 +10,21 @@ import { usePools } from './composables/usePools'
 
 const router = useRouter()
 const { host, prefix } = useHost()
-const mode = useColorMode({ initialValue: 'dark' })
+// Three-state theme: auto follows the browser/OS preference live;
+// explicit light/dark stick. emitAuto keeps 'auto' visible to us
+// instead of resolving it away (the DOM class still resolves).
+const mode = useColorMode({ initialValue: 'auto', emitAuto: true })
+const themeCycle = { auto: 'light', light: 'dark', dark: 'auto' } as const
+const themeIcon = {
+  auto: 'i-lucide-sun-moon',
+  light: 'i-lucide-sun',
+  dark: 'i-lucide-moon',
+} as const
+const themeLabel = {
+  auto: 'Theme: auto (follows the system)',
+  light: 'Theme: light',
+  dark: 'Theme: dark',
+} as const
 
 // Shell-level polling doubles as the command palette's data source and
 // the sidebar's health chips.
@@ -151,7 +165,7 @@ const searchGroups = computed(() => [
 ])
 
 function toggleMode() {
-  mode.value = mode.value === 'dark' ? 'light' : 'dark'
+  mode.value = themeCycle[mode.value]
 }
 </script>
 
@@ -189,14 +203,16 @@ function toggleMode() {
 
         <template #footer="{ collapsed }">
           <div class="flex items-center gap-1 w-full" :class="collapsed ? 'flex-col' : ''">
-            <UButton
-              :icon="mode === 'dark' ? 'i-lucide-sun' : 'i-lucide-moon'"
-              color="neutral"
-              variant="ghost"
-              size="sm"
-              :aria-label="mode === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'"
-              @click="toggleMode"
-            />
+            <UTooltip :text="themeLabel[mode]">
+              <UButton
+                :icon="themeIcon[mode]"
+                color="neutral"
+                variant="ghost"
+                size="sm"
+                :aria-label="themeLabel[mode]"
+                @click="toggleMode"
+              />
+            </UTooltip>
             <UDashboardSidebarCollapse />
             <span v-if="!collapsed" class="microlabel ms-auto">zfs console</span>
           </div>

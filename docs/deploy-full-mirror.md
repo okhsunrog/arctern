@@ -428,9 +428,10 @@ leave or delete.
   `/api/v1/transfers/recent`, SSE at `/api/v1/events`) is the
   observability surface. Wrap in a node_exporter textfile cron if you
   want Prometheus.
-- **No graceful drain on shutdown.** A cycle in flight when systemd
-  sends SIGTERM will be killed mid-stream; receiver gets a partial,
-  next cycle resumes from the token.
+- **Shutdown cancels in-flight replication resumably.** On SIGTERM, the
+  daemon stops accepting requests, cancels jobs, and waits for its background
+  tasks to exit. A 20-second overall deadline prevents shutdown from hanging;
+  an interrupted receive resumes from its ZFS token on the next cycle.
 - **`last_error` is cycle-level summary text.** Per-fs detail is not
   tracked.
 - **No SIGHUP / config hot-reload.** Edit + `systemctl restart arctern`.

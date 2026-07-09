@@ -1,5 +1,4 @@
-// `useToast` is auto-imported by the Nuxt UI vite plugin (see
-// auto-imports.d.ts).
+import { useToast } from '@nuxt/ui/composables'
 
 // Every mutating call in the console goes through here: the daemon's
 // error body (ApiErrorBody { error, message }) surfaces as a toast

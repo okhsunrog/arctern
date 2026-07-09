@@ -22,6 +22,7 @@
   },
   "devDependencies": {
     "@hey-api/openapi-ts": "^0.92.4",
+    "@iconify-json/lucide": "^1.2.116",
     "@tsconfig/node24": "^24.0.4",
     "@types/node": "^24.12.2",
     "@vitejs/plugin-vue": "^6.0.5",
@@ -30,8 +31,8 @@
     "typescript": "~5.9.3",
     "vite": "npm:@voidzero-dev/vite-plus-core@latest",
     "vite-plugin-vue-devtools": "^8.1.1",
-    "vue-tsc": "^3.2.6",
-    "vite-plus": "latest"
+    "vite-plus": "latest",
+    "vue-tsc": "^3.2.6"
   },
   "engines": {
     "node": "^20.19.0 || >=22.12.0"

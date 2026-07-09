@@ -2,8 +2,15 @@ import './assets/main.css'
 
 import { createApp } from 'vue'
 import ui from '@nuxt/ui/vue-plugin'
+import { addCollection } from '@iconify/vue'
+import lucide from '@iconify-json/lucide/icons.json'
 import App from './App.vue'
 import router from './router'
+
+// The console must work fully offline (loopback-only daemon): register
+// the icon set locally, otherwise @iconify/vue fetches every icon from
+// api.iconify.design at runtime. 85K gzipped for the whole collection.
+addCollection(lucide)
 
 // A redeploy replaces every hashed chunk; a tab still holding the old
 // index.html then fails to lazy-load view chunks. Reload once so the

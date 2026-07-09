@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 560" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1 L 8 5 L 0 9" fill="none" stroke="#67e8f9" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <!-- canvas -->
+  <rect x="0" y="0" width="720" height="560" rx="12" fill="#0d1117"/>
+  <rect x="0.5" y="0.5" width="719" height="559" rx="12" fill="none" stroke="#21262d"/>
+
+  <!-- ─── Sender ─────────────────────────────────────────── -->
+  <rect x="40" y="32" width="640" height="168" rx="10" fill="#161b22" stroke="#30363d"/>
+  <rect x="40" y="32" width="3" height="168" rx="1.5" fill="#22d3ee"/>
+  <text x="64" y="62" font-size="17" font-weight="600" fill="#e6edf3">Sender <tspan fill="#7d8590" font-weight="400">— laptop, active side</tspan></text>
+
+  <text x="64" y="94" font-size="14" fill="#9da7b3">browser</text>
+  <text x="139" y="94" font-size="14" fill="#67e8f9">──▶</text>
+  <text x="180" y="94" font-size="14" fill="#e6edf3">arctern daemon <tspan fill="#7d8590">· web UI + API on 127.0.0.1:7878</tspan></text>
+
+  <text x="90" y="122" font-size="14" fill="#7d8590">├ scheduler: <tspan fill="#c9d1d9">snap / push / prune</tspan></text>
+  <text x="90" y="146" font-size="14" fill="#7d8590">├ PeerLink: <tspan fill="#c9d1d9">one SSH session per peer</tspan></text>
+  <text x="90" y="170" font-size="14" fill="#7d8590">└ SQLite: <tspan fill="#c9d1d9">observability only — state lives in ZFS</tspan></text>
+
+  <!-- ─── link ───────────────────────────────────────────── -->
+  <line x1="180" y1="200" x2="180" y2="392" stroke="#67e8f9" stroke-width="1.6" marker-end="url(#arr)"/>
+
+  <text x="204" y="238" font-size="14" fill="#c9d1d9">one SSH session <tspan fill="#7d8590">· ssh(1), ControlMaster, multi-channel</tspan></text>
+
+  <!-- channels card -->
+  <rect x="204" y="254" width="476" height="104" rx="8" fill="#161b22" stroke="#30363d"/>
+  <text x="226" y="284" font-size="14" fill="#4ade80">control</text>
+  <text x="330" y="284" font-size="14" fill="#7d8590">tarpc RPC · inventory, tokens, proxy</text>
+  <text x="226" y="312" font-size="14" fill="#4ade80">recv ×N</text>
+  <text x="330" y="312" font-size="14" fill="#7d8590">zfs send <tspan fill="#67e8f9">→</tspan> zfs recv, parallel streams</text>
+  <text x="226" y="340" font-size="14" fill="#4ade80">events</text>
+  <text x="330" y="340" font-size="14" fill="#7d8590">NDJSON stream · receiver's live log</text>
+
+  <!-- ─── Receiver ───────────────────────────────────────── -->
+  <rect x="40" y="392" width="640" height="136" rx="10" fill="#161b22" stroke="#30363d"/>
+  <rect x="40" y="392" width="3" height="136" rx="1.5" fill="#4ade80"/>
+  <text x="64" y="422" font-size="17" font-weight="600" fill="#e6edf3">Receiver <tspan fill="#7d8590" font-weight="400">— NAS, passive side</tspan></text>
+
+  <text x="64" y="454" font-size="14" fill="#e6edf3">sshd <tspan fill="#7d8590">· authorized_keys ForcedCommand</tspan></text>
+  <text x="103" y="482" font-size="14" fill="#67e8f9">└─▶ <tspan fill="#e6edf3">arctern stdinserver-dispatch</tspan> <tspan fill="#7d8590">· per-identity ACL</tspan></text>
+  <text x="64" y="510" font-size="14" fill="#7d8590">no bespoke network listener — SSH is the only door</text>
+</svg>

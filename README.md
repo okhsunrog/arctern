@@ -29,26 +29,9 @@ that treats the peer as a first-class host, not a footnote.
 
 ## How it works
 
-```
-                ┌──────────────────────────────────────┐
-                │            Sender (laptop)           │
-   browser ──┐  │  arctern daemon                      │
-             └──┼─→ axum on 127.0.0.1:7878 (web UI+API)│
-                │   ├─ scheduler: snap / push / prune  │
-                │   ├─ PeerLink ──┐  one SSH session   │
-                │   └─ SQLite (observability only)     │
-                └─────────────────┼────────────────────┘
-                                  │  ControlMaster, multi-channel
-                                  │  · control  (tarpc RPC)
-                                  │  · recv     (zfs send → recv, ×N parallel)
-                                  │  · events   (NDJSON stream)
-                ┌─────────────────┴────────────────────┐
-                │           Receiver (NAS)             │
-                │  sshd → authorized_keys ForcedCommand│
-                │       → arctern stdinserver-dispatch │
-                │  (no bespoke network listener)       │
-                └──────────────────────────────────────┘
-```
+<p align="center">
+  <img src="docs/diagrams/topology.svg" alt="Topology: the sender's daemon (web UI, scheduler, PeerLink) drives one multi-channel SSH session — control (tarpc RPC), parallel recv streams, and an events stream — into the receiver's sshd ForcedCommand; the receiver runs no network listener of its own." width="720">
+</p>
 
 - **Transport is plain SSH.** arctern drives the system `ssh(1)` via the
   [`openssh`](https://docs.rs/openssh) crate, so it inherits `~/.ssh/config`,

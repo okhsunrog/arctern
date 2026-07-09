@@ -552,8 +552,8 @@ const columns = computed<TableColumn<SnapshotRow>[]>(() => [
       </template>
     </UModal>
 
-    <!-- Snapshot detail slideover -->
-    <USlideover v-model:open="detailOpen" :title="detailSnap?.tag ?? ''">
+    <!-- Snapshot detail modal -->
+    <UModal v-model:open="detailOpen" :title="detailSnap?.tag ?? ''">
       <template #body>
         <div v-if="detailSnap" class="space-y-5 text-sm">
           <div>
@@ -642,6 +642,6 @@ const columns = computed<TableColumn<SnapshotRow>[]>(() => [
           </UButton>
         </div>
       </template>
-    </USlideover>
+    </UModal>
   </div>
 </template>

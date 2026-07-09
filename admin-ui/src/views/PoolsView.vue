@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useRouter } from 'vue-router'
 import { useHost } from '../composables/useHost'
 import { usePools } from '../composables/usePools'
 import { poolUsedPercent } from '../utils/pool'
 import { poolStatus, scanStatus } from '../utils/status'
 import { formatRelative } from '../utils/format'
 
+const router = useRouter()
 const { host, baseUrl, prefix } = useHost()
 const { pools, error, loading } = usePools(5000, baseUrl.value)
 const title = computed(() => (host.value ? `${host.value} · Pools` : 'Pools'))
@@ -26,7 +28,13 @@ const title = computed(() => (host.value ? `${host.value} · Pools` : 'Pools'))
           title="No pools imported"
         />
         <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <UCard v-for="p in pools" :key="p.name" :class="poolStatus(p.state).rail">
+          <UCard
+            v-for="p in pools"
+            :key="p.name"
+            class="cursor-pointer transition hover:ring-accented"
+            :class="poolStatus(p.state).rail"
+            @click="router.push(`${prefix}/pools/${encodeURIComponent(p.name)}`)"
+          >
             <template #header>
               <div class="flex items-center justify-between">
                 <RouterLink

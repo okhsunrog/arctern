@@ -133,8 +133,8 @@ SSH):
 
 - OpenZFS ≥ 2.2 and OpenSSH on both hosts.
 - Rust stable (edition 2024) to build.
-- Sibling crate [`zfskit`](https://github.com/okhsunrog/zfskit) — the
-  ZFS toolkit arctern is built on; cloned next to this repo (path dependency).
+- The ZFS toolkit underneath is [`zfskit`](https://crates.io/crates/zfskit)
+  (same author) — pulled from crates.io like any other dependency.
 
 ## Build
 
@@ -142,15 +142,13 @@ The daemon **embeds the built admin UI** (`build.rs` bundles `admin-ui/dist`),
 so build the UI first.
 
 ```sh
-# 1. clone the sibling dependency next to this repo
-git clone https://github.com/okhsunrog/zfskit
 git clone https://github.com/okhsunrog/arctern
 cd arctern
 
-# 2. build the admin UI  (uses Vite+ / bun — see admin-ui/package.json)
+# 1. build the admin UI  (uses Vite+ / bun — see admin-ui/package.json)
 cd admin-ui && vp install && vp build && cd ..
 
-# 3. build the daemon (binary: target/release/arctern)
+# 2. build the daemon (binary: target/release/arctern)
 cargo build --release
 ```
 

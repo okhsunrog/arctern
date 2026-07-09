@@ -18,12 +18,6 @@ jobs:
         with:
           path: arctern
 
-      # arctern depends on zfskit via a sibling path (../zfskit).
-      - uses: actions/checkout@v6
-        with:
-          repository: okhsunrog/zfskit
-          path: zfskit
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -40,10 +34,7 @@ jobs:
       # stub index.html must exist to compile without building the real UI.
       - run: mkdir -p admin-ui/dist && printf '<!doctype html><title>arctern</title>' > admin-ui/dist/index.html
         working-directory: arctern
-      # Scope fmt to arctern's own packages: `--all` also pulls in the
-      # zfskit path dependency, which has its own repo and CI and must not
-      # gate arctern. clippy/test below use `--workspace` (members only).
-      - run: cargo fmt --check -p arctern-api -p arctern-client -p arctern-config -p arctern-transport -p arctern-daemon
+      - run: cargo fmt --all --check
         working-directory: arctern
       - run: cargo clippy --workspace -- -D warnings
         working-directory: arctern

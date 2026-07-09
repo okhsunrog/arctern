@@ -5,7 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-zfskit = { version = "0.1.0", path = "../../../zfskit" }
+zfskit = "0.1.0"
 serde = { version = "1.0.228", features = ["derive"] }
 utoipa = { version = "5.5.0", features = ["preserve_order"] }
 

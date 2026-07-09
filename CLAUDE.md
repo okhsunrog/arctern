@@ -19,7 +19,7 @@ The spec-kit workflow is dropped. Future work goes straight to feature commits �
 - `serde_json` — payload encoding (readable in logs; postcard later if size matters)
 - `sqlx` (sqlite + runtime-tokio) — observability state at `<state_dir>/state.db`
 - `utoipa` + `utoipa-axum` — OpenAPI generation for the local UI
-- `zfskit` — ZFS toolkit (sibling crate, `path = "../zfskit"` during development)
+- `zfskit` — ZFS toolkit, from crates.io. To develop against the sibling clone (~/code/zfskit), add a LOCAL `[patch.crates-io] zfskit = { path = "../zfskit" }` to the workspace Cargo.toml — never commit or push a path/patch to an external crate; main must build from the registry alone.
 - `tracing` + `tracing-subscriber` — structured logging; SQLite layer for INFO+, journald for the rest
 - `serde` + `thiserror` — types and errors
 - `tokio_util::sync::CancellationToken` — graceful shutdown / job interruption
@@ -35,7 +35,7 @@ Frontend: Vue 3 + TypeScript + Nuxt UI v4 + Tailwind v4, built with Vite + bun, 
 - Comment WHY, never WHAT. Default to no comment.
 - No emojis in code, comments, or commit messages.
 - TS client is auto-generated; never hand-edit files under `admin-ui/src/client/`.
-- All ZFS work goes through zfskit. If a primitive is missing, add it to zfskit first as a separate commit on `master`, push, then use it here.
+- All ZFS work goes through zfskit. If a primitive is missing, add it to zfskit first, publish a release, then use it here (local `[patch.crates-io]` while iterating).
 
 ## CLI surface
 

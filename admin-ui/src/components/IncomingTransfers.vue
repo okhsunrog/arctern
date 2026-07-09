@@ -55,13 +55,11 @@ function speed(t: RecvTransfer): string | null {
         class="flex items-center justify-between gap-3 py-1.5 text-sm min-w-0"
       >
         <span class="font-mono truncate" :title="`${t.dataset}@${t.to_snapshot}`">
-          {{ t.dataset
-          }}<span class="text-muted">@{{ t.to_snapshot }}</span>
+          {{ t.dataset }}<span class="text-muted">@{{ t.to_snapshot }}</span>
         </span>
         <span class="text-muted shrink-0 font-mono text-xs">
           from {{ t.identity }} · {{ formatBytes(t.bytes)
-          }}<template v-if="speed(t)"> · {{ speed(t) }}</template>
-          · {{ age(t.completed_at) }}
+          }}<template v-if="speed(t)"> · {{ speed(t) }}</template> · {{ age(t.completed_at) }}
         </span>
       </li>
     </ul>

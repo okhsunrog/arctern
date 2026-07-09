@@ -58,8 +58,8 @@ const router = createRouter({
       component: () => import('../views/PeersView.vue'),
     },
     // Legacy tabbed peer page → the host-scoped console.
-    { path: '/peers/:host/jobs', redirect: (to) => `/h/${to.params.host}/jobs` },
-    { path: '/peers/:host/snapshots', redirect: (to) => `/h/${to.params.host}/snapshots` },
+    { path: '/peers/:host/jobs', redirect: (to) => `/h/${String(to.params.host)}/jobs` },
+    { path: '/peers/:host/snapshots', redirect: (to) => `/h/${String(to.params.host)}/snapshots` },
   ],
 })
 

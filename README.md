@@ -1,10 +1,17 @@
-<h1 align="center">arctern</h1>
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/tern-dark.svg">
+    <img src="docs/diagrams/tern-light.svg" alt="" height="42">
+  </picture>
+  arctern
+</h1>
 
 <p align="center">Push-based ZFS replication over SSH — with a web console for <em>both</em> ends of the link.</p>
 
 <p align="center">
+  <a href="https://github.com/okhsunrog/arctern/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/okhsunrog/arctern/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/okhsunrog/arctern/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/okhsunrog/arctern"></a>
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
-  <img alt="Rust" src="https://img.shields.io/badge/rust-stable-orange.svg">
   <img alt="OpenZFS" src="https://img.shields.io/badge/OpenZFS-%E2%89%A5%202.2-lightgrey.svg">
 </p>
 

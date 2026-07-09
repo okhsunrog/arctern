@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { RouterView, useRouter } from 'vue-router'
 import { useColorMode } from '@vueuse/core'
 import type { NavigationMenuItem } from '@nuxt/ui'
+import TernMark from './components/TernMark.vue'
 import { useHost } from './composables/useHost'
 import { useJobs } from './composables/useJobs'
 import { usePeers } from './composables/usePeers'
@@ -181,10 +182,7 @@ function toggleMode() {
       >
         <template #header="{ collapsed }">
           <RouterLink to="/" class="flex items-center gap-2 font-mono select-none">
-            <span
-              class="inline-flex size-6 items-center justify-center rounded-sm bg-primary text-inverted text-xs font-semibold"
-              >a</span
-            >
+            <TernMark class="size-7 shrink-0" />
             <span v-if="!collapsed" class="text-sm font-semibold tracking-wide">arctern</span>
           </RouterLink>
         </template>

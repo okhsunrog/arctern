@@ -239,8 +239,9 @@ zfs list -t snapshot okdata/data/nas | awk '/arctern_/ {print $1}' | \
   xargs -n1 zfs destroy
 ```
 
-`/var/lib/arctern/state.db` is just an observability log; remove the dir
-if you want a clean state: `rm -rf /var/lib/arctern`.
+`/var/lib/arctern/state.db` contains observability history and hashed browser
+sessions. Removing the directory gives you a clean state and logs every
+browser out: `rm -rf /var/lib/arctern`.
 
 ## What this deployment does NOT yet cover
 

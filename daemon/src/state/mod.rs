@@ -1,5 +1,6 @@
-//! Per-daemon SQLite state. Observability only — replication state
-//! itself lives in ZFS (holds, bookmarks, `receive_resume_token`).
+//! Per-daemon SQLite state. Replication state itself lives in ZFS (holds,
+//! bookmarks, `receive_resume_token`); SQLite holds observability data and
+//! persistent browser sessions.
 //!
 //! Schema and trim policy follow `ARCHITECTURE.md` ("State storage"):
 //! WAL + NORMAL, two tables (`job_runs`, `log_events`), 30 days of
@@ -129,6 +130,23 @@ async fn migrate(pool: &SqlitePool) -> Result<(), StateError> {
             hits      INTEGER NOT NULL,
             misses    INTEGER NOT NULL
         )",
+    )
+    .execute(pool)
+    .await
+    .map_err(StateError::Migrate)?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS browser_sessions (
+            session_hash BLOB PRIMARY KEY NOT NULL,
+            namespace    TEXT NOT NULL,
+            expires_at   INTEGER NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(StateError::Migrate)?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_browser_sessions_expiry
+         ON browser_sessions(namespace, expires_at)",
     )
     .execute(pool)
     .await

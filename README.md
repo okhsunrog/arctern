@@ -55,8 +55,9 @@ that treats the peer as a first-class host, not a footnote.
   use and confines `recv` to a dataset subtree.
 - **State lives in ZFS, not in arctern.** Holds, cursor bookmarks, and
   `receive_resume_token` are the source of truth; the scheduler is stateless
-  and re-derives each plan from ZFS every cycle. A per-host SQLite database is
-  observability only (job history, event log, received transfers, ARC stats).
+  and re-derives each plan from ZFS every cycle. A per-host SQLite database
+  stores observability data (job history, event log, received transfers, ARC
+  stats) and hashed browser sessions; it never controls replication planning.
 - **One console, every host.** The sender's daemon serves the UI on loopback
   and proxies the peer's local API over the SSH control channel. Switching to a
   peer in the sidebar gives you the *same* console — jobs, snapshots, pools,

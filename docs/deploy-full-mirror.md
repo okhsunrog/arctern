@@ -416,8 +416,8 @@ zfs list -t snapshot -r okdata/backups/arctern_trial | awk '/arctern_/ {print $1
 zfs destroy -r okdata/backups/arctern_trial   # only if the trial root is empty / abandoned
 ```
 
-`/var/lib/arctern/state.db` is just an observability log; safe to
-leave or delete.
+`/var/lib/arctern/state.db` contains observability history and hashed browser
+sessions. It is safe to leave; deleting it also logs every browser out.
 
 ## Known limitations carried into this deployment
 

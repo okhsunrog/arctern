@@ -167,9 +167,9 @@ retrieve it with:
 sudo cat /var/lib/arctern/admin.token
 ```
 
-Paste that token into the login screen. Browser sessions last 12 hours and
-are revoked whenever the daemon restarts. From another machine, tunnel the
-console as usual; authentication still applies through the tunnel:
+Paste that token into the login screen. Browser sessions survive daemon
+restarts and expire after 30 days of inactivity. From another machine, tunnel
+the console as usual; authentication still applies through the tunnel:
 
 ```sh
 ssh -L 7878:127.0.0.1:7878 you@sender

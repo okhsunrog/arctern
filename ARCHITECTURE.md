@@ -302,9 +302,10 @@ The two local listeners have deliberately different authentication:
 
 On first daemon start, 32 random bytes are written atomically to
 `<state_dir>/admin.token` with mode `0600`. A successful login exchanges that
-master token for a separate random session ID. Sessions live only in daemon
-memory, expire after 12 hours, and are all revoked on restart. The cookie is
-host-only, `HttpOnly`, `SameSite=Strict`, and never contains the master token.
+master token for a separate random session ID. Only a SHA-256 hash of that ID
+is stored in `state.db`; sessions survive daemon restarts, expire after 30 days
+of inactivity, and roll forward at most once per day while active. The cookie
+is host-only, `HttpOnly`, `SameSite=Strict`, and never contains the master token.
 The Host and Fetch Metadata checks remain defense in depth against DNS
 rebinding and CSRF.
 
@@ -404,9 +405,9 @@ All replication state lives in ZFS (holds, bookmarks, `receive_resume_token`).
 The daemon is a stateless scheduler that re-derives plans from ZFS state every
 cycle. **Do not introduce etcd or any external coordination store.**
 
-Per-daemon SQLite for observability only. Path: `<state_dir>/state.db`. `sqlx`
-with the `sqlite` + `runtime-tokio` features, `journal_mode=WAL`,
-`synchronous=NORMAL`. Tables:
+Per-daemon SQLite for observability plus browser-session persistence. Path:
+`<state_dir>/state.db`. `sqlx` with the `sqlite` + `runtime-tokio` features,
+`journal_mode=WAL`, `synchronous=NORMAL`. Tables:
 
 - `job_runs` — one row per cycle (status, error, bytes sent). 30-day trim.
 - `log_events` — the host event log, written by a tracing layer (INFO+ only;
@@ -417,6 +418,8 @@ with the `sqlite` + `runtime-tokio` features, `journal_mode=WAL`,
 - `recv_transfers` — completed inbound transfers recorded by recv channels
   (bytes, duration, sender identity). 30-day trim.
 - `arcstats_history` — ARC stats time series for the dashboard.
+- `browser_sessions` — hashed, revocable administrator browser sessions;
+  30-day rolling expiry.
 
 `stdinserver` processes open the same DB (WAL handles multiple writers), so
 receiver-side events and transfers land in the shared host log. Trims run

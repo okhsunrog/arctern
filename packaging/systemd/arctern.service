@@ -15,6 +15,7 @@ TimeoutStopSec=30s
 # Needs root for zfs(8)/zpool(8) and to spawn ssh with the replication key.
 User=root
 Group=root
+UMask=0077
 
 # SQLite state, the private admin token, and the replication SSH key live here.
 StateDirectory=arctern

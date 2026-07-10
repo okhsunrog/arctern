@@ -299,14 +299,14 @@ async fn run_daemon(
     std::fs::create_dir_all(&state_dir)
         .map_err(|e| eyre::eyre!("create state_dir {}: {e}", state_dir.display()))?;
 
-    let admin_auth = auth::AdminAuth::load_or_create(&state_dir)
-        .map_err(|e| eyre::eyre!("load or create admin token in {}: {e}", state_dir.display()))?;
-
     let pool = Arc::new(
         state::open(&state_dir)
             .await
             .map_err(|e| eyre::eyre!("state open: {e}"))?,
     );
+
+    let admin_auth = auth::AdminAuth::load_or_create(&state_dir, pool.as_ref().clone())
+        .map_err(|e| eyre::eyre!("load or create admin token in {}: {e}", state_dir.display()))?;
 
     // Tracing fan-out: stderr fmt for live debugging, SQLite layer for
     // INFO+ persistence. The fmt layer keeps DEBUG/TRACE; the SQLite

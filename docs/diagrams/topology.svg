@@ -20,7 +20,7 @@
 
   <text x="90" y="122" font-size="14" fill="#7d8590">├ scheduler: <tspan fill="#c9d1d9">snap / push / prune</tspan></text>
   <text x="90" y="146" font-size="14" fill="#7d8590">├ PeerLink: <tspan fill="#c9d1d9">one SSH session per peer</tspan></text>
-  <text x="90" y="170" font-size="14" fill="#7d8590">└ SQLite: <tspan fill="#c9d1d9">observability only — state lives in ZFS</tspan></text>
+  <text x="90" y="170" font-size="14" fill="#7d8590">└ SQLite: <tspan fill="#c9d1d9">observability + browser sessions; replication state lives in ZFS</tspan></text>
 
   <!-- ─── link ───────────────────────────────────────────── -->
   <line x1="180" y1="200" x2="180" y2="392" stroke="#67e8f9" stroke-width="1.6" marker-end="url(#arr)"/>

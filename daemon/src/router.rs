@@ -205,7 +205,7 @@ mod tests {
         let pool = Arc::new(state::open_in_memory().await.unwrap());
         let (events, _rx) = tokio::sync::broadcast::channel(16);
         AppState {
-            auth: auth::AdminAuth::for_tests([7; 32]),
+            auth: auth::AdminAuth::for_tests([7; 32], pool.as_ref().clone()),
             manager: Arc::new(JobManager::new()),
             peers: new_state(),
             events,
@@ -235,16 +235,14 @@ mod tests {
             .unwrap();
         let response = app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        response
+        let set_cookie = response
             .headers()
             .get(axum::http::header::SET_COOKIE)
             .expect("login set-cookie")
             .to_str()
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .to_string()
+            .unwrap();
+        assert!(set_cookie.contains("Max-Age=2592000"));
+        set_cookie.split(';').next().unwrap().to_string()
     }
 
     fn with_cookie(mut request: Request<Body>, cookie: &str) -> Request<Body> {

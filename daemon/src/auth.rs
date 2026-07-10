@@ -2,15 +2,14 @@
 //!
 //! AF_UNIX requests trust `SO_PEERCRED` and require the caller's uid to match
 //! the daemon's. Loopback TCP requests exchange a private administrator token
-//! for a short-lived, server-side browser session.
+//! for a persistent, server-side browser session.
 
-use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use arctern_api::ApiErrorBody;
 use axum::extract::connect_info::Connected;
@@ -26,12 +25,14 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest as _, Sha256};
+use sqlx::SqlitePool;
 use subtle::ConstantTimeEq as _;
 use tokio::net::UnixListener;
 
 const ADMIN_TOKEN_FILE: &str = "admin.token";
 const SESSION_COOKIE_PREFIX: &str = "arctern_session";
-const SESSION_TTL: Duration = Duration::from_secs(12 * 60 * 60);
+const SESSION_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+const SESSION_REFRESH_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_SESSIONS: usize = 128;
 
 #[derive(Clone)]
@@ -43,7 +44,7 @@ pub struct AdminAuth {
 
 struct AdminAuthInner {
     token: [u8; 32],
-    sessions: tokio::sync::RwLock<HashMap<[u8; 32], Instant>>,
+    sessions: SqlitePool,
 }
 
 #[derive(serde::Deserialize)]
@@ -55,7 +56,7 @@ impl AdminAuth {
     /// Load the persistent administrator token, creating it atomically on
     /// first startup. The token is deliberately separate from arctern.toml:
     /// that file is exposed by GET /api/v1/config after authentication.
-    pub fn load_or_create(state_dir: &Path) -> io::Result<Self> {
+    pub fn load_or_create(state_dir: &Path, sessions: SqlitePool) -> io::Result<Self> {
         validate_state_dir(state_dir)?;
         let token_path = state_dir.join(ADMIN_TOKEN_FILE);
         let token = match read_token(&token_path) {
@@ -68,24 +69,21 @@ impl AdminAuth {
             },
             Err(e) => return Err(e),
         };
-        Ok(Self::new(token, token_path))
+        Ok(Self::new(token, token_path, sessions))
     }
 
-    fn new(token: [u8; 32], token_path: PathBuf) -> Self {
+    fn new(token: [u8; 32], token_path: PathBuf, sessions: SqlitePool) -> Self {
         let cookie_name = session_cookie_name(&token);
         Self {
-            inner: Arc::new(AdminAuthInner {
-                token,
-                sessions: tokio::sync::RwLock::new(HashMap::new()),
-            }),
+            inner: Arc::new(AdminAuthInner { token, sessions }),
             token_path: Arc::new(token_path),
             cookie_name: Arc::from(cookie_name),
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn for_tests(token: [u8; 32]) -> Self {
-        Self::new(token, PathBuf::from("<test-admin-token>"))
+    pub(crate) fn for_tests(token: [u8; 32], sessions: SqlitePool) -> Self {
+        Self::new(token, PathBuf::from("<test-admin-token>"), sessions)
     }
 
     pub fn token_path(&self) -> &Path {
@@ -106,33 +104,120 @@ impl AdminAuth {
         bool::from(self.inner.token.ct_eq(&candidate))
     }
 
-    async fn create_session(&self) -> io::Result<[u8; 32]> {
+    async fn create_session(&self) -> Result<[u8; 32], SessionError> {
         let mut id = [0u8; 32];
         getrandom::fill(&mut id).map_err(random_error)?;
-        let now = Instant::now();
-        let mut sessions = self.inner.sessions.write().await;
-        sessions.retain(|_, expires| *expires > now);
-        if sessions.len() >= MAX_SESSIONS
-            && let Some(oldest) = sessions
-                .iter()
-                .min_by_key(|(_, expires)| **expires)
-                .map(|(id, _)| *id)
-        {
-            sessions.remove(&oldest);
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let expires_at = now + SESSION_TTL.as_secs() as i64;
+        let hash = session_hash(&id);
+        let mut transaction = self.inner.sessions.begin().await?;
+        sqlx::query("DELETE FROM browser_sessions WHERE expires_at <= ?")
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM browser_sessions WHERE namespace = ?")
+                .bind(self.cookie_name())
+                .fetch_one(&mut *transaction)
+                .await?;
+        if count >= MAX_SESSIONS as i64 {
+            sqlx::query(
+                "DELETE FROM browser_sessions
+                 WHERE session_hash = (
+                     SELECT session_hash FROM browser_sessions
+                     WHERE namespace = ? ORDER BY expires_at ASC LIMIT 1
+                 )",
+            )
+            .bind(self.cookie_name())
+            .execute(&mut *transaction)
+            .await?;
         }
-        sessions.insert(id, now + SESSION_TTL);
+        sqlx::query(
+            "INSERT INTO browser_sessions (session_hash, namespace, expires_at)
+             VALUES (?, ?, ?)",
+        )
+        .bind(hash.as_slice())
+        .bind(self.cookie_name())
+        .bind(expires_at)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
         Ok(id)
     }
 
-    async fn session_is_valid(&self, id: &[u8; 32]) -> bool {
-        let now = Instant::now();
-        let sessions = self.inner.sessions.read().await;
-        sessions.get(id).is_some_and(|expires| *expires > now)
+    async fn validate_session(&self, id: &[u8; 32]) -> Result<SessionValidity, sqlx::Error> {
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let hash = session_hash(id);
+        let expires_at: Option<i64> = sqlx::query_scalar(
+            "SELECT expires_at FROM browser_sessions
+             WHERE session_hash = ? AND namespace = ?",
+        )
+        .bind(hash.as_slice())
+        .bind(self.cookie_name())
+        .fetch_optional(&self.inner.sessions)
+        .await?;
+        let Some(expires_at) = expires_at else {
+            return Ok(SessionValidity::Invalid);
+        };
+        if expires_at <= now {
+            self.revoke_session(id).await?;
+            return Ok(SessionValidity::Invalid);
+        }
+
+        let refresh_at =
+            expires_at - SESSION_TTL.as_secs() as i64 + SESSION_REFRESH_INTERVAL.as_secs() as i64;
+        if now >= refresh_at {
+            let new_expiry = now + SESSION_TTL.as_secs() as i64;
+            sqlx::query(
+                "UPDATE browser_sessions SET expires_at = ?
+                 WHERE session_hash = ? AND namespace = ?",
+            )
+            .bind(new_expiry)
+            .bind(hash.as_slice())
+            .bind(self.cookie_name())
+            .execute(&self.inner.sessions)
+            .await?;
+            return Ok(SessionValidity::Valid { refreshed: true });
+        }
+        Ok(SessionValidity::Valid { refreshed: false })
     }
 
-    async fn revoke_session(&self, id: &[u8; 32]) {
-        self.inner.sessions.write().await.remove(id);
+    async fn revoke_session(&self, id: &[u8; 32]) -> Result<(), sqlx::Error> {
+        let hash = session_hash(id);
+        sqlx::query("DELETE FROM browser_sessions WHERE session_hash = ? AND namespace = ?")
+            .bind(hash.as_slice())
+            .bind(self.cookie_name())
+            .execute(&self.inner.sessions)
+            .await?;
+        Ok(())
     }
+
+    fn session_cookie(&self, id: &[u8; 32]) -> Cookie<'static> {
+        Cookie::build((self.cookie_name().to_owned(), URL_SAFE_NO_PAD.encode(id)))
+            .http_only(true)
+            .same_site(SameSite::Strict)
+            .path("/")
+            .max_age(time::Duration::seconds(SESSION_TTL.as_secs() as i64))
+            .build()
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum SessionError {
+    #[error("{0}")]
+    Random(#[from] io::Error),
+    #[error("{0}")]
+    Database(#[from] sqlx::Error),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionValidity {
+    Invalid,
+    Valid { refreshed: bool },
+}
+
+fn session_hash(id: &[u8; 32]) -> [u8; 32] {
+    Sha256::digest(id).into()
 }
 
 fn session_cookie_name(token: &[u8; 32]) -> String {
@@ -266,29 +351,37 @@ pub async fn login(
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response();
         }
     };
-    let cookie = Cookie::build((auth.cookie_name().to_owned(), URL_SAFE_NO_PAD.encode(id)))
-        .http_only(true)
-        .same_site(SameSite::Strict)
-        .path("/")
-        .max_age(time::Duration::seconds(SESSION_TTL.as_secs() as i64))
-        .build();
-    no_store((jar.add(cookie), StatusCode::NO_CONTENT).into_response())
+    no_store((jar.add(auth.session_cookie(&id)), StatusCode::NO_CONTENT).into_response())
 }
 
-pub async fn session(State(auth): State<AdminAuth>, headers: HeaderMap) -> Response {
+pub async fn session(
+    State(auth): State<AdminAuth>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> Response {
     let Some(id) = session_id(&headers, auth.cookie_name()) else {
         return unauthorized();
     };
-    if auth.session_is_valid(&id).await {
-        no_store(StatusCode::NO_CONTENT.into_response())
-    } else {
-        unauthorized()
+    match auth.validate_session(&id).await {
+        Ok(SessionValidity::Valid { refreshed: true }) => {
+            no_store((jar.add(auth.session_cookie(&id)), StatusCode::NO_CONTENT).into_response())
+        }
+        Ok(SessionValidity::Valid { refreshed: false }) => {
+            no_store(StatusCode::NO_CONTENT.into_response())
+        }
+        Ok(SessionValidity::Invalid) => unauthorized(),
+        Err(error) => {
+            tracing::warn!(%error, "browser session validation failed");
+            unauthorized()
+        }
     }
 }
 
 pub async fn logout(State(auth): State<AdminAuth>, headers: HeaderMap, jar: CookieJar) -> Response {
-    if let Some(id) = session_id(&headers, auth.cookie_name()) {
-        auth.revoke_session(&id).await;
+    if let Some(id) = session_id(&headers, auth.cookie_name())
+        && let Err(error) = auth.revoke_session(&id).await
+    {
+        tracing::warn!(%error, "browser session revocation failed");
     }
     let removal = Cookie::build((auth.cookie_name().to_owned(), ""))
         .path("/")
@@ -304,10 +397,22 @@ pub async fn require_admin_session(
     let Some(id) = session_id(request.headers(), auth.cookie_name()) else {
         return unauthorized();
     };
-    if !auth.session_is_valid(&id).await {
-        return unauthorized();
+    let refreshed = match auth.validate_session(&id).await {
+        Ok(SessionValidity::Valid { refreshed }) => refreshed,
+        Ok(SessionValidity::Invalid) => return unauthorized(),
+        Err(error) => {
+            tracing::warn!(%error, "browser session validation failed");
+            return unauthorized();
+        }
+    };
+    let mut response = next.run(request).await;
+    if refreshed {
+        response.headers_mut().append(
+            header::SET_COOKIE,
+            auth.session_cookie(&id).to_string().parse().unwrap(),
+        );
     }
-    next.run(request).await
+    response
 }
 
 #[derive(Clone, Debug)]
@@ -440,13 +545,14 @@ mod tests {
         ))
     }
 
-    #[test]
-    fn token_file_is_created_private_and_reloads() {
+    #[tokio::test]
+    async fn token_file_is_created_private_and_reloads() {
         let dir = temp_dir("create");
         std::fs::create_dir(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let pool = crate::state::open(&dir).await.unwrap();
 
-        let auth = AdminAuth::load_or_create(&dir).unwrap();
+        let auth = AdminAuth::load_or_create(&dir, pool.clone()).unwrap();
         let encoded = std::fs::read_to_string(auth.token_path()).unwrap();
         assert!(auth.token_matches(encoded.trim()));
         assert_eq!(
@@ -454,7 +560,7 @@ mod tests {
             0o600
         );
 
-        let reloaded = AdminAuth::load_or_create(&dir).unwrap();
+        let reloaded = AdminAuth::load_or_create(&dir, pool).unwrap();
         assert!(reloaded.token_matches(encoded.trim()));
         assert_eq!(auth.cookie_name(), reloaded.cookie_name());
         std::fs::remove_dir_all(dir).unwrap();
@@ -462,28 +568,110 @@ mod tests {
 
     #[test]
     fn cookie_namespace_is_stable_and_daemon_specific() {
-        let first = AdminAuth::for_tests([1; 32]);
-        let same = AdminAuth::for_tests([1; 32]);
-        let second = AdminAuth::for_tests([2; 32]);
+        let first = session_cookie_name(&[1; 32]);
+        let same = session_cookie_name(&[1; 32]);
+        let second = session_cookie_name(&[2; 32]);
 
-        assert_eq!(first.cookie_name(), same.cookie_name());
-        assert_ne!(first.cookie_name(), second.cookie_name());
-        assert!(first.cookie_name().starts_with("arctern_session_"));
+        assert_eq!(first, same);
+        assert_ne!(first, second);
+        assert!(first.starts_with("arctern_session_"));
     }
 
-    #[test]
-    fn token_file_rejects_group_or_other_access() {
+    #[tokio::test]
+    async fn token_file_rejects_group_or_other_access() {
         let dir = temp_dir("permissions");
         std::fs::create_dir(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let auth = AdminAuth::load_or_create(&dir).unwrap();
+        let pool = crate::state::open(&dir).await.unwrap();
+        let auth = AdminAuth::load_or_create(&dir, pool.clone()).unwrap();
         std::fs::set_permissions(auth.token_path(), std::fs::Permissions::from_mode(0o644))
             .unwrap();
 
-        let error = AdminAuth::load_or_create(&dir)
+        let error = AdminAuth::load_or_create(&dir, pool)
             .err()
             .expect("insecure token rejected");
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_survives_auth_and_database_reopen() {
+        let dir = temp_dir("persistent-session");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let pool = crate::state::open(&dir).await.unwrap();
+        let auth = AdminAuth::load_or_create(&dir, pool.clone()).unwrap();
+        let id = auth.create_session().await.unwrap();
+        let stored: Vec<u8> = sqlx::query_scalar("SELECT session_hash FROM browser_sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored.as_slice(), session_hash(&id));
+        assert_ne!(stored.as_slice(), id);
+        drop(auth);
+        pool.close().await;
+
+        let reopened_pool = crate::state::open(&dir).await.unwrap();
+        let reloaded = AdminAuth::load_or_create(&dir, reopened_pool).unwrap();
+        assert_eq!(
+            reloaded.validate_session(&id).await.unwrap(),
+            SessionValidity::Valid { refreshed: false }
+        );
+        reloaded.revoke_session(&id).await.unwrap();
+        assert_eq!(
+            reloaded.validate_session(&id).await.unwrap(),
+            SessionValidity::Invalid
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn active_session_rolls_forward_and_expired_session_is_removed() {
+        let dir = temp_dir("session-expiry");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let pool = crate::state::open(&dir).await.unwrap();
+        let auth = AdminAuth::load_or_create(&dir, pool.clone()).unwrap();
+        let id = auth.create_session().await.unwrap();
+        let hash = session_hash(&id);
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+
+        sqlx::query("UPDATE browser_sessions SET expires_at = ? WHERE session_hash = ?")
+            .bind(now + SESSION_TTL.as_secs() as i64 - SESSION_REFRESH_INTERVAL.as_secs() as i64)
+            .bind(hash.as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            auth.validate_session(&id).await.unwrap(),
+            SessionValidity::Valid { refreshed: true }
+        );
+        let renewed_expiry: i64 =
+            sqlx::query_scalar("SELECT expires_at FROM browser_sessions WHERE session_hash = ?")
+                .bind(hash.as_slice())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(renewed_expiry >= now + SESSION_TTL.as_secs() as i64);
+
+        sqlx::query("UPDATE browser_sessions SET expires_at = ? WHERE session_hash = ?")
+            .bind(now - 1)
+            .bind(hash.as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            auth.validate_session(&id).await.unwrap(),
+            SessionValidity::Invalid
+        );
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM browser_sessions WHERE session_hash = ?")
+                .bind(hash.as_slice())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining, 0);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

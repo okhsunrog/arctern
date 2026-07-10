@@ -9,10 +9,10 @@ name = "arctern"
 path = "src/main.rs"
 
 [dependencies]
-arctern-api = { version = "0.2.0", path = "../crates/api" }
-arctern-client = { version = "0.2.0", path = "../crates/client" }
-arctern-config = { version = "0.2.0", path = "../crates/config" }
-arctern-transport = { version = "0.2.0", path = "../crates/transport" }
+arctern-api = { version = "0.2.1", path = "../crates/api" }
+arctern-client = { version = "0.2.1", path = "../crates/client" }
+arctern-config = { version = "0.2.1", path = "../crates/config" }
+arctern-transport = { version = "0.2.1", path = "../crates/transport" }
 async-trait = "0.1.89"
 axum = "0.8.9"
 axum-extra = { version = "0.12.6", features = ["cookie"] }

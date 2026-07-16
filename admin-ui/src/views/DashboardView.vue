@@ -12,7 +12,7 @@ import JobsGrid from '../components/JobsGrid.vue'
 import EventsLog from '../components/EventsLog.vue'
 
 const { host, baseUrl, prefix } = useHost()
-const { jobs, error, loading, wake, cancel, pause, resume, pushTo } = useJobs(5000, baseUrl.value)
+const { jobs, error, loading, wake, cancel, pause, resume, pushTo } = useJobs(baseUrl)
 const { events, connected } = useEvents({
   cap: 200,
   peer: computed(() => host.value ?? undefined),

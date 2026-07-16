@@ -683,7 +683,7 @@ async fn execute_one_plan(
         .take()
         .ok_or_else(|| "no stdin on recv channel".to_string())?;
     // Manual copy loop instead of tokio::io::copy: publishes progress
-    // into `transfer` (the UI derives speed from poll deltas) and races
+    // into `transfer` for the live job-status stream and races
     // the job/cycle CancellationToken. On cancel the recv channel's
     // stdin closes (SIGPIPE to the remote zfs recv, which keeps its
     // resumable partial state) and the local send child is killed.
@@ -691,36 +691,84 @@ async fn execute_one_plan(
         let mut buf = vec![0u8; 256 * 1024];
         let mut copied: u64 = 0;
         let mut last_published: u64 = 0;
+        let mut last_publish_at = tokio::time::Instant::now();
         loop {
-            let step = async {
-                let n = child_stdout.read(&mut buf).await?;
-                if n > 0 {
-                    channel_stdin.write_all(&buf[..n]).await?;
+            // A stalled read means zfs send is still producing the next
+            // record. Keep the same read future alive so no data is lost.
+            let (n, read_waited) = {
+                let read = child_stdout.read(&mut buf);
+                tokio::pin!(read);
+                let slow = sleep(StdDuration::from_secs(2));
+                tokio::pin!(slow);
+                let mut waiting = false;
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            return Err(std::io::Error::other("cancelled"));
+                        }
+                        r = &mut read => break (r?, waiting),
+                        _ = &mut slow, if !waiting => {
+                            waiting = true;
+                            set_transfer_phase(transfers, transfer_key, "waiting_sender");
+                        }
+                    }
                 }
-                std::io::Result::Ok(n)
-            };
-            let n = tokio::select! {
-                biased;
-                _ = cancel.cancelled() => {
-                    return Err(std::io::Error::other("cancelled"));
-                }
-                r = step => r?,
             };
             if n == 0 {
                 break;
             }
+            if read_waited {
+                set_transfer_phase(transfers, transfer_key, "sending");
+            }
+
+            // A stalled write means the SSH channel has applied
+            // backpressure: network or (most commonly) receiver zfs recv /
+            // storage. write_all is not cancellation-safe, so retain and
+            // continue polling this exact future after publishing the phase.
+            let write_waited = {
+                let write = channel_stdin.write_all(&buf[..n]);
+                tokio::pin!(write);
+                let slow = sleep(StdDuration::from_secs(2));
+                tokio::pin!(slow);
+                let mut waiting = false;
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            return Err(std::io::Error::other("cancelled"));
+                        }
+                        r = &mut write => {
+                            r?;
+                            break waiting;
+                        }
+                        _ = &mut slow, if !waiting => {
+                            waiting = true;
+                            set_transfer_phase(transfers, transfer_key, "waiting_receiver");
+                        }
+                    }
+                }
+            };
             copied += n as u64;
+            if write_waited {
+                set_transfer_phase(transfers, transfer_key, "sending");
+            }
+            // Publish accepted bytes before any configured rate-limit sleep;
+            // otherwise deliberate throttling looks like missing progress.
+            if copied - last_published >= 8 * 1024 * 1024
+                || last_publish_at.elapsed() >= StdDuration::from_millis(250)
+            {
+                last_published = copied;
+                last_publish_at = tokio::time::Instant::now();
+                if let Some(t) = transfers.lock().unwrap().get_mut(transfer_key) {
+                    t.bytes_sent = copied;
+                }
+            }
             // Chunk-grained (256 KiB) throttling, plenty smooth at
             // network scales. The bucket is shared job-wide so
             // parallel sends stay under the aggregate limit.
             if let Some(l) = limiter {
                 l.throttle(n as u64).await;
-            }
-            if copied - last_published >= 8 * 1024 * 1024 {
-                last_published = copied;
-                if let Some(t) = transfers.lock().unwrap().get_mut(transfer_key) {
-                    t.bytes_sent = copied;
-                }
             }
         }
         if let Some(t) = transfers.lock().unwrap().get_mut(transfer_key) {
@@ -737,6 +785,7 @@ async fn execute_one_plan(
         }
         return Err(format!("stream copy: {error}"));
     }
+    set_transfer_phase(transfers, transfer_key, "finalizing");
     let _ = channel_stdin.shutdown().await;
     drop(channel_stdin);
     child
@@ -750,6 +799,19 @@ async fn execute_one_plan(
     match resp {
         Response::Ok => Ok(()),
         Response::Error { message, .. } => Err(format!("receiver: {message}")),
+    }
+}
+
+fn set_transfer_phase(
+    transfers: &Mutex<HashMap<String, TransferInfo>>,
+    transfer_key: &str,
+    phase: &str,
+) {
+    if let Some(transfer) = transfers.lock().unwrap().get_mut(transfer_key)
+        && transfer.phase != phase
+    {
+        transfer.phase = phase.to_string();
+        transfer.phase_since = OffsetDateTime::now_utc().unix_timestamp();
     }
 }
 
@@ -825,6 +887,7 @@ async fn run_one_filesystem(
     .await?;
 
     if let Some((snap, guid)) = &to_hold_target {
+        set_transfer_phase(transfers, transfer_key, "committing");
         advance_cursor(runner, sender_dataset, job_name, peer_name, snap, *guid).await;
         sweep_step_holds(runner, sender_dataset, sender_snaps, snap, &tag).await;
     }
@@ -1388,6 +1451,8 @@ impl PushJob {
                 bytes_sent: 0,
                 total_bytes: total,
                 started_at: OffsetDateTime::now_utc().unix_timestamp(),
+                phase: "sending".into(),
+                phase_since: OffsetDateTime::now_utc().unix_timestamp(),
             },
         );
         let res = run_one_filesystem(

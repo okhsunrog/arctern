@@ -1,11 +1,19 @@
-//! `GET /api/v1/jobs` — current per-job status snapshot.
+//! Job status snapshot + live SSE stream.
+
+use std::convert::Infallible;
+use std::time::Duration;
 
 use arctern_api::{JobRun, JobStatus};
 use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
+    response::{
+        Sse,
+        sse::{Event, KeepAlive},
+    },
 };
+use futures_util::Stream;
 use serde::Deserialize;
 use time::format_description::well_known::Rfc3339;
 
@@ -22,8 +30,13 @@ use crate::error::ApiError;
     ),
 )]
 pub async fn list_jobs(State(state): State<AppState>) -> Json<Vec<JobStatus>> {
-    let snap = state.manager.statuses();
-    let out = snap
+    Json(status_snapshot(&state))
+}
+
+pub(crate) fn status_snapshot(state: &AppState) -> Vec<JobStatus> {
+    state
+        .manager
+        .statuses()
         .into_iter()
         .map(|(name, kind, s)| JobStatus {
             name,
@@ -36,8 +49,51 @@ pub async fn list_jobs(State(state): State<AppState>) -> Json<Vec<JobStatus>> {
             transfers: s.transfers,
             targets: s.targets,
         })
-        .collect();
-    Json(out)
+        .collect()
+}
+
+/// Live job state for the admin UI. A full snapshot is sent immediately,
+/// followed by change-only snapshots at a UI-friendly cadence. SSE is a
+/// better fit than WebSockets here: the browser only receives state and all
+/// commands remain ordinary authenticated HTTP mutations.
+#[utoipa::path(
+    get,
+    path = "/api/v1/jobs/stream",
+    tag = "jobs",
+    responses(
+        (status = 200, description = "SSE stream of job-status snapshots"),
+    ),
+)]
+pub async fn stream_jobs(
+    State(state): State<AppState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let interval = tokio::time::interval(Duration::from_millis(250));
+    let stream = futures_util::stream::unfold(
+        (interval, state.clone(), None::<String>),
+        |(mut interval, state, previous)| async move {
+            let mut previous = previous;
+            loop {
+                interval.tick().await;
+                let payload =
+                    serde_json::to_string(&status_snapshot(&state)).unwrap_or_else(|_| "[]".into());
+                if previous.as_deref() == Some(payload.as_str()) {
+                    continue;
+                }
+                previous = Some(payload.clone());
+                return Some((
+                    Ok(Event::default().event("jobs").data(payload)),
+                    (interval, state, previous),
+                ));
+            }
+        },
+    );
+    let stream =
+        futures_util::StreamExt::take_until(stream, state.shutdown.clone().cancelled_owned());
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keep-alive"),
+    )
 }
 
 #[utoipa::path(

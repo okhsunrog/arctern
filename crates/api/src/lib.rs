@@ -74,7 +74,7 @@ pub struct JobStatus {
     #[serde(default)]
     pub paused: bool,
     /// In-flight transfers, one per parallel send slot. UI derives
-    /// speed from `bytes_sent` deltas between polls.
+    /// speed from `bytes_sent` deltas between live snapshots.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transfers: Vec<TransferInfo>,
     /// Push jobs: per-target replication policy + last outcome.
@@ -96,6 +96,19 @@ pub struct TransferInfo {
     pub total_bytes: Option<u64>,
     /// Unix seconds.
     pub started_at: i64,
+    /// Current executor phase. Kept as a string so future phases remain
+    /// backwards-compatible: `sending`, `waiting_sender`,
+    /// `waiting_receiver`, `finalizing`, or `committing`.
+    #[serde(default = "default_transfer_phase")]
+    pub phase: String,
+    /// Unix seconds when `phase` last changed. Lets clients render a live
+    /// wait duration even while no byte-count events are arriving.
+    #[serde(default)]
+    pub phase_since: i64,
+}
+
+fn default_transfer_phase() -> String {
+    "sending".into()
 }
 
 /// One replication target of a push job.
@@ -472,6 +485,22 @@ mod tests {
             back.properties.get("user:reason").map(String::as_str),
             Some("manual")
         );
+    }
+
+    #[test]
+    fn transfer_info_defaults_old_payload_to_sending() {
+        let transfer: TransferInfo = serde_json::from_str(
+            r#"{
+                "dataset":"tank/data",
+                "peer":"backup",
+                "kind":"incremental",
+                "bytes_sent":42,
+                "started_at":100
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(transfer.phase, "sending");
+        assert_eq!(transfer.phase_since, 0);
     }
 
     #[test]

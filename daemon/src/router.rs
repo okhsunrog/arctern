@@ -53,6 +53,7 @@ fn openapi_router() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::snapshots::create_hold))
         .routes(routes!(handlers::snapshots::release_hold))
         .routes(routes!(handlers::jobs::list_jobs))
+        .routes(routes!(handlers::jobs::stream_jobs))
         .routes(routes!(handlers::jobs::wakeup))
         .routes(routes!(handlers::jobs::cancel))
         .routes(routes!(handlers::jobs::pause))
@@ -60,6 +61,7 @@ fn openapi_router() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::jobs::push_to_peer))
         .routes(routes!(handlers::jobs::list_runs))
         .routes(routes!(handlers::peers::list_peers))
+        .routes(routes!(handlers::peers::stream_peer_jobs))
         .routes(routes!(handlers::peers::stream_peer_events))
         .routes(routes!(handlers::events::stream_events))
         .routes(routes!(handlers::events::recent_events))
@@ -435,6 +437,42 @@ mod tests {
             app.oneshot(expired).await.unwrap().status(),
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    #[tokio::test]
+    async fn authenticated_job_stream_starts_with_a_snapshot() {
+        use futures_util::StreamExt as _;
+
+        let app = build_loopback_router(test_state().await);
+        let cookie = login_cookie(&app).await;
+        let response = app
+            .oneshot(with_cookie(
+                req(Method::GET, "/api/v1/jobs/stream", None),
+                &cookie,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
+            "text/event-stream"
+        );
+
+        let mut body = response.into_body().into_data_stream();
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(1), body.next())
+            .await
+            .expect("first job snapshot timed out")
+            .expect("stream ended before first snapshot")
+            .expect("job stream body error");
+        let text = String::from_utf8_lossy(&chunk);
+        assert!(
+            text.contains("event: jobs"),
+            "unexpected SSE frame: {text:?}"
+        );
+        assert!(text.contains("data: []"), "unexpected SSE frame: {text:?}");
     }
 
     #[tokio::test]

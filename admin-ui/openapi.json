@@ -6,7 +6,7 @@
     "license": {
       "name": ""
     },
-    "version": "0.1.1"
+    "version": "0.2.1"
   },
   "paths": {
     "/api/v1/config": {
@@ -44,7 +44,7 @@
         "tags": [
           "datasets"
         ],
-        "summary": "List datasets reachable through the daemon's shared `CommandRunner`\n(`AppState::runner`). RealRunner in production; SshCommandRunner\nonly when `ZFSKIT_SSH_TARGET` is set for dev/test.",
+        "summary": "List datasets through the daemon's shared typed ZFS facade. It uses\nRealRunner in production and the SSH test runner only for dev/integration.",
         "operationId": "list_datasets",
         "responses": {
           "200": {
@@ -549,6 +549,20 @@
         }
       }
     },
+    "/api/v1/jobs/stream": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Live job state for the admin UI. A full snapshot is sent immediately,\nfollowed by change-only snapshots at a UI-friendly cadence. SSE is a\nbetter fit than WebSockets here: the browser only receives state and all\ncommands remain ordinary authenticated HTTP mutations.",
+        "operationId": "stream_jobs",
+        "responses": {
+          "200": {
+            "description": "SSE stream of job-status snapshots"
+          }
+        }
+      }
+    },
     "/api/v1/jobs/{name}/cancel": {
       "post": {
         "tags": [
@@ -816,6 +830,51 @@
         "responses": {
           "200": {
             "description": "SSE stream of LogEvent JSON frames from the peer"
+          },
+          "404": {
+            "description": "No such peer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Peer not currently connected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/peers/{peer}/jobs/stream": {
+      "get": {
+        "tags": [
+          "peers"
+        ],
+        "summary": "Peer-scoped counterpart of `/api/v1/jobs/stream`. The receiver's generic\ncontrol RPC returns bounded JSON replies, so this bridge samples it over\nthe already-open SSH control channel and exposes one long-lived SSE\nresponse to the browser. Unchanged snapshots are not emitted.",
+        "operationId": "stream_peer_jobs",
+        "parameters": [
+          {
+            "name": "peer",
+            "in": "path",
+            "description": "Peer name from [[peers]]",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE stream of job-status snapshots from the peer"
           },
           "404": {
             "description": "No such peer",
@@ -1468,7 +1527,7 @@
             "items": {
               "$ref": "#/components/schemas/TransferInfo"
             },
-            "description": "In-flight transfers, one per parallel send slot. UI derives\nspeed from `bytes_sent` deltas between polls."
+            "description": "In-flight transfers, one per parallel send slot. UI derives\nspeed from `bytes_sent` deltas between live snapshots."
           },
           "targets": {
             "type": "array",
@@ -1975,6 +2034,15 @@
             "type": "integer",
             "format": "int64",
             "description": "Unix seconds."
+          },
+          "phase": {
+            "type": "string",
+            "description": "Current executor phase. Kept as a string so future phases remain\nbackwards-compatible: `sending`, `waiting_sender`,\n`waiting_receiver`, `finalizing`, or `committing`."
+          },
+          "phase_since": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix seconds when `phase` last changed. Lets clients render a live\nwait duration even while no byte-count events are arriving."
           }
         }
       },

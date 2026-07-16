@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import type { TransferInfo } from '../client'
 import { formatBytes } from '../utils/format'
 
@@ -11,10 +11,13 @@ const props = defineProps<{
 }>()
 
 // Speed: seeded from the server's `started_at` (whole-transfer average,
-// meaningful even on the first poll), then EMA-refined from bytes_sent
-// deltas between polls.
+// meaningful even on the first update), then EMA-refined from bytes_sent
+// deltas between live snapshots.
 const lastSample = ref<{ bytes: number; at: number } | null>(null)
 const rate = ref<number | null>(null)
+const now = ref(Math.floor(Date.now() / 1000))
+const clock = setInterval(() => (now.value = Math.floor(Date.now() / 1000)), 1000)
+onUnmounted(() => clearInterval(clock))
 
 watch(
   () => props.transfer.bytes_sent,
@@ -46,7 +49,7 @@ const pct = computed(() => {
 })
 const eta = computed(() => {
   const t = props.transfer
-  if (!t.total_bytes || !rate.value || rate.value < 1) return null
+  if (phase.value !== 'sending' || !t.total_bytes || !rate.value || rate.value < 1) return null
   const left = (t.total_bytes - t.bytes_sent) / rate.value
   if (left < 90) return `${Math.round(left)}s`
   if (left < 5400) return `${Math.round(left / 60)}m`
@@ -55,10 +58,50 @@ const eta = computed(() => {
 const elapsed = computed(() => {
   const t = props.transfer
   if (!t.started_at) return null
-  const s = Math.max(0, Math.floor(Date.now() / 1000) - t.started_at)
+  const s = Math.max(0, now.value - t.started_at)
   if (s < 90) return `${Math.max(1, Math.round(s))}s`
   if (s < 5400) return `${Math.round(s / 60)}m`
   return `${Math.round(s / 3600)}h`
+})
+
+const phase = computed(() => props.transfer.phase || 'sending')
+const phaseSeconds = computed(() =>
+  props.transfer.phase_since ? Math.max(0, now.value - props.transfer.phase_since) : 0,
+)
+const phaseView = computed(() => {
+  const seconds = phaseSeconds.value
+  switch (phase.value) {
+    case 'waiting_sender':
+      return {
+        icon: 'i-lucide-hourglass',
+        label: `waiting for sender ZFS · ${seconds}s`,
+        detail: 'zfs send is still producing the next block',
+        color: 'text-warning',
+      }
+    case 'waiting_receiver':
+      return {
+        icon: 'i-lucide-hard-drive',
+        label: `waiting for receiver I/O · ${seconds}s`,
+        detail: 'the network or receiver storage is applying backpressure',
+        color: 'text-warning',
+      }
+    case 'finalizing':
+      return {
+        icon: 'i-lucide-loader-circle',
+        label: `finalizing snapshot · ${seconds}s`,
+        detail: 'all stream bytes were sent; waiting for zfs recv to commit',
+        color: 'text-info',
+      }
+    case 'committing':
+      return {
+        icon: 'i-lucide-bookmark-check',
+        label: `updating replication cursor · ${seconds}s`,
+        detail: 'the received snapshot is complete',
+        color: 'text-info',
+      }
+    default:
+      return null
+  }
 })
 </script>
 
@@ -74,12 +117,29 @@ const elapsed = computed(() => {
     <div class="text-muted font-mono text-xs">
       <template v-if="showPeer">→ {{ transfer.peer }} · </template
       >{{ formatBytes(transfer.bytes_sent)
-      }}<template v-if="transfer.total_bytes"> / {{ formatBytes(transfer.total_bytes) }}</template>
-      <template v-if="rate"> · {{ formatBytes(rate) }}/s</template>
+      }}<template v-if="transfer.total_bytes"> / ~{{ formatBytes(transfer.total_bytes) }}</template>
+      <template v-if="rate && phase === 'sending'"> · {{ formatBytes(rate) }}/s</template>
       <template v-if="eta"> · ~{{ eta }} left</template>
       <template v-else-if="elapsed"> · {{ elapsed }} elapsed</template>
     </div>
-    <UProgress v-if="pct != null" :model-value="pct" size="sm" />
+    <div
+      v-if="phaseView"
+      class="flex items-center gap-1.5 text-xs"
+      :class="phaseView.color"
+      :title="phaseView.detail"
+    >
+      <UIcon
+        :name="phaseView.icon"
+        class="size-3.5 shrink-0"
+        :class="phase === 'finalizing' ? 'animate-spin' : ''"
+      />
+      <span>{{ phaseView.label }}</span>
+    </div>
+    <UProgress
+      v-if="pct != null && phase !== 'finalizing' && phase !== 'committing'"
+      :model-value="pct"
+      size="sm"
+    />
     <UProgress v-else size="sm" animation="carousel" />
   </div>
 </template>

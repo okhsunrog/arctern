@@ -2,7 +2,7 @@
 
 import type { Client, ClientMeta, Options as Options2, RequestResult, TDataShape } from './client';
 import { client } from './client.gen';
-import type { CancelData, CancelErrors, CancelResponses, CreateHoldData, CreateHoldErrors, CreateHoldResponses, CreateSnapshotData, CreateSnapshotErrors, CreateSnapshotResponses, DestroySnapshotData, DestroySnapshotErrors, DestroySnapshotResponses, GetArcData, GetArcErrors, GetArcHistoryData, GetArcHistoryResponses, GetArcResponses, GetConfigData, GetConfigErrors, GetConfigResponses, GetPoolData, GetPoolErrors, GetPoolResponses, ListDatasetsData, ListDatasetsErrors, ListDatasetsResponses, ListHoldsData, ListHoldsErrors, ListHoldsResponses, ListJobsData, ListJobsResponses, ListPeersData, ListPeersResponses, ListPoolsData, ListPoolsErrors, ListPoolsResponses, ListRunsData, ListRunsResponses, ListSnapshotsData, ListSnapshotsErrors, ListSnapshotsResponses, PauseData, PauseErrors, PauseResponses, PoolScrubData, PoolScrubErrors, PoolScrubResponses, PushToPeerData, PushToPeerErrors, PushToPeerResponses, RecentEventsData, RecentEventsResponses, RecentTransfersData, RecentTransfersResponses, ReleaseHoldData, ReleaseHoldErrors, ReleaseHoldResponses, ResumeData, ResumeErrors, ResumeResponses, StreamEventsData, StreamEventsResponses, StreamPeerEventsData, StreamPeerEventsErrors, StreamPeerEventsResponses, WakeupData, WakeupErrors, WakeupResponses } from './types.gen';
+import type { CancelData, CancelErrors, CancelResponses, CreateHoldData, CreateHoldErrors, CreateHoldResponses, CreateSnapshotData, CreateSnapshotErrors, CreateSnapshotResponses, DestroySnapshotData, DestroySnapshotErrors, DestroySnapshotResponses, GetArcData, GetArcErrors, GetArcHistoryData, GetArcHistoryResponses, GetArcResponses, GetConfigData, GetConfigErrors, GetConfigResponses, GetPoolData, GetPoolErrors, GetPoolResponses, ListDatasetsData, ListDatasetsErrors, ListDatasetsResponses, ListHoldsData, ListHoldsErrors, ListHoldsResponses, ListJobsData, ListJobsResponses, ListPeersData, ListPeersResponses, ListPoolsData, ListPoolsErrors, ListPoolsResponses, ListRunsData, ListRunsResponses, ListSnapshotsData, ListSnapshotsErrors, ListSnapshotsResponses, PauseData, PauseErrors, PauseResponses, PoolScrubData, PoolScrubErrors, PoolScrubResponses, PushToPeerData, PushToPeerErrors, PushToPeerResponses, RecentEventsData, RecentEventsResponses, RecentTransfersData, RecentTransfersResponses, ReleaseHoldData, ReleaseHoldErrors, ReleaseHoldResponses, ResumeData, ResumeErrors, ResumeResponses, StreamEventsData, StreamEventsResponses, StreamJobsData, StreamJobsResponses, StreamPeerEventsData, StreamPeerEventsErrors, StreamPeerEventsResponses, StreamPeerJobsData, StreamPeerJobsErrors, StreamPeerJobsResponses, WakeupData, WakeupErrors, WakeupResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -21,9 +21,8 @@ export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends 
 export const getConfig = <ThrowOnError extends boolean = false>(options?: Options<GetConfigData, ThrowOnError>): RequestResult<GetConfigResponses, GetConfigErrors, ThrowOnError> => (options?.client ?? client).get<GetConfigResponses, GetConfigErrors, ThrowOnError>({ url: '/api/v1/config', ...options });
 
 /**
- * List datasets reachable through the daemon's shared `CommandRunner`
- * (`AppState::runner`). RealRunner in production; SshCommandRunner
- * only when `ZFSKIT_SSH_TARGET` is set for dev/test.
+ * List datasets through the daemon's shared typed ZFS facade. It uses
+ * RealRunner in production and the SSH test runner only for dev/integration.
  */
 export const listDatasets = <ThrowOnError extends boolean = false>(options?: Options<ListDatasetsData, ThrowOnError>): RequestResult<ListDatasetsResponses, ListDatasetsErrors, ThrowOnError> => (options?.client ?? client).get<ListDatasetsResponses, ListDatasetsErrors, ThrowOnError>({ url: '/api/v1/datasets', ...options });
 
@@ -100,6 +99,14 @@ export const recentEvents = <ThrowOnError extends boolean = false>(options?: Opt
 
 export const listJobs = <ThrowOnError extends boolean = false>(options?: Options<ListJobsData, ThrowOnError>): RequestResult<ListJobsResponses, unknown, ThrowOnError> => (options?.client ?? client).get<ListJobsResponses, unknown, ThrowOnError>({ url: '/api/v1/jobs', ...options });
 
+/**
+ * Live job state for the admin UI. A full snapshot is sent immediately,
+ * followed by change-only snapshots at a UI-friendly cadence. SSE is a
+ * better fit than WebSockets here: the browser only receives state and all
+ * commands remain ordinary authenticated HTTP mutations.
+ */
+export const streamJobs = <ThrowOnError extends boolean = false>(options?: Options<StreamJobsData, ThrowOnError>): RequestResult<StreamJobsResponses, unknown, ThrowOnError> => (options?.client ?? client).get<StreamJobsResponses, unknown, ThrowOnError>({ url: '/api/v1/jobs/stream', ...options });
+
 export const cancel = <ThrowOnError extends boolean = false>(options: Options<CancelData, ThrowOnError>): RequestResult<CancelResponses, CancelErrors, ThrowOnError> => (options.client ?? client).post<CancelResponses, CancelErrors, ThrowOnError>({ url: '/api/v1/jobs/{name}/cancel', ...options });
 
 export const pause = <ThrowOnError extends boolean = false>(options: Options<PauseData, ThrowOnError>): RequestResult<PauseResponses, PauseErrors, ThrowOnError> => (options.client ?? client).post<PauseResponses, PauseErrors, ThrowOnError>({ url: '/api/v1/jobs/{name}/pause', ...options });
@@ -120,6 +127,14 @@ export const listPeers = <ThrowOnError extends boolean = false>(options?: Option
  * pushed Event frame as an SSE frame.
  */
 export const streamPeerEvents = <ThrowOnError extends boolean = false>(options: Options<StreamPeerEventsData, ThrowOnError>): RequestResult<StreamPeerEventsResponses, StreamPeerEventsErrors, ThrowOnError> => (options.client ?? client).get<StreamPeerEventsResponses, StreamPeerEventsErrors, ThrowOnError>({ url: '/api/v1/peers/{peer}/events', ...options });
+
+/**
+ * Peer-scoped counterpart of `/api/v1/jobs/stream`. The receiver's generic
+ * control RPC returns bounded JSON replies, so this bridge samples it over
+ * the already-open SSH control channel and exposes one long-lived SSE
+ * response to the browser. Unchanged snapshots are not emitted.
+ */
+export const streamPeerJobs = <ThrowOnError extends boolean = false>(options: Options<StreamPeerJobsData, ThrowOnError>): RequestResult<StreamPeerJobsResponses, StreamPeerJobsErrors, ThrowOnError> => (options.client ?? client).get<StreamPeerJobsResponses, StreamPeerJobsErrors, ThrowOnError>({ url: '/api/v1/peers/{peer}/jobs/stream', ...options });
 
 export const listPools = <ThrowOnError extends boolean = false>(options?: Options<ListPoolsData, ThrowOnError>): RequestResult<ListPoolsResponses, ListPoolsErrors, ThrowOnError> => (options?.client ?? client).get<ListPoolsResponses, ListPoolsErrors, ThrowOnError>({ url: '/api/v1/pools', ...options });
 

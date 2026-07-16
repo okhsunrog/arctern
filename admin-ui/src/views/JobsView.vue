@@ -10,7 +10,7 @@ import { jobStatus } from '../utils/status'
 import type { JobStatus } from '../client'
 
 const { host, baseUrl } = useHost()
-const { jobs, error, loading, wake, cancel, pause, resume } = useJobs(5000, baseUrl.value)
+const { jobs, error, loading, wake, cancel, pause, resume } = useJobs(baseUrl)
 const title = computed(() => (host.value ? `${host.value} · Jobs` : 'Jobs'))
 
 const UButton = resolveComponent('UButton')

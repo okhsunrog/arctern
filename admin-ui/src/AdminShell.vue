@@ -29,9 +29,9 @@ const themeLabel = {
   dark: 'Theme: dark',
 } as const
 
-// Shell-level polling doubles as the command palette's data source and
+// Shell-level live state doubles as the command palette's data source and
 // the sidebar's health chips.
-const { jobs, wake, pushTo } = useJobs(10_000)
+const { jobs, wake, pushTo } = useJobs()
 const { peers } = usePeers(10_000)
 const { pools } = usePools(15_000)
 

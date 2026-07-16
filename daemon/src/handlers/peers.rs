@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use arctern_api::{ApiErrorBody, LogEvent, PeerReachability, PeerRoute, PeerSummary};
+use arctern_api::{ApiErrorBody, JobStatus, LogEvent, PeerReachability, PeerRoute, PeerSummary};
 use arctern_transport::{ErrorCode, ProxyReply};
 use axum::{
     Json,
@@ -203,6 +203,72 @@ pub async fn proxy_any(
         }
         Err(e) => rpc_error_to_http(format!("{e}")).into_response(),
     }
+}
+
+/// Peer-scoped counterpart of `/api/v1/jobs/stream`. The receiver's generic
+/// control RPC returns bounded JSON replies, so this bridge samples it over
+/// the already-open SSH control channel and exposes one long-lived SSE
+/// response to the browser. Unchanged snapshots are not emitted.
+#[utoipa::path(
+    get,
+    path = "/api/v1/peers/{peer}/jobs/stream",
+    tag = "peers",
+    params(("peer" = String, Path, description = "Peer name from [[peers]]")),
+    responses(
+        (status = 200, description = "SSE stream of job-status snapshots from the peer"),
+        (status = 404, description = "No such peer", body = ApiErrorBody),
+        (status = 503, description = "Peer not currently connected", body = ApiErrorBody),
+    ),
+)]
+pub async fn stream_peer_jobs(
+    State(state): State<AppState>,
+    Path(peer): Path<String>,
+) -> Result<
+    axum::response::Sse<
+        impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+    >,
+    (StatusCode, HeaderMap, Json<ApiErrorBody>),
+> {
+    use axum::response::Sse;
+    use axum::response::sse::{Event, KeepAlive};
+    use std::time::Duration;
+
+    let link = require_link(&state, &peer).await?;
+    let interval = tokio::time::interval(Duration::from_millis(500));
+    let stream = futures_util::stream::unfold(
+        (interval, link, None::<String>),
+        |(mut interval, link, previous)| async move {
+            let mut previous = previous;
+            loop {
+                interval.tick().await;
+                let reply = link
+                    .proxy("GET".into(), "/api/v1/jobs".into(), None)
+                    .await
+                    .ok()?;
+                if reply.status != 200 {
+                    return None;
+                }
+                // Validate the peer response before forwarding it to the UI.
+                let jobs: Vec<JobStatus> = serde_json::from_str(&reply.body).ok()?;
+                let payload = serde_json::to_string(&jobs).ok()?;
+                if previous.as_deref() == Some(payload.as_str()) {
+                    continue;
+                }
+                previous = Some(payload.clone());
+                return Some((
+                    Ok(Event::default().event("jobs").data(payload)),
+                    (interval, link, previous),
+                ));
+            }
+        },
+    );
+    let stream =
+        futures_util::StreamExt::take_until(stream, state.shutdown.clone().cancelled_owned());
+    Ok(Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keep-alive"),
+    ))
 }
 
 /// `GET /api/v1/peers/{peer}/events` — proxied SSE. Sends

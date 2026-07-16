@@ -16,7 +16,7 @@ const route = useRoute()
 const name = computed(() => String(route.params.name))
 
 const { host, baseUrl, prefix } = useHost()
-const { jobs, error: jobsError, wake, cancel, pause, resume, pushTo } = useJobs(5000, baseUrl.value)
+const { jobs, error: jobsError, wake, cancel, pause, resume, pushTo } = useJobs(baseUrl)
 const job = computed(() => jobs.value.find((j) => j.name === name.value))
 
 const {

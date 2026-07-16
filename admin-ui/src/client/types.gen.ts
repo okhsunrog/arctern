@@ -159,7 +159,7 @@ export type JobStatus = {
     paused?: boolean;
     /**
      * In-flight transfers, one per parallel send slot. UI derives
-     * speed from `bytes_sent` deltas between polls.
+     * speed from `bytes_sent` deltas between live snapshots.
      */
     transfers?: Array<TransferInfo>;
     /**
@@ -392,6 +392,17 @@ export type TransferInfo = {
      * Unix seconds.
      */
     started_at: number;
+    /**
+     * Current executor phase. Kept as a string so future phases remain
+     * backwards-compatible: `sending`, `waiting_sender`,
+     * `waiting_receiver`, `finalizing`, or `committing`.
+     */
+    phase?: string;
+    /**
+     * Unix seconds when `phase` last changed. Lets clients render a live
+     * wait duration even while no byte-count events are arriving.
+     */
+    phase_since?: number;
 };
 
 /**
@@ -760,6 +771,20 @@ export type ListJobsResponses = {
 
 export type ListJobsResponse = ListJobsResponses[keyof ListJobsResponses];
 
+export type StreamJobsData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/jobs/stream';
+};
+
+export type StreamJobsResponses = {
+    /**
+     * SSE stream of job-status snapshots
+     */
+    200: unknown;
+};
+
 export type CancelData = {
     body?: never;
     path: {
@@ -996,6 +1021,38 @@ export type StreamPeerEventsError = StreamPeerEventsErrors[keyof StreamPeerEvent
 export type StreamPeerEventsResponses = {
     /**
      * SSE stream of LogEvent JSON frames from the peer
+     */
+    200: unknown;
+};
+
+export type StreamPeerJobsData = {
+    body?: never;
+    path: {
+        /**
+         * Peer name from [[peers]]
+         */
+        peer: string;
+    };
+    query?: never;
+    url: '/api/v1/peers/{peer}/jobs/stream';
+};
+
+export type StreamPeerJobsErrors = {
+    /**
+     * No such peer
+     */
+    404: ApiErrorBody;
+    /**
+     * Peer not currently connected
+     */
+    503: ApiErrorBody;
+};
+
+export type StreamPeerJobsError = StreamPeerJobsErrors[keyof StreamPeerJobsErrors];
+
+export type StreamPeerJobsResponses = {
+    /**
+     * SSE stream of job-status snapshots from the peer
      */
     200: unknown;
 };

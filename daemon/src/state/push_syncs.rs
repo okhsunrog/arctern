@@ -20,18 +20,25 @@ pub async fn record(
     error: Option<&str>,
 ) -> Result<(), StateError> {
     sqlx::query(
-        "INSERT INTO push_syncs (job_name, peer, finished_at, status, error)
-         VALUES (?, ?, ?, ?, ?)
+        "INSERT INTO push_syncs
+           (job_name, peer, finished_at, status, error, last_success_at)
+         VALUES (?, ?, ?, ?, ?, CASE WHEN ? = 'ok' THEN ? ELSE NULL END)
          ON CONFLICT(job_name, peer) DO UPDATE SET
            finished_at = excluded.finished_at,
            status = excluded.status,
-           error = excluded.error",
+           error = excluded.error,
+           last_success_at = CASE
+             WHEN excluded.status = 'ok' THEN excluded.finished_at
+             ELSE push_syncs.last_success_at
+           END",
     )
     .bind(job_name)
     .bind(peer)
     .bind(finished_at)
     .bind(status)
     .bind(error)
+    .bind(status)
+    .bind(finished_at)
     .execute(pool)
     .await?;
     Ok(())
@@ -43,15 +50,18 @@ pub struct PeerSync {
     pub finished_at: i64,
     pub status: String,
     pub error: Option<String>,
+    pub last_success_at: Option<i64>,
 }
 
 /// All recorded outcomes for a job, keyed by peer.
 pub async fn for_job(pool: &SqlitePool, job_name: &str) -> Result<Vec<PeerSync>, StateError> {
-    let rows =
-        sqlx::query("SELECT peer, finished_at, status, error FROM push_syncs WHERE job_name = ?")
-            .bind(job_name)
-            .fetch_all(pool)
-            .await?;
+    let rows = sqlx::query(
+        "SELECT peer, finished_at, status, error, last_success_at
+               FROM push_syncs WHERE job_name = ?",
+    )
+    .bind(job_name)
+    .fetch_all(pool)
+    .await?;
     Ok(rows
         .into_iter()
         .map(|r| PeerSync {
@@ -59,6 +69,46 @@ pub async fn for_job(pool: &SqlitePool, job_name: &str) -> Result<Vec<PeerSync>,
             finished_at: r.get("finished_at"),
             status: r.get("status"),
             error: r.get("error"),
+            last_success_at: r.get("last_success_at"),
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::open_in_memory;
+
+    #[tokio::test]
+    async fn cancelled_attempt_preserves_last_success() {
+        let pool = open_in_memory().await.unwrap();
+        record(&pool, "push", "peer", 100, "ok", None)
+            .await
+            .unwrap();
+        record(&pool, "push", "peer", 200, "cancelled", None)
+            .await
+            .unwrap();
+
+        let rows = for_job(&pool, "push").await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].finished_at, 200);
+        assert_eq!(rows[0].status, "cancelled");
+        assert_eq!(rows[0].last_success_at, Some(100));
+        assert_eq!(rows[0].error, None);
+    }
+
+    #[tokio::test]
+    async fn error_attempt_preserves_last_success_and_message() {
+        let pool = open_in_memory().await.unwrap();
+        record(&pool, "push", "peer", 100, "ok", None)
+            .await
+            .unwrap();
+        record(&pool, "push", "peer", 300, "error", Some("broken pipe"))
+            .await
+            .unwrap();
+
+        let rows = for_job(&pool, "push").await.unwrap();
+        assert_eq!(rows[0].last_success_at, Some(100));
+        assert_eq!(rows[0].error.as_deref(), Some("broken pipe"));
+    }
 }

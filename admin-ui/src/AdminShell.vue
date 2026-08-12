@@ -7,12 +7,13 @@ import TernMark from './components/TernMark.vue'
 import { useAuth } from './composables/useAuth'
 import { useHost } from './composables/useHost'
 import { useJobs } from './composables/useJobs'
+import { jobFailureMessage } from './utils/status'
 import { usePeers } from './composables/usePeers'
 import { usePools } from './composables/usePools'
 
 const router = useRouter()
 const { logout } = useAuth()
-const { host, prefix } = useHost()
+const { host, prefix, baseUrl } = useHost()
 // Three-state theme: auto follows the browser/OS preference live;
 // explicit light/dark stick. emitAuto keeps 'auto' visible to us
 // instead of resolving it away (the DOM class still resolves).
@@ -31,11 +32,11 @@ const themeLabel = {
 
 // Shell-level live state doubles as the command palette's data source and
 // the sidebar's health chips.
-const { jobs, wake, pushTo } = useJobs()
+const { jobs, wake, pushTo } = useJobs(baseUrl)
 const { peers } = usePeers(10_000)
-const { pools } = usePools(15_000)
+const { pools } = usePools(15_000, baseUrl)
 
-const failingJobs = computed(() => jobs.value.filter((j) => j.last_error).length)
+const failingJobs = computed(() => jobs.value.filter((j) => jobFailureMessage(j)).length)
 const runningJobs = computed(() => jobs.value.filter((j) => j.running).length)
 const sickPools = computed(() => pools.value.filter((p) => p.state !== 'ONLINE').length)
 function chip(count: number, color: 'error' | 'info'): NavigationMenuItem['badge'] {
@@ -109,14 +110,16 @@ const searchGroups = computed(() => [
     id: 'goto',
     label: 'Go to',
     items: [
-      { label: 'Dashboard', icon: 'i-lucide-layout-dashboard', to: '/' },
-      { label: 'Jobs', icon: 'i-lucide-list-checks', to: '/jobs' },
-      { label: 'Peers', icon: 'i-lucide-radio-tower', to: '/peers' },
-      { label: 'Snapshots', icon: 'i-lucide-camera', to: '/snapshots' },
-      { label: 'Pools', icon: 'i-lucide-hard-drive', to: '/pools' },
-      { label: 'ARC', icon: 'i-lucide-zap', to: '/arc' },
-      { label: 'Events', icon: 'i-lucide-activity', to: '/events' },
-      { label: 'Config', icon: 'i-lucide-file-code-2', to: '/config' },
+      { label: 'Dashboard', icon: 'i-lucide-layout-dashboard', to: `${prefix.value}/dashboard` },
+      { label: 'Jobs', icon: 'i-lucide-list-checks', to: `${prefix.value}/jobs` },
+      ...(host.value === null
+        ? [{ label: 'Peers', icon: 'i-lucide-radio-tower', to: '/peers' }]
+        : []),
+      { label: 'Snapshots', icon: 'i-lucide-camera', to: `${prefix.value}/snapshots` },
+      { label: 'Pools', icon: 'i-lucide-hard-drive', to: `${prefix.value}/pools` },
+      { label: 'ARC', icon: 'i-lucide-zap', to: `${prefix.value}/arc` },
+      { label: 'Events', icon: 'i-lucide-activity', to: `${prefix.value}/events` },
+      { label: 'Config', icon: 'i-lucide-file-code-2', to: `${prefix.value}/config` },
     ],
   },
   {
@@ -127,7 +130,7 @@ const searchGroups = computed(() => [
         label: `${j.name} — open`,
         suffix: j.kind,
         icon: 'i-lucide-square-arrow-out-up-right',
-        onSelect: () => router.push(`/jobs/${j.name}`),
+        onSelect: () => router.push(`${prefix.value}/jobs/${encodeURIComponent(j.name)}`),
       },
       {
         label: `${j.name} — wake up now`,
@@ -162,7 +165,7 @@ const searchGroups = computed(() => [
       label: `${p.name} — open`,
       suffix: p.state,
       icon: 'i-lucide-hard-drive',
-      onSelect: () => router.push(`/pools/${encodeURIComponent(p.name)}`),
+      onSelect: () => router.push(`${prefix.value}/pools/${encodeURIComponent(p.name)}`),
     })),
   },
 ])

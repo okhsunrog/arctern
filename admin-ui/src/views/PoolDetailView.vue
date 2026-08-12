@@ -13,7 +13,7 @@ import VdevTree from '../components/VdevTree.vue'
 const route = useRoute()
 const name = computed(() => String(route.params.name))
 const { host, baseUrl, prefix } = useHost()
-const { pool, error, scrub } = usePool(name.value, 3000, baseUrl.value)
+const { pool, error, scrub } = usePool(name, 3000, baseUrl)
 const { mutate } = useMutation()
 
 async function scrubAction(action: ScrubRequest['action']) {

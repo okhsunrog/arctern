@@ -92,6 +92,13 @@ const phaseView = computed(() => {
         detail: 'all stream bytes were sent; waiting for zfs recv to commit',
         color: 'text-info',
       }
+    case 'cancelling':
+      return {
+        icon: 'i-lucide-hourglass',
+        label: `stopping receiver safely · ${seconds}s`,
+        detail: 'waiting for the remote ZFS receive process to release the dataset',
+        color: 'text-warning',
+      }
     case 'committing':
       return {
         icon: 'i-lucide-bookmark-check',
@@ -131,7 +138,7 @@ const phaseView = computed(() => {
       <UIcon
         :name="phaseView.icon"
         class="size-3.5 shrink-0"
-        :class="phase === 'finalizing' ? 'animate-spin' : ''"
+        :class="phase === 'finalizing' || phase === 'cancelling' ? 'animate-spin' : ''"
       />
       <span>{{ phaseView.label }}</span>
     </div>

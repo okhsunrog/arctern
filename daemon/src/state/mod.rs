@@ -65,18 +65,59 @@ async fn migrate(pool: &SqlitePool) -> Result<(), StateError> {
     // version, switch to sqlx::migrate! against a migrations dir.
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS job_runs (
+            run_id        INTEGER PRIMARY KEY AUTOINCREMENT,
             job_name      TEXT NOT NULL,
             started_at    INTEGER NOT NULL,
             finished_at   INTEGER,
             status        TEXT NOT NULL,
             error_message TEXT,
-            bytes_sent    INTEGER,
-            PRIMARY KEY (job_name, started_at)
+            bytes_sent    INTEGER
         )",
     )
     .execute(pool)
     .await
     .map_err(StateError::Migrate)?;
+    let has_run_id: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('job_runs') WHERE name = 'run_id'",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(StateError::Migrate)?;
+    if has_run_id == 0 {
+        let mut tx = pool.begin().await.map_err(StateError::Migrate)?;
+        sqlx::query("ALTER TABLE job_runs RENAME TO job_runs_legacy")
+            .execute(&mut *tx)
+            .await
+            .map_err(StateError::Migrate)?;
+        sqlx::query(
+            "CREATE TABLE job_runs (
+                run_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_name      TEXT NOT NULL,
+                started_at    INTEGER NOT NULL,
+                finished_at   INTEGER,
+                status        TEXT NOT NULL,
+                error_message TEXT,
+                bytes_sent    INTEGER
+            )",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(StateError::Migrate)?;
+        sqlx::query(
+            "INSERT INTO job_runs
+               (job_name, started_at, finished_at, status, error_message, bytes_sent)
+             SELECT job_name, started_at, finished_at, status, error_message, bytes_sent
+               FROM job_runs_legacy",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(StateError::Migrate)?;
+        sqlx::query("DROP TABLE job_runs_legacy")
+            .execute(&mut *tx)
+            .await
+            .map_err(StateError::Migrate)?;
+        tx.commit().await.map_err(StateError::Migrate)?;
+    }
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS log_events (
             id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,12 +141,32 @@ async fn migrate(pool: &SqlitePool) -> Result<(), StateError> {
             finished_at INTEGER NOT NULL,
             status      TEXT NOT NULL,
             error       TEXT,
+            last_success_at INTEGER,
             PRIMARY KEY (job_name, peer)
         )",
     )
     .execute(pool)
     .await
     .map_err(StateError::Migrate)?;
+    // v2: an unsuccessful attempt must not erase the scheduling anchor.
+    // Keep the existing attempt columns so upgrades are additive and old
+    // databases remain readable during a rolling binary replacement.
+    let has_last_success: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_table_info('push_syncs') WHERE name = 'last_success_at'",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(StateError::Migrate)?;
+    if has_last_success == 0 {
+        sqlx::query("ALTER TABLE push_syncs ADD COLUMN last_success_at INTEGER")
+            .execute(pool)
+            .await
+            .map_err(StateError::Migrate)?;
+        sqlx::query("UPDATE push_syncs SET last_success_at = finished_at WHERE status = 'ok'")
+            .execute(pool)
+            .await
+            .map_err(StateError::Migrate)?;
+    }
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS recv_transfers (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -228,5 +289,52 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn migrates_legacy_job_runs_without_losing_history() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(":memory:")
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE job_runs (
+                job_name TEXT NOT NULL,
+                started_at INTEGER NOT NULL,
+                finished_at INTEGER,
+                status TEXT NOT NULL,
+                error_message TEXT,
+                bytes_sent INTEGER,
+                PRIMARY KEY (job_name, started_at)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO job_runs
+               (job_name, started_at, finished_at, status, bytes_sent)
+             VALUES ('push', 10, 20, 'ok', 42)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        migrate(&pool).await.unwrap();
+
+        let row: (i64, String, i64, Option<i64>) =
+            sqlx::query_as("SELECT run_id, job_name, started_at, bytes_sent FROM job_runs")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(row.0 > 0);
+        assert_eq!(row.1, "push");
+        assert_eq!(row.2, 10);
+        assert_eq!(row.3, Some(42));
     }
 }

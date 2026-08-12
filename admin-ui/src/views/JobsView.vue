@@ -6,10 +6,10 @@ import IncomingTransfers from '../components/IncomingTransfers.vue'
 import { useJobs } from '../composables/useJobs'
 import { formatNextRun, formatRelative } from '../utils/format'
 import { formatLastSync, formatNextSync } from '../utils/pushTimes'
-import { jobStatus } from '../utils/status'
+import { jobFailureMessage, jobStatus } from '../utils/status'
 import type { JobStatus } from '../client'
 
-const { host, baseUrl } = useHost()
+const { host, baseUrl, prefix } = useHost()
 const { jobs, error, loading, wake, cancel, pause, resume } = useJobs(baseUrl)
 const title = computed(() => (host.value ? `${host.value} · Jobs` : 'Jobs'))
 
@@ -25,7 +25,7 @@ const columns = computed<TableColumn<JobStatus>[]>(() => [
       h(
         resolveComponent('RouterLink'),
         {
-          to: `${host ? `/h/${host}` : ''}/jobs/${row.original.name}`,
+          to: `${prefix.value}/jobs/${encodeURIComponent(row.original.name)}`,
           class: 'font-mono font-medium text-primary hover:underline',
         },
         () => row.original.name,
@@ -42,9 +42,8 @@ const columns = computed<TableColumn<JobStatus>[]>(() => [
     cell: ({ row }) => {
       const s = jobStatus(row.original)
       const badge = h(UBadge, { color: s.color, variant: 'subtle', icon: s.icon }, () => s.label)
-      return row.original.last_error
-        ? h(UTooltip, { text: row.original.last_error }, () => badge)
-        : badge
+      const failure = jobFailureMessage(row.original)
+      return failure ? h(UTooltip, { text: failure }, () => badge) : badge
     },
   },
   {

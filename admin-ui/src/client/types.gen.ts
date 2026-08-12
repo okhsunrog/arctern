@@ -370,6 +370,22 @@ export type TargetStatus = {
      * Unix seconds of the last successful sync to this peer.
      */
     last_success?: number | null;
+    /**
+     * Unix seconds of the most recent attempted sync, regardless of outcome.
+     */
+    last_attempt?: number | null;
+    /**
+     * `"ok" | "error" | "cancelled"` for the most recent attempt.
+     */
+    last_outcome?: string | null;
+    /**
+     * Human-readable context for the most recent non-successful attempt.
+     */
+    last_message?: string | null;
+    /**
+     * Compatibility field for clients that only understand failures.
+     * Unlike `last_message`, this is populated only for a real error.
+     */
     last_error?: string | null;
 };
 

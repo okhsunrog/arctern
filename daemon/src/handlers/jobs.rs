@@ -120,7 +120,7 @@ pub async fn wakeup(State(state): State<AppState>, Path(name): Path<String>) -> 
     tag = "jobs",
     params(("name" = String, Path, description = "Job name")),
     responses(
-        (status = 204, description = "In-flight transfer aborted (partial recv state on the receiver keeps it resumable)"),
+        (status = 204, description = "Cancellation requested; the job remains active until the receiver releases the dataset"),
         (status = 404, description = "No such job"),
         (status = 409, description = "Job kind does not support cancel"),
     ),

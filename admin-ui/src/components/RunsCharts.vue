@@ -71,7 +71,11 @@ const bytesData = computed(() => {
       {
         label: 'bytes sent',
         data: ordered.value.map((r) => Number(r.bytes_sent ?? 0)),
-        backgroundColor: ordered.value.map((r) => (r.status === 'error' ? c.error : c.success)),
+        backgroundColor: ordered.value.map((r) => {
+          if (r.status === 'error') return c.error
+          if (r.status === 'ok') return c.success
+          return c.neutral
+        }),
         borderRadius: 3,
         maxBarThickness: 22,
       },

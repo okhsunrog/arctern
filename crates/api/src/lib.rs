@@ -132,6 +132,17 @@ pub struct TargetStatus {
     /// Unix seconds of the last successful sync to this peer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_success: Option<i64>,
+    /// Unix seconds of the most recent attempted sync, regardless of outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_attempt: Option<i64>,
+    /// `"ok" | "error" | "cancelled"` for the most recent attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_outcome: Option<String>,
+    /// Human-readable context for the most recent non-successful attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_message: Option<String>,
+    /// Compatibility field for clients that only understand failures.
+    /// Unlike `last_message`, this is populated only for a real error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
 }

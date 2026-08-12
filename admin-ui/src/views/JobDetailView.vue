@@ -19,11 +19,7 @@ const { host, baseUrl, prefix } = useHost()
 const { jobs, error: jobsError, wake, cancel, pause, resume, pushTo } = useJobs(baseUrl)
 const job = computed(() => jobs.value.find((j) => j.name === name.value))
 
-const {
-  runs,
-  error: runsError,
-  loading: runsLoading,
-} = useJobRuns(name.value, 10_000, 100, baseUrl.value)
+const { runs, error: runsError, loading: runsLoading } = useJobRuns(name, 10_000, 100, baseUrl)
 
 const UBadge = resolveComponent('UBadge')
 
@@ -57,7 +53,7 @@ const tableColumns = computed<TableColumn<JobRun>[]>(() => [
   },
   {
     accessorKey: 'error_message',
-    header: 'Error',
+    header: 'Details',
     cell: ({ row }) => row.original.error_message ?? '',
   },
 ])

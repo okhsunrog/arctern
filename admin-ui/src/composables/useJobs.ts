@@ -57,10 +57,10 @@ export function useJobs(baseUrl: string | Ref<string> = '') {
 
   async function cancel(name: string) {
     await mutate(
-      `Cancelled ${name}`,
+      `Stopping ${name}`,
       () => cancelJob({ path: { name }, baseUrl: currentBaseUrl() }),
       {
-        successDescription: 'Partial recv state on the receiver keeps the transfer resumable.',
+        successDescription: 'Waiting for the receiver to release the dataset safely.',
       },
     )
   }

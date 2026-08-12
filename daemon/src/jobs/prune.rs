@@ -95,20 +95,23 @@ impl Job for PruneJob {
 async fn run_and_record(job: &PruneJob, ctx: &JobContext, job_name: &str, interval: StdDuration) {
     job.status.lock().unwrap().running = true;
     let started_at = OffsetDateTime::now_utc().unix_timestamp();
-    if let Some(pool) = ctx.state.as_ref() {
-        let _ = crate::state::job_runs::record_start(pool, job_name, started_at).await;
-    }
+    let run_id = if let Some(pool) = ctx.state.as_ref() {
+        crate::state::job_runs::record_start(pool, job_name, started_at)
+            .await
+            .ok()
+    } else {
+        None
+    };
     let outcome = job.run_cycle(ctx).await;
     let finished_at = OffsetDateTime::now_utc().unix_timestamp();
     let (status, error_message) = match &outcome {
         Ok(()) => (crate::state::job_runs::STATUS_OK, None),
         Err(e) => (crate::state::job_runs::STATUS_ERROR, Some(e.as_str())),
     };
-    if let Some(pool) = ctx.state.as_ref() {
+    if let (Some(pool), Some(run_id)) = (ctx.state.as_ref(), run_id) {
         let _ = crate::state::job_runs::record_finish(
             pool,
-            job_name,
-            started_at,
+            run_id,
             finished_at,
             status,
             error_message,

@@ -1,4 +1,4 @@
-import { onUnmounted, ref } from 'vue'
+import { onUnmounted, ref, toValue, watch, type MaybeRefOrGetter } from 'vue'
 import { getPool, listPools, poolScrub } from '../client'
 import type { PoolStatus, PoolSummary, ScrubRequest } from '../client'
 
@@ -9,13 +9,15 @@ function errMessage(e: unknown): string {
   return String(e)
 }
 
-export function usePools(refreshMs = 5000, baseUrl = '') {
+export function usePools(refreshMs = 5000, baseUrl: MaybeRefOrGetter<string> = '') {
   const pools = ref<PoolSummary[]>([])
   const error = ref<string | null>(null)
   const loading = ref(true)
 
   async function refresh() {
-    const r = await listPools({ baseUrl })
+    const requestedBaseUrl = toValue(baseUrl)
+    const r = await listPools({ baseUrl: requestedBaseUrl })
+    if (requestedBaseUrl !== toValue(baseUrl)) return
     if (r.error) error.value = errMessage(r.error)
     else {
       pools.value = r.data ?? []
@@ -24,20 +26,31 @@ export function usePools(refreshMs = 5000, baseUrl = '') {
     loading.value = false
   }
 
-  void refresh()
+  watch(
+    () => toValue(baseUrl),
+    () => void refresh(),
+    { immediate: true },
+  )
   const handle = setInterval(() => void refresh(), refreshMs)
   onUnmounted(() => clearInterval(handle))
 
   return { pools, error, loading, refresh }
 }
 
-export function usePool(name: string, refreshMs = 3000, baseUrl = '') {
+export function usePool(
+  name: MaybeRefOrGetter<string>,
+  refreshMs = 3000,
+  baseUrl: MaybeRefOrGetter<string> = '',
+) {
   const pool = ref<PoolStatus | null>(null)
   const error = ref<string | null>(null)
   const loading = ref(true)
 
   async function refresh() {
-    const r = await getPool({ path: { name }, baseUrl })
+    const requestedName = toValue(name)
+    const requestedBaseUrl = toValue(baseUrl)
+    const r = await getPool({ path: { name: requestedName }, baseUrl: requestedBaseUrl })
+    if (requestedName !== toValue(name) || requestedBaseUrl !== toValue(baseUrl)) return
     if (r.error) error.value = errMessage(r.error)
     else {
       pool.value = r.data ?? null
@@ -48,13 +61,17 @@ export function usePool(name: string, refreshMs = 3000, baseUrl = '') {
 
   /// Returns the raw call result so callers can toast the outcome.
   async function scrub(action: ScrubRequest['action']): Promise<{ error?: unknown }> {
-    const r = await poolScrub({ path: { name }, body: { action }, baseUrl })
+    const r = await poolScrub({
+      path: { name: toValue(name) },
+      body: { action },
+      baseUrl: toValue(baseUrl),
+    })
     if (r.error) error.value = errMessage(r.error)
     await refresh()
     return { error: r.error }
   }
 
-  void refresh()
+  watch([() => toValue(name), () => toValue(baseUrl)], () => void refresh(), { immediate: true })
   const handle = setInterval(() => void refresh(), refreshMs)
   onUnmounted(() => clearInterval(handle))
 

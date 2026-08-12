@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { JobStatus } from '../client'
+import type { JobStatus, TargetStatus } from '../client'
 import TransferSlot from './TransferSlot.vue'
 
 defineProps<{
@@ -26,6 +26,32 @@ function fmtIn(s: number): string {
   return `${Math.round(s / 86400)}d`
 }
 
+function friendlyFailure(message?: string | null): string {
+  if (!message) return 'No details were reported'
+  if (/broken pipe/i.test(message)) return 'Receiver closed the connection before completion'
+  if (/not connected/i.test(message)) return 'Peer is not connected'
+  return message.replace(/^execute\s+[^:]+:\s*/i, '')
+}
+
+function targetOutcome(tg: TargetStatus): string | null {
+  return tg.last_outcome ?? (tg.last_error ? 'error' : null)
+}
+
+function targetTone(tg: TargetStatus): string {
+  if (targetOutcome(tg) === 'error') return 'text-error'
+  if (targetOutcome(tg) === 'cancelled') return 'text-muted'
+  return 'text-muted'
+}
+
+function canCancel(job: JobStatus): boolean {
+  if (!job.running) return false
+  const transfers = job.transfers ?? []
+  if (transfers.length === 0) return true
+  return transfers.some(
+    (t) => !['finalizing', 'committing', 'cancelling'].includes(t.phase ?? 'sending'),
+  )
+}
+
 /** Effective replication mode for the badge. The config-level policy
  * alone reads as a contradiction when the active route is manual-only
  * ("auto" badge next to "route is manual-only") — show what will
@@ -47,15 +73,14 @@ function modeBadge(tg: { mode: string; connected: boolean; route_auto?: boolean 
 
 /** One human line per target: last sync + (for auto) when the next
  * automatic sync becomes due. */
-function targetLine(tg: {
-  mode: string
-  route_auto?: boolean
-  connected: boolean
-  auto_interval_secs?: number | null
-  last_success?: number | null
-  last_error?: string | null
-}): string {
-  if (tg.last_error) return `error: ${tg.last_error}`
+function targetLine(tg: TargetStatus): string {
+  if (targetOutcome(tg) === 'error') {
+    return `Failed ${age(tg.last_attempt)} · ${friendlyFailure(tg.last_message ?? tg.last_error)}`
+  }
+  if (targetOutcome(tg) === 'cancelled') {
+    const previous = tg.last_success ? ` · last sync ${age(tg.last_success)}` : ''
+    return `Cancelled by operator ${age(tg.last_attempt)}${previous}`
+  }
   const synced = tg.last_success ? `synced ${age(tg.last_success)}` : 'never synced'
   if (tg.mode !== 'auto') return synced
   if (tg.connected && !tg.route_auto) return `${synced} · route is manual-only`
@@ -119,10 +144,14 @@ function targetLine(tg: {
              already say this; repeat per-target only when there is more
              than one target or something is wrong. -->
         <div
-          v-if="(job.targets?.length ?? 0) > 1 || tg.last_error || (tg.connected && !tg.route_auto)"
+          v-if="
+            (job.targets?.length ?? 0) > 1 ||
+            (targetOutcome(tg) != null && targetOutcome(tg) !== 'ok') ||
+            (tg.connected && !tg.route_auto)
+          "
           class="text-xs ml-4 truncate"
-          :class="tg.last_error ? 'text-error' : 'text-muted'"
-          :title="tg.last_error ?? targetLine(tg)"
+          :class="targetTone(tg)"
+          :title="tg.last_message ?? targetLine(tg)"
         >
           {{ targetLine(tg) }}
         </div>
@@ -150,13 +179,13 @@ function targetLine(tg: {
         >Resume</UButton
       >
       <UButton
-        v-if="job.running"
+        v-if="canCancel(job)"
         size="xs"
         color="error"
         variant="soft"
         icon="i-lucide-circle-x"
         @click="onCancel?.(job.name)"
-        >Cancel</UButton
+        >Stop transfer</UButton
       >
     </div>
   </div>

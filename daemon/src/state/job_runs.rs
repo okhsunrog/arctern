@@ -16,33 +16,30 @@ pub const STATUS_RUNNING: &str = "running";
 #[allow(dead_code)]
 pub const STATUS_CANCELLED: &str = "cancelled";
 
-/// Insert a `running` row for a freshly started cycle. The
-/// `(job_name, started_at)` pair is the primary key; callers are
-/// expected to use the cycle's UNIX-second start as `started_at` and
-/// to call `finish` later with the same value.
+/// Insert a `running` row for a freshly started cycle and return its
+/// unique database id. Timestamps are intentionally not identifiers:
+/// two operator actions can start within the same second.
 pub async fn record_start(
     pool: &SqlitePool,
     job_name: &str,
     started_at: i64,
-) -> Result<(), StateError> {
-    sqlx::query(
+) -> Result<i64, StateError> {
+    let result = sqlx::query(
         "INSERT INTO job_runs (job_name, started_at, status)
-         VALUES (?, ?, ?)
-         ON CONFLICT(job_name, started_at) DO NOTHING",
+         VALUES (?, ?, ?)",
     )
     .bind(job_name)
     .bind(started_at)
     .bind(STATUS_RUNNING)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(result.last_insert_rowid())
 }
 
 /// Update an in-flight row to its terminal state.
 pub async fn record_finish(
     pool: &SqlitePool,
-    job_name: &str,
-    started_at: i64,
+    run_id: i64,
     finished_at: i64,
     status: &str,
     error_message: Option<&str>,
@@ -51,14 +48,13 @@ pub async fn record_finish(
     sqlx::query(
         "UPDATE job_runs
             SET finished_at = ?, status = ?, error_message = ?, bytes_sent = ?
-          WHERE job_name = ? AND started_at = ?",
+          WHERE run_id = ?",
     )
     .bind(finished_at)
     .bind(status)
     .bind(error_message)
     .bind(bytes_sent)
-    .bind(job_name)
-    .bind(started_at)
+    .bind(run_id)
     .execute(pool)
     .await?;
     Ok(())
@@ -78,7 +74,7 @@ pub async fn list_recent(
            FROM job_runs
           WHERE job_name = ?
             AND (? IS NULL OR started_at >= ?)
-          ORDER BY started_at DESC
+          ORDER BY started_at DESC, run_id DESC
           LIMIT ?",
     )
     .bind(job_name)
@@ -121,8 +117,8 @@ mod tests {
     #[tokio::test]
     async fn record_start_then_finish() {
         let pool = open_in_memory().await.unwrap();
-        record_start(&pool, "backup", 100).await.unwrap();
-        record_finish(&pool, "backup", 100, 200, STATUS_OK, None, Some(2048))
+        let run_id = record_start(&pool, "backup", 100).await.unwrap();
+        record_finish(&pool, run_id, 200, STATUS_OK, None, Some(2048))
             .await
             .unwrap();
         let row: (
@@ -157,5 +153,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    #[tokio::test]
+    async fn starts_in_the_same_second_are_distinct() {
+        let pool = open_in_memory().await.unwrap();
+        let first = record_start(&pool, "push", 100).await.unwrap();
+        let second = record_start(&pool, "push", 100).await.unwrap();
+        assert_ne!(first, second);
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM job_runs WHERE job_name = 'push' AND started_at = 100",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 2);
     }
 }

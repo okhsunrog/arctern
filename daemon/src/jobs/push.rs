@@ -781,6 +781,11 @@ async fn execute_one_plan(
         let _ = channel_stdin.shutdown().await;
         let _ = child.cancel().await;
         if cancel.is_cancelled() {
+            // EOF only asks the remote zfs recv to stop. Keep the channel
+            // alive until it has actually exited so a retry cannot race the
+            // old receiver for the same dataset.
+            set_transfer_phase(transfers, transfer_key, "cancelling");
+            let _ = channel.finish().await;
             return Err("cancelled".into());
         }
         return Err(format!("stream copy: {error}"));
@@ -974,8 +979,26 @@ async fn sweep_step_holds(
 
 pub const KIND: &str = arctern_api::JOB_KIND_PUSH;
 
-/// Per-peer last outcome: (last successful sync unix seconds, last error).
-type PeerOutcomes = HashMap<String, (Option<i64>, Option<String>)>;
+/// Per-peer scheduling anchor plus the most recent attempt shown in the UI.
+#[derive(Debug, Clone, Default)]
+struct PeerOutcome {
+    last_success: Option<i64>,
+    last_attempt: Option<i64>,
+    outcome: Option<String>,
+    message: Option<String>,
+}
+
+type PeerOutcomes = HashMap<String, PeerOutcome>;
+
+fn classify_peer_attempt(cancelled: bool, errors: &[String]) -> (&'static str, Option<String>) {
+    if cancelled {
+        ("cancelled", None)
+    } else if errors.is_empty() {
+        ("ok", None)
+    } else {
+        ("error", Some(errors.join("; ")))
+    }
+}
 
 /// Safety-net poll when nothing is due and no signal arrives.
 const FALLBACK_POLL: StdDuration = StdDuration::from_secs(15 * 60);
@@ -1013,7 +1036,7 @@ pub struct PushJob {
     /// Cancellation token of the currently running cycle (child of the
     /// job's own token), so cancel/pause can abort mid-transfer.
     cycle_cancel: Mutex<Option<CancellationToken>>,
-    /// Last known per-peer outcome: (last_success unix, last_error).
+    /// Last known per-peer success and most recent attempt outcome.
     /// Seeded from SQLite on the first cycle, updated after every sync.
     peer_outcomes: Mutex<PeerOutcomes>,
     outcomes_loaded: AtomicBool,
@@ -1071,6 +1094,17 @@ impl PushJob {
             .iter()
             .find(|p| p.name == name)
             .and_then(|p| p.auto_interval)
+    }
+
+    /// A user-cancelled attempt suppresses an immediate automatic retry.
+    /// Treat the cancellation time as the cadence anchor while retaining
+    /// last_success as the actual recovery point for incremental planning.
+    fn peer_schedule_anchor(outcome: &PeerOutcome) -> Option<i64> {
+        if outcome.outcome.as_deref() == Some("cancelled") {
+            outcome.last_attempt
+        } else {
+            outcome.last_success
+        }
     }
 
     /// Live link + active-route snapshot for one named target, if
@@ -1156,10 +1190,14 @@ impl PushJob {
         if let Ok(rows) = crate::state::push_syncs::for_job(pool, &self.config.name).await {
             let mut o = self.peer_outcomes.lock().unwrap();
             for r in rows {
-                let ok = r.status == "ok";
                 o.insert(
                     r.peer,
-                    (ok.then_some(r.finished_at), if ok { None } else { r.error }),
+                    PeerOutcome {
+                        last_success: r.last_success_at,
+                        last_attempt: Some(r.finished_at),
+                        outcome: Some(r.status),
+                        message: r.error,
+                    },
                 );
             }
         }
@@ -1203,7 +1241,7 @@ impl PushJob {
                 .lock()
                 .unwrap()
                 .get(name)
-                .and_then(|o| o.0);
+                .and_then(Self::peer_schedule_anchor);
             let cadence = self
                 .peer_auto_interval(name)
                 .or(self.config.interval)
@@ -1259,11 +1297,7 @@ impl PushJob {
                 .await;
             total_bytes += bytes;
             let finished = OffsetDateTime::now_utc().unix_timestamp();
-            let (status, err_text) = if peer_errors.is_empty() {
-                ("ok", None)
-            } else {
-                ("error", Some(peer_errors.join("; ")))
-            };
+            let (status, message) = classify_peer_attempt(cancel.is_cancelled(), &peer_errors);
             if let Some(pool) = ctx.state.as_ref() {
                 let _ = crate::state::push_syncs::record(
                     pool,
@@ -1271,17 +1305,18 @@ impl PushJob {
                     &peer_name,
                     finished,
                     status,
-                    err_text.as_deref(),
+                    message.as_deref(),
                 )
                 .await;
             }
             {
                 let mut o = self.peer_outcomes.lock().unwrap();
-                let entry = o.entry(peer_name.clone()).or_insert((None, None));
-                if peer_errors.is_empty() {
-                    *entry = (Some(finished), None);
-                } else {
-                    entry.1 = err_text.clone();
+                let entry = o.entry(peer_name.clone()).or_default();
+                entry.last_attempt = Some(finished);
+                entry.outcome = Some(status.into());
+                entry.message = message;
+                if status == "ok" {
+                    entry.last_success = Some(finished);
                 }
             }
             errors.extend(peer_errors);
@@ -1480,6 +1515,10 @@ impl PushJob {
             .unwrap_or(0);
         match res {
             Ok(()) => (bytes, None),
+            Err(e) if cancel.is_cancelled() || e == "cancelled" => {
+                tracing::info!(sender = %sender_path, "push: transfer cancelled");
+                (bytes, Some("cancelled".into()))
+            }
             Err(e) => {
                 let msg = format!("execute {sender_path}: {e}");
                 warn!(error = %msg);
@@ -1535,8 +1574,7 @@ impl Job for PushJob {
             .targets
             .iter()
             .map(|name| {
-                let (last_success, last_error) =
-                    outcomes.get(name).cloned().unwrap_or((None, None));
+                let outcome = outcomes.get(name).cloned().unwrap_or_default();
                 let (is_connected, route, route_auto) =
                     connected.get(name).cloned().unwrap_or((false, None, false));
                 TargetStatus {
@@ -1549,8 +1587,13 @@ impl Job for PushJob {
                     route,
                     route_auto,
                     auto_interval_secs: self.peer_auto_interval(name).map(|d| d.as_secs()),
-                    last_success,
-                    last_error,
+                    last_success: outcome.last_success,
+                    last_attempt: outcome.last_attempt,
+                    last_outcome: outcome.outcome.clone(),
+                    last_message: outcome.message.clone(),
+                    last_error: (outcome.outcome.as_deref() == Some("error"))
+                        .then_some(outcome.message)
+                        .flatten(),
                 }
             })
             .collect();
@@ -1560,14 +1603,32 @@ impl Job for PushJob {
         self.wakeup.notify_one();
     }
     fn cancel_current(&self) -> bool {
-        if let Some(tok) = self.cycle_cancel.lock().unwrap().as_ref() {
-            tok.cancel();
+        let token = self.cycle_cancel.lock().unwrap().clone();
+        let Some(token) = token else {
+            return false;
+        };
+        let transfers = self.transfers.lock().unwrap();
+        if !transfers.is_empty()
+            && transfers
+                .values()
+                .all(|t| matches!(t.phase.as_str(), "finalizing" | "committing" | "cancelling"))
+        {
+            return false;
         }
+        drop(transfers);
+        token.cancel();
         true
     }
     fn pause(&self) -> bool {
         self.paused.store(true, Ordering::Relaxed);
-        if let Some(tok) = self.cycle_cancel.lock().unwrap().as_ref() {
+        let cancellable = {
+            let transfers = self.transfers.lock().unwrap();
+            transfers.is_empty()
+                || transfers.values().any(|t| {
+                    !matches!(t.phase.as_str(), "finalizing" | "committing" | "cancelling")
+                })
+        };
+        if cancellable && let Some(tok) = self.cycle_cancel.lock().unwrap().as_ref() {
             tok.cancel();
         }
         true
@@ -1656,7 +1717,7 @@ impl PushJob {
             }
             let due_at = match (
                 self.peer_auto_interval(name),
-                outcomes.get(name).and_then(|o| o.0),
+                outcomes.get(name).and_then(Self::peer_schedule_anchor),
             ) {
                 (Some(iv), Some(ts)) => ts + iv.as_secs() as i64,
                 // No interval or no history: due immediately.
@@ -1701,24 +1762,27 @@ impl PushJob {
         let cycle_token = cancel.child_token();
         *self.cycle_cancel.lock().unwrap() = Some(cycle_token.clone());
         let started_at = OffsetDateTime::now_utc().unix_timestamp();
-        if let Some(pool) = ctx.state.as_ref() {
-            let _ = crate::state::job_runs::record_start(pool, job_name, started_at).await;
-        }
+        let run_id = if let Some(pool) = ctx.state.as_ref() {
+            crate::state::job_runs::record_start(pool, job_name, started_at)
+                .await
+                .ok()
+        } else {
+            None
+        };
         let (bytes, outcome) = self.run_cycle(ctx, &cycle_token, selected, errors).await;
         *self.cycle_cancel.lock().unwrap() = None;
         let finished_at = OffsetDateTime::now_utc().unix_timestamp();
         let (status, err_msg) = match &outcome {
             Ok(()) => (crate::state::job_runs::STATUS_OK, None),
             Err(_) if cycle_token.is_cancelled() && !cancel.is_cancelled() => {
-                (crate::state::job_runs::STATUS_CANCELLED, Some("cancelled"))
+                (crate::state::job_runs::STATUS_CANCELLED, None)
             }
             Err(e) => (crate::state::job_runs::STATUS_ERROR, Some(e.as_str())),
         };
-        if let Some(pool) = ctx.state.as_ref() {
+        if let (Some(pool), Some(run_id)) = (ctx.state.as_ref(), run_id) {
             let _ = crate::state::job_runs::record_finish(
                 pool,
-                job_name,
-                started_at,
+                run_id,
                 finished_at,
                 status,
                 err_msg,
@@ -1739,6 +1803,12 @@ impl PushJob {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancellation_is_not_a_peer_error() {
+        let errors = vec!["cancelled".to_string()];
+        assert_eq!(classify_peer_attempt(true, &errors), ("cancelled", None));
+    }
 
     fn s(name: &str, guid: u64) -> SnapshotEntry {
         SnapshotEntry {

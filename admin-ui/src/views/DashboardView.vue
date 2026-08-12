@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { useHost } from '../composables/useHost'
 import { useJobs } from '../composables/useJobs'
+import { jobFailureMessage } from '../utils/status'
 import { useEvents } from '../composables/useEvents'
 import { useArc } from '../composables/useArc'
 import { usePools } from '../composables/usePools'
@@ -32,7 +33,7 @@ const arcRatio = computed(() => {
 })
 
 const jobsSummary = computed(() => {
-  const failing = jobs.value.filter((j) => j.last_error).length
+  const failing = jobs.value.filter((j) => jobFailureMessage(j)).length
   const running = jobs.value.filter((j) => j.running).length
   return { total: jobs.value.length, failing, running }
 })

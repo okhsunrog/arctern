@@ -778,7 +778,7 @@ async fn execute_one_plan(
     }
     .await;
     if let Err(error) = copy_res {
-        let _ = channel_stdin.shutdown().await;
+        close_stream_writer(channel_stdin).await;
         let _ = child.cancel().await;
         if cancel.is_cancelled() {
             // EOF only asks the remote zfs recv to stop. Keep the channel
@@ -791,8 +791,7 @@ async fn execute_one_plan(
         return Err(format!("stream copy: {error}"));
     }
     set_transfer_phase(transfers, transfer_key, "finalizing");
-    let _ = channel_stdin.shutdown().await;
-    drop(channel_stdin);
+    close_stream_writer(channel_stdin).await;
     child
         .finish()
         .await
@@ -805,6 +804,13 @@ async fn execute_one_plan(
         Response::Ok => Ok(()),
         Response::Error { message, .. } => Err(format!("receiver: {message}")),
     }
+}
+
+/// Close an SSH stream writer and consume its handle before the caller waits
+/// for the remote process. `shutdown()` alone does not deliver EOF while the
+/// final writer handle remains alive.
+async fn close_stream_writer<W: tokio::io::AsyncWrite + Unpin>(mut writer: W) {
+    let _ = writer.shutdown().await;
 }
 
 fn set_transfer_phase(
@@ -1803,6 +1809,55 @@ impl PushJob {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TrackedWriter {
+        shutdown: Arc<AtomicBool>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl tokio::io::AsyncWrite for TrackedWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            self.shutdown.store(true, Ordering::Relaxed);
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    impl Drop for TrackedWriter {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Relaxed);
+        }
+    }
+
+    #[tokio::test]
+    async fn close_stream_writer_shuts_down_and_drops_handle() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicBool::new(false));
+        close_stream_writer(TrackedWriter {
+            shutdown: shutdown.clone(),
+            dropped: dropped.clone(),
+        })
+        .await;
+        assert!(shutdown.load(Ordering::Relaxed));
+        assert!(dropped.load(Ordering::Relaxed));
+    }
 
     #[test]
     fn cancellation_is_not_a_peer_error() {

@@ -26,6 +26,8 @@ use zfskit::dataset::ListOptions;
 use zfskit::models::DatasetType;
 use zfskit::runner::CommandRunner;
 
+use super::recv_lock::RecvLocks;
+
 /// Run the control channel until stdin EOF or a fatal transport error.
 /// `acl` scopes destroy / discard operations; `runner` is the
 /// zfskit CommandRunner the dispatch process opened (typically a
@@ -35,6 +37,7 @@ pub async fn run<R, W>(
     config: Arc<Config>,
     acl: AllowedClient,
     pool: Option<Arc<SqlitePool>>,
+    recv_locks: RecvLocks,
     reader: R,
     writer: W,
 ) -> std::io::Result<()>
@@ -48,6 +51,7 @@ where
         config,
         acl,
         pool,
+        recv_locks,
     };
     BaseChannel::with_defaults(transport)
         .execute(server.serve())
@@ -64,6 +68,7 @@ struct ControlServer {
     config: Arc<Config>,
     acl: AllowedClient,
     pool: Option<Arc<SqlitePool>>,
+    recv_locks: RecvLocks,
 }
 
 impl ArcternControl for ControlServer {
@@ -100,6 +105,12 @@ impl ArcternControl for ControlServer {
             )
         })?;
         enforce_root_fs(&self.acl, &dataset)?;
+        // Never abort `%recv` while a receive channel still owns it. This
+        // also serializes cleanup with admission of the replacement stream.
+        let _recv_lock = self.recv_locks.acquire(&dataset).map_err(|e| {
+            tracing::warn!(target = %dataset, error = %e, "partial receive cleanup refused");
+            WireError::new(ErrorCode::Zfs, e.to_string())
+        })?;
         zfskit::recv::abort_partial(self.runner.as_ref(), &dataset)
             .await
             .map_err(|e| {
@@ -352,9 +363,22 @@ mod tests {
     /// RecordingRunner for ZFS. Dropping the returned client ends the
     /// server loop via transport EOF.
     fn client(runner: Arc<dyn CommandRunner>, acl: AllowedClient) -> ArcternControlClient {
+        let lock_dir = std::env::temp_dir().join(format!(
+            "arctern-control-test-{}-{}",
+            std::process::id(),
+            getrandom::u64().expect("random suffix")
+        ));
+        client_with_locks(runner, acl, RecvLocks::new(&lock_dir))
+    }
+
+    fn client_with_locks(
+        runner: Arc<dyn CommandRunner>,
+        acl: AllowedClient,
+        recv_locks: RecvLocks,
+    ) -> ArcternControlClient {
         let (a, b) = tokio::io::duplex(64 * 1024);
         let (areader, awriter) = tokio::io::split(a);
-        tokio::spawn(run(runner, cfg(), acl, None, areader, awriter));
+        tokio::spawn(run(runner, cfg(), acl, None, recv_locks, areader, awriter));
         ArcternControlClient::new(
             tarpc::client::Config::default(),
             arctern_transport::transport(b),
@@ -438,6 +462,34 @@ mod tests {
             .unwrap_err();
         assert_eq!(e.code, ErrorCode::Unauthorized);
         assert!(e.message.contains("control:discard_partial_recv"));
+    }
+
+    #[tokio::test]
+    async fn discard_partial_recv_refuses_active_receiver() {
+        let dir = std::env::temp_dir().join(format!(
+            "arctern-control-busy-test-{}-{}",
+            std::process::id(),
+            getrandom::u64().expect("random suffix")
+        ));
+        let recv_locks = RecvLocks::new(&dir);
+        let active = recv_locks.acquire("tank/backups/laptop").unwrap();
+        let c = client_with_locks(
+            Arc::new(RecordingRunner::new()),
+            acl_with_ops(
+                Some("tank/backups/laptop"),
+                &["control", "control:discard_partial_recv", "recv"],
+            ),
+            recv_locks,
+        );
+        let e = c
+            .discard_partial_recv(ctx(), "tank/backups/laptop".into())
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::Zfs);
+        assert!(e.message.contains("receive already active"));
+        drop(active);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]

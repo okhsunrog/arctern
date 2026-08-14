@@ -28,6 +28,8 @@ use zfskit::models::DatasetType;
 use zfskit::recv::{RecvArgs, recv as zfs_recv};
 use zfskit::runner::CommandRunner;
 
+use super::recv_lock::RecvLocks;
+
 /// Drive one recv channel from start to finish. Errors are surfaced as
 /// `Response::Error` written back to the caller; the function only
 /// returns `Err` on stdin/stdout I/O failures so the calling process
@@ -36,6 +38,7 @@ pub async fn run<R, W>(
     runner: Arc<dyn CommandRunner>,
     acl: AllowedClient,
     pool: Option<Arc<SqlitePool>>,
+    recv_locks: RecvLocks,
     job: &str,
     mut reader: R,
     mut writer: W,
@@ -60,7 +63,7 @@ where
         }
     };
     let started = std::time::Instant::now();
-    let outcome = drive(&runner, &acl, &header, &mut reader).await;
+    let outcome = drive(&runner, &acl, &recv_locks, &header, &mut reader).await;
     if let Ok(bytes) = outcome {
         advance_last_hold(
             runner.as_ref(),
@@ -141,6 +144,7 @@ async fn advance_last_hold(
 async fn drive<R>(
     runner: &Arc<dyn CommandRunner>,
     acl: &AllowedClient,
+    recv_locks: &RecvLocks,
     header: &RecvHeader,
     reader: &mut R,
 ) -> Result<u64, (ErrorCode, String)>
@@ -151,6 +155,13 @@ where
     if let Err(msg) = enforce_root_fs(acl, &header.target_dataset) {
         return Err((ErrorCode::Unauthorized, msg));
     }
+    // Hold this across abort, stream ingestion and ZFS finalization.
+    // The control RPC uses the same lock, so it cannot destroy `%recv` under
+    // an active receiver and a second recv channel cannot enter concurrently.
+    let _recv_lock = recv_locks.acquire(&header.target_dataset).map_err(|e| {
+        tracing::warn!(target = %header.target_dataset, error = %e, "recv admission refused");
+        (ErrorCode::Zfs, e.to_string())
+    })?;
     if header.send.discard_partial_recv {
         tracing::info!(
             target = %header.target_dataset,

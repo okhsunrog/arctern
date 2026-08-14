@@ -1429,7 +1429,9 @@ impl PushJob {
             if self.config.dry_run {
                 tracing::info!(target = %target, "push: dry-run would discard partial receive state");
             } else if let Err(e) = peer.discard_partial_recv(target.clone()).await {
-                warn!(target = %target, error = %e, "discard_partial_recv RPC failed");
+                let msg = format!("discard partial receive {target}: {e}");
+                warn!(target = %target, error = %e, "discard_partial_recv RPC failed; refusing to open recv stream");
+                return (0, Some(msg));
             }
         }
         match &plan {

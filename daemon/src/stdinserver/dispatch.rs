@@ -6,6 +6,7 @@
 //! to the `control` or `recv` stdinserver handler.
 
 use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 
@@ -70,6 +71,11 @@ pub async fn run_with(
     let acl = lookup_identity(&config, identity)
         .expect("decide() already validated identity")
         .clone();
+    let state_dir = config
+        .state_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("/var/lib/arctern"));
+    let recv_locks = super::recv_lock::RecvLocks::new(&state_dir);
     let config = Arc::new(config);
     let runner: Arc<dyn CommandRunner> = Arc::new(RealRunner);
     match action {
@@ -77,7 +83,7 @@ pub async fn run_with(
             tracing::info!(identity, job, "stdinserver control: opening channel");
             let stdin = tokio::io::stdin();
             let stdout = tokio::io::stdout();
-            super::control::run(runner, config, acl, pool, stdin, stdout)
+            super::control::run(runner, config, acl, pool, recv_locks, stdin, stdout)
                 .await
                 .map_err(|e| eyre::eyre!("control channel: {e}"))?;
             Ok(())
@@ -86,7 +92,7 @@ pub async fn run_with(
             tracing::info!(identity, job, "stdinserver recv: opening channel");
             let stdin = tokio::io::stdin();
             let stdout = tokio::io::stdout();
-            super::recv::run(runner, acl, pool, &job, stdin, stdout)
+            super::recv::run(runner, acl, pool, recv_locks, &job, stdin, stdout)
                 .await
                 .map_err(|e| eyre::eyre!("recv channel: {e}"))?;
             Ok(())

@@ -37,7 +37,12 @@ function targetOutcome(tg: TargetStatus): string | null {
   return tg.last_outcome ?? (tg.last_error ? 'error' : null)
 }
 
-function targetTone(tg: TargetStatus): string {
+function targetIsRetrying(job: JobStatus, tg: TargetStatus): boolean {
+  return (job.transfers ?? []).some((transfer) => transfer.peer === tg.peer)
+}
+
+function targetTone(job: JobStatus, tg: TargetStatus): string {
+  if (targetIsRetrying(job, tg) && targetOutcome(tg) === 'error') return 'text-info'
   if (targetOutcome(tg) === 'error') return 'text-error'
   if (targetOutcome(tg) === 'cancelled') return 'text-muted'
   return 'text-muted'
@@ -73,9 +78,13 @@ function modeBadge(tg: { mode: string; connected: boolean; route_auto?: boolean 
 
 /** One human line per target: last sync + (for auto) when the next
  * automatic sync becomes due. */
-function targetLine(tg: TargetStatus): string {
+function targetLine(job: JobStatus, tg: TargetStatus): string {
   if (targetOutcome(tg) === 'error') {
-    return `Failed ${age(tg.last_attempt)} · ${friendlyFailure(tg.last_message ?? tg.last_error)}`
+    const previous = `previous attempt failed ${age(tg.last_attempt)}`
+    const details = friendlyFailure(tg.last_message ?? tg.last_error)
+    return targetIsRetrying(job, tg)
+      ? `Retrying now · ${previous}: ${details}`
+      : `Failed ${age(tg.last_attempt)} · ${details}`
   }
   if (targetOutcome(tg) === 'cancelled') {
     const previous = tg.last_success ? ` · last sync ${age(tg.last_success)}` : ''
@@ -150,10 +159,10 @@ function targetLine(tg: TargetStatus): string {
             (tg.connected && !tg.route_auto)
           "
           class="text-xs ml-4 truncate"
-          :class="targetTone(tg)"
-          :title="tg.last_message ?? targetLine(tg)"
+          :class="targetTone(job, tg)"
+          :title="targetLine(job, tg)"
         >
-          {{ targetLine(tg) }}
+          {{ targetLine(job, tg) }}
         </div>
       </div>
     </div>

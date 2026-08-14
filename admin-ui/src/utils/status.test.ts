@@ -42,4 +42,32 @@ describe('job status outcomes', () => {
     expect(jobFailureMessage(job)).toBe('receiver closed the connection')
     expect(jobStatus(job).color).toBe('error')
   })
+
+  it('does not count a previous target failure while that peer is retrying', () => {
+    const job = pushJob({
+      running: true,
+      transfers: [
+        {
+          dataset: 'tank/home',
+          peer: 'mira',
+          kind: 'incremental',
+          bytes_sent: 1024,
+          started_at: 300,
+        },
+      ],
+      targets: [
+        {
+          peer: 'mira',
+          mode: 'auto',
+          connected: true,
+          last_attempt: 200,
+          last_outcome: 'error',
+          last_message: 'receiver closed the connection',
+        },
+      ],
+    })
+
+    expect(jobFailureMessage(job)).toBeNull()
+    expect(jobStatus(job).label).toBe('running')
+  })
 })

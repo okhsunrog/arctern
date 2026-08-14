@@ -47,8 +47,11 @@ export function jobStatus(j: JobStatus): StatusView {
 
 export function jobFailureMessage(j: JobStatus): string | null {
   if (j.last_error) return j.last_error
+  const activePeers = new Set((j.transfers ?? []).map((transfer) => transfer.peer))
   const failed = (j.targets ?? []).find(
-    (t) => t.last_outcome === 'error' || (t.last_outcome == null && t.last_error != null),
+    (t) =>
+      !activePeers.has(t.peer) &&
+      (t.last_outcome === 'error' || (t.last_outcome == null && t.last_error != null)),
   )
   return failed?.last_message ?? failed?.last_error ?? null
 }

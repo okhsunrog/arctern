@@ -8,6 +8,7 @@ import {
 } from '../client'
 import type { JobStatus } from '../client'
 import { useMutation } from './useMutation'
+import { createReconnectingEventSource } from './reconnectingEventSource'
 
 export function jobsStreamPath(baseUrl: string): string {
   const peer = /^\/api\/v1\/peers\/([^/]+)\/proxy\/?$/.exec(baseUrl)
@@ -17,39 +18,41 @@ export function jobsStreamPath(baseUrl: string): string {
 export function useJobs(baseUrl: string | Ref<string> = '') {
   const jobs = ref<JobStatus[]>([])
   const error = ref<string | null>(null)
+  const warning = ref<string | null>(null)
   const loading = ref(true)
   const { mutate } = useMutation()
-
-  let stream: EventSource | null = null
 
   function currentBaseUrl(): string {
     return typeof baseUrl === 'object' ? baseUrl.value : baseUrl
   }
 
-  function open(url: string) {
-    stream?.close()
-    loading.value = jobs.value.length === 0
-    stream = new EventSource(jobsStreamPath(url))
-    stream.addEventListener('jobs', (event) => {
-      try {
-        jobs.value = JSON.parse(event.data) as JobStatus[]
-        error.value = null
-        loading.value = false
-      } catch {
-        error.value = 'invalid job status update'
-      }
-    })
-    stream.addEventListener('error', () => {
-      error.value = 'job status stream disconnected (auto-reconnecting)'
-    })
-  }
+  const connection = createReconnectingEventSource({
+    url: () => jobsStreamPath(currentBaseUrl()),
+    subscribe(stream) {
+      loading.value = jobs.value.length === 0
+      stream.addEventListener('jobs', (event) => {
+        try {
+          jobs.value = JSON.parse(event.data) as JobStatus[]
+          error.value = null
+          warning.value = null
+          loading.value = false
+        } catch {
+          error.value = 'invalid job status update'
+        }
+      })
+    },
+    onOpen() {
+      warning.value = null
+    },
+    onDisconnect() {
+      warning.value = 'Live job updates interrupted. Reconnecting…'
+    },
+  })
 
   if (typeof baseUrl === 'object') {
-    watch(baseUrl, open, { immediate: true })
-  } else {
-    open(baseUrl)
+    watch(baseUrl, connection.restart)
   }
-  onUnmounted(() => stream?.close())
+  onUnmounted(() => connection.close())
 
   async function wake(name: string) {
     await mutate(`Woke up ${name}`, () => wakeup({ path: { name }, baseUrl: currentBaseUrl() }))
@@ -83,5 +86,5 @@ export function useJobs(baseUrl: string | Ref<string> = '') {
     )
   }
 
-  return { jobs, error, loading, wake, cancel, pause, resume, pushTo }
+  return { jobs, error, warning, loading, wake, cancel, pause, resume, pushTo }
 }

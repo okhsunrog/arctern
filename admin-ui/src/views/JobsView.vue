@@ -10,7 +10,7 @@ import { jobFailureMessage, jobStatus } from '../utils/status'
 import type { JobStatus } from '../client'
 
 const { host, baseUrl, prefix } = useHost()
-const { jobs, error, loading, wake, cancel, pause, resume } = useJobs(baseUrl)
+const { jobs, error, warning, loading, wake, cancel, pause, resume } = useJobs(baseUrl)
 const title = computed(() => (host.value ? `${host.value} · Jobs` : 'Jobs'))
 
 const UButton = resolveComponent('UButton')
@@ -131,6 +131,7 @@ const columns = computed<TableColumn<JobStatus>[]>(() => [
     <template #body>
       <div class="mx-auto w-full max-w-7xl space-y-4">
         <UAlert v-if="error" color="error" :title="error" icon="i-lucide-circle-x" />
+        <UAlert v-if="warning" color="warning" :title="warning" icon="i-lucide-triangle-alert" />
         <UTable
           :data="jobs"
           :columns="columns"

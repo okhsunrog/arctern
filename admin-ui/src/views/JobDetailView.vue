@@ -16,7 +16,16 @@ const route = useRoute()
 const name = computed(() => String(route.params.name))
 
 const { host, baseUrl, prefix } = useHost()
-const { jobs, error: jobsError, wake, cancel, pause, resume, pushTo } = useJobs(baseUrl)
+const {
+  jobs,
+  error: jobsError,
+  warning: jobsWarning,
+  wake,
+  cancel,
+  pause,
+  resume,
+  pushTo,
+} = useJobs(baseUrl)
 const job = computed(() => jobs.value.find((j) => j.name === name.value))
 
 const { runs, error: runsError, loading: runsLoading } = useJobRuns(name, 10_000, 100, baseUrl)
@@ -91,6 +100,12 @@ const tableColumns = computed<TableColumn<JobRun>[]>(() => [
     <template #body>
       <div class="mx-auto w-full max-w-7xl space-y-6">
         <UAlert v-if="jobsError" color="error" :title="jobsError" icon="i-lucide-circle-x" />
+        <UAlert
+          v-if="jobsWarning"
+          color="warning"
+          :title="jobsWarning"
+          icon="i-lucide-triangle-alert"
+        />
         <UEmpty
           v-if="!job"
           icon="i-lucide-search-x"

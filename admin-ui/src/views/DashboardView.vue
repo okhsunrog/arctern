@@ -13,7 +13,7 @@ import JobsGrid from '../components/JobsGrid.vue'
 import EventsLog from '../components/EventsLog.vue'
 
 const { host, baseUrl, prefix } = useHost()
-const { jobs, error, loading, wake, cancel, pause, resume, pushTo } = useJobs(baseUrl)
+const { jobs, error, warning, loading, wake, cancel, pause, resume, pushTo } = useJobs(baseUrl)
 const { events, connected } = useEvents({
   cap: 200,
   peer: computed(() => host.value ?? undefined),
@@ -57,6 +57,7 @@ const jobsSummary = computed(() => {
     <template #body>
       <div class="mx-auto w-full max-w-7xl space-y-6">
         <UAlert v-if="error" color="error" :title="error" icon="i-lucide-circle-x" />
+        <UAlert v-if="warning" color="warning" :title="warning" icon="i-lucide-triangle-alert" />
 
         <!-- Stat tiles -->
         <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">

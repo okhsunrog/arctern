@@ -39,6 +39,15 @@ impl From<zfskit::dataset::ZfsListEntry> for DatasetSummary {
     }
 }
 
+/// Response of `GET /api/v1/system/info`: identity of the daemon serving
+/// this API. Host-scoped like every other endpoint, so a peer's console
+/// (fetched through the proxy) reports that peer's daemon version.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SystemInfo {
+    /// The daemon's crate version (`CARGO_PKG_VERSION`), e.g. `"0.2.2"`.
+    pub version: String,
+}
+
 /// String constant for the `snap` job kind. The wire field is a
 /// `String` (not an enum) so that adding a future job kind in a later
 /// slice does not break clients pinned to an older `JobKind` enum

@@ -1,7 +1,7 @@
 //! `/api/v1/system/*` — host-level ZFS state outside `zfs(8)`/`zpool(8)`.
 //! Today: ARC stats + history.
 
-use arctern_api::{ApiErrorBody, ArcHistoryPoint, ArcStats};
+use arctern_api::{ApiErrorBody, ArcHistoryPoint, ArcStats, SystemInfo};
 use axum::{
     Json,
     extract::{Query, State},
@@ -10,6 +10,20 @@ use serde::Deserialize;
 
 use crate::app_state::AppState;
 use crate::error::ApiError;
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/system/info",
+    tag = "system",
+    responses(
+        (status = 200, description = "Daemon identity (version)", body = SystemInfo),
+    ),
+)]
+pub async fn get_system_info() -> Json<SystemInfo> {
+    Json(SystemInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    })
+}
 
 #[utoipa::path(
     get,

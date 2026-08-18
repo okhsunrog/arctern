@@ -343,6 +343,18 @@ export type SnapshotHold = {
 };
 
 /**
+ * Response of `GET /api/v1/system/info`: identity of the daemon serving
+ * this API. Host-scoped like every other endpoint, so a peer's console
+ * (fetched through the proxy) reports that peer's daemon version.
+ */
+export type SystemInfo = {
+    /**
+     * The daemon's crate version (`CARGO_PKG_VERSION`), e.g. `"0.2.2"`.
+     */
+    version: string;
+};
+
+/**
  * One replication target of a push job.
  */
 export type TargetStatus = {
@@ -826,7 +838,7 @@ export type CancelErrors = {
 
 export type CancelResponses = {
     /**
-     * In-flight transfer aborted (partial recv state on the receiver keeps it resumable)
+     * Cancellation requested; the job remains active until the receiver releases the dataset
      */
     204: void;
 };
@@ -1215,6 +1227,22 @@ export type GetArcHistoryResponses = {
 };
 
 export type GetArcHistoryResponse = GetArcHistoryResponses[keyof GetArcHistoryResponses];
+
+export type GetSystemInfoData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/v1/system/info';
+};
+
+export type GetSystemInfoResponses = {
+    /**
+     * Daemon identity (version)
+     */
+    200: SystemInfo;
+};
+
+export type GetSystemInfoResponse = GetSystemInfoResponses[keyof GetSystemInfoResponses];
 
 export type RecentTransfersData = {
     body?: never;

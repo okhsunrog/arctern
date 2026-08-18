@@ -39,6 +39,7 @@ use crate::{auth, handlers};
         arctern_api::ArcHistoryPoint,
         arctern_api::SnapshotHold,
         arctern_api::CreateHoldRequest,
+        arctern_api::SystemInfo,
     ))
 )]
 struct ApiDoc;
@@ -72,6 +73,7 @@ fn openapi_router() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::pools::pool_scrub))
         .routes(routes!(handlers::system::get_arc))
         .routes(routes!(handlers::system::get_arc_history))
+        .routes(routes!(handlers::system::get_system_info))
 }
 
 pub fn openapi_spec() -> utoipa::openapi::OpenApi {

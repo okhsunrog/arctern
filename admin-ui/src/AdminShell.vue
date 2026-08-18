@@ -10,6 +10,7 @@ import { useJobs } from './composables/useJobs'
 import { jobFailureMessage } from './utils/status'
 import { usePeers } from './composables/usePeers'
 import { usePools } from './composables/usePools'
+import { useSystemInfo } from './composables/useSystemInfo'
 
 const router = useRouter()
 const { logout } = useAuth()
@@ -35,6 +36,7 @@ const themeLabel = {
 const { jobs, wake, pushTo } = useJobs(baseUrl)
 const { peers } = usePeers(10_000)
 const { pools } = usePools(15_000, baseUrl)
+const { version } = useSystemInfo(baseUrl)
 
 const failingJobs = computed(() => jobs.value.filter((j) => jobFailureMessage(j)).length)
 const runningJobs = computed(() => jobs.value.filter((j) => j.running).length)
@@ -226,7 +228,9 @@ function toggleMode() {
             />
           </UTooltip>
           <UDashboardSidebarCollapse />
-          <span v-if="!collapsed" class="microlabel ms-auto">zfs console</span>
+          <span v-if="!collapsed" class="microlabel ms-auto">
+            zfs console<template v-if="version"> · v{{ version }}</template>
+          </span>
         </div>
       </template>
     </UDashboardSidebar>

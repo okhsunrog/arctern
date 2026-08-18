@@ -6,7 +6,7 @@
     "license": {
       "name": ""
     },
-    "version": "0.2.1"
+    "version": "0.2.2"
   },
   "paths": {
     "/api/v1/config": {
@@ -582,7 +582,7 @@
         ],
         "responses": {
           "204": {
-            "description": "In-flight transfer aborted (partial recv state on the receiver keeps it resumable)"
+            "description": "Cancellation requested; the job remains active until the receiver releases the dataset"
           },
           "404": {
             "description": "No such job"
@@ -1111,6 +1111,26 @@
                   "items": {
                     "$ref": "#/components/schemas/ArcHistoryPoint"
                   }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/system/info": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "operationId": "get_system_info",
+        "responses": {
+          "200": {
+            "description": "Daemon identity (version)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemInfo"
                 }
               }
             }
@@ -1937,6 +1957,19 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          }
+        }
+      },
+      "SystemInfo": {
+        "type": "object",
+        "description": "Response of `GET /api/v1/system/info`: identity of the daemon serving\nthis API. Host-scoped like every other endpoint, so a peer's console\n(fetched through the proxy) reports that peer's daemon version.",
+        "required": [
+          "version"
+        ],
+        "properties": {
+          "version": {
+            "type": "string",
+            "description": "The daemon's crate version (`CARGO_PKG_VERSION`), e.g. `\"0.2.2\"`."
           }
         }
       },

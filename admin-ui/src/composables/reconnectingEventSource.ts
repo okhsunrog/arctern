@@ -59,16 +59,23 @@ export function createReconnectingEventSource(options: ReconnectingEventSourceOp
     })
   }
 
-  function reconnectIfNeeded() {
-    if (source?.readyState !== OPEN) connect()
+  // Force a fresh connection rather than trusting readyState. After a tab
+  // suspension or a network change the socket can be half-open: the browser
+  // still reports OPEN and fires no 'error', so a readyState check would
+  // leave a silently-dead stream in place — the exact failure this module
+  // exists to prevent. Keep-alive comments aren't visible at the JS layer,
+  // so there's no cheaper liveness signal to gate on. The reconnect is cheap:
+  // the consumer re-pulls its backlog and dedups by id.
+  function forceReconnect() {
+    connect()
   }
 
   function onVisibilityChange() {
-    if (page?.visibilityState === 'visible') reconnectIfNeeded()
+    if (page?.visibilityState === 'visible') forceReconnect()
   }
 
   page?.addEventListener('visibilitychange', onVisibilityChange)
-  browserWindow?.addEventListener('online', reconnectIfNeeded)
+  browserWindow?.addEventListener('online', forceReconnect)
   connect()
 
   return {
@@ -79,7 +86,7 @@ export function createReconnectingEventSource(options: ReconnectingEventSourceOp
       source?.close()
       source = null
       page?.removeEventListener('visibilitychange', onVisibilityChange)
-      browserWindow?.removeEventListener('online', reconnectIfNeeded)
+      browserWindow?.removeEventListener('online', forceReconnect)
     },
   }
 }

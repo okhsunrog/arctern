@@ -99,4 +99,34 @@ describe('createReconnectingEventSource', () => {
     expect(sources[0]?.closed).toBe(true)
     connection.close()
   })
+
+  it('reconnects a stale-but-OPEN socket when the tab becomes visible', () => {
+    const sources: FakeEventSource[] = []
+    const page = new FakeDocument()
+    const connection = createReconnectingEventSource({
+      url: () => '/stream',
+      subscribe: vi.fn(),
+      onOpen: vi.fn(),
+      onDisconnect: vi.fn(),
+      document: page,
+      factory: () => {
+        const source = new FakeEventSource()
+        sources.push(source)
+        return source as unknown as EventSource
+      },
+    })
+
+    // Half-open socket: the browser still reports OPEN and never fired
+    // an 'error', so a readyState check alone would leave it in place.
+    const source = sources[0]
+    if (!source) throw new Error('initial EventSource was not created')
+    source.readyState = 1
+
+    page.visibilityState = 'visible'
+    page.dispatchEvent(new Event('visibilitychange'))
+
+    expect(sources).toHaveLength(2)
+    expect(source.closed).toBe(true)
+    connection.close()
+  })
 })

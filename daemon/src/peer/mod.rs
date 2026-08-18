@@ -27,6 +27,7 @@ use arctern_transport::{
 use openssh::{KnownHosts, Session, SessionBuilder, Stdio};
 use thiserror::Error;
 use tokio::io::BufReader;
+use tokio_util::sync::CancellationToken;
 
 pub use control::RpcError;
 
@@ -122,6 +123,24 @@ pub struct PeerLink {
     /// first subscription; every SSE client shares it.
     events: tokio::sync::broadcast::Sender<arctern_transport::EventWire>,
     events_started: Arc<tokio::sync::OnceCell<()>>,
+    /// Cancelled when the last clone of this link is dropped (i.e. the
+    /// link is superseded by a reconnect or route re-rank). The events
+    /// reader task selects on it, so the old SSH session and the remote
+    /// `events` process are released promptly instead of lingering until
+    /// remote stdout EOF — which, over a healthy re-rank, never comes.
+    events_cancel: CancellationToken,
+    _cancel_guard: Arc<CancelOnDrop>,
+}
+
+/// Fires its `CancellationToken` on drop. Held behind an `Arc` inside
+/// `PeerLink` so cancellation happens exactly when the last clone of the
+/// link goes away.
+struct CancelOnDrop(CancellationToken);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
 }
 
 impl PeerLink {
@@ -165,6 +184,8 @@ impl PeerLink {
             });
         }
         let control = control::spawn(stdout, stdin);
+        let events_cancel = CancellationToken::new();
+        let _cancel_guard = Arc::new(CancelOnDrop(events_cancel.clone()));
         Ok(PeerLink {
             name,
             session,
@@ -173,6 +194,8 @@ impl PeerLink {
             _control_child: Arc::new(child),
             events: tokio::sync::broadcast::channel(256).0,
             events_started: Arc::new(tokio::sync::OnceCell::new()),
+            events_cancel,
+            _cancel_guard,
         })
     }
 
@@ -258,19 +281,34 @@ impl PeerLink {
                 }
                 let events = self.events.clone();
                 let peer_name = self.name.clone();
+                let cancel = self.events_cancel.clone();
                 tokio::spawn(async move {
                     use tokio::io::AsyncBufReadExt;
                     // The child rides along so the remote process lives
                     // exactly as long as this reader.
                     let child = child;
                     let mut lines = BufReader::new(stdout).lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        match serde_json::from_str::<arctern_transport::EventWire>(&line) {
-                            Ok(ev) => {
-                                let _ = events.send(ev);
+                    loop {
+                        tokio::select! {
+                            biased;
+                            // Link superseded: stop reading, then drop the
+                            // child to tear down the mux channel and kill
+                            // the remote events process at once.
+                            _ = cancel.cancelled() => {
+                                let _ = child.disconnect().await;
+                                return;
                             }
-                            Err(e) => {
-                                tracing::debug!(peer = %peer_name, error = %e, "events channel: bad line");
+                            line = lines.next_line() => match line {
+                                Ok(Some(line)) => match serde_json::from_str::<arctern_transport::EventWire>(&line) {
+                                    Ok(ev) => {
+                                        let _ = events.send(ev);
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!(peer = %peer_name, error = %e, "events channel: bad line");
+                                    }
+                                },
+                                // Remote closed the stream (EOF) or a read error.
+                                _ => break,
                             }
                         }
                     }

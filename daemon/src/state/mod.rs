@@ -62,7 +62,10 @@ pub async fn open(state_dir: &Path) -> Result<SqlitePool, StateError> {
     // read stale "in progress" history.
     let orphaned = job_runs::reconcile_orphaned(&pool).await?;
     if orphaned > 0 {
-        tracing::warn!(count = orphaned, "reconciled orphaned job_runs from a prior crash");
+        tracing::warn!(
+            count = orphaned,
+            "reconciled orphaned job_runs from a prior crash"
+        );
     }
     Ok(pool)
 }

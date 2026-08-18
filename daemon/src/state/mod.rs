@@ -57,6 +57,13 @@ pub async fn open(state_dir: &Path) -> Result<SqlitePool, StateError> {
             source,
         })?;
     migrate(&pool).await?;
+    // Any row left `running` predates this process: its writer died
+    // before recording a terminal state. Reconcile before the UI can
+    // read stale "in progress" history.
+    let orphaned = job_runs::reconcile_orphaned(&pool).await?;
+    if orphaned > 0 {
+        tracing::warn!(count = orphaned, "reconciled orphaned job_runs from a prior crash");
+    }
     Ok(pool)
 }
 

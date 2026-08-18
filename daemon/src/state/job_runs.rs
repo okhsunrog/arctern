@@ -15,6 +15,11 @@ pub const STATUS_ERROR: &str = "error";
 pub const STATUS_RUNNING: &str = "running";
 #[allow(dead_code)]
 pub const STATUS_CANCELLED: &str = "cancelled";
+/// A `running` row that outlived the process that wrote it: the daemon
+/// was hard-killed or hit its shutdown deadline before `record_finish`
+/// ran. Reconciled at startup so history never shows a perpetual
+/// "in progress".
+pub const STATUS_INTERRUPTED: &str = "interrupted";
 
 /// Insert a `running` row for a freshly started cycle and return its
 /// unique database id. Timestamps are intentionally not identifiers:
@@ -58,6 +63,25 @@ pub async fn record_finish(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Rewrite any row still marked `running` to `interrupted`, stamping
+/// `finished_at` with the current time. A `running` row can only survive
+/// a restart if the process died between `record_start` and
+/// `record_finish` (SIGKILL, panic, power loss, or a shutdown-deadline
+/// abort), so at startup every such row is by definition an orphan.
+/// Returns the number of rows reconciled.
+pub async fn reconcile_orphaned(pool: &SqlitePool) -> Result<u64, StateError> {
+    let res = sqlx::query(
+        "UPDATE job_runs
+            SET status = ?, finished_at = unixepoch()
+          WHERE status = ? AND finished_at IS NULL",
+    )
+    .bind(STATUS_INTERRUPTED)
+    .bind(STATUS_RUNNING)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
 }
 
 /// Recent runs for `job_name`, newest first. `since_unix_seconds`
@@ -153,6 +177,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    #[tokio::test]
+    async fn reconcile_rewrites_only_orphaned_running_rows() {
+        let pool = open_in_memory().await.unwrap();
+        let orphan = record_start(&pool, "push", 100).await.unwrap();
+        let done = record_start(&pool, "push", 100).await.unwrap();
+        record_finish(&pool, done, 200, STATUS_OK, None, None)
+            .await
+            .unwrap();
+
+        let reconciled = reconcile_orphaned(&pool).await.unwrap();
+        assert_eq!(reconciled, 1);
+
+        let (status, finished): (String, Option<i64>) =
+            sqlx::query_as("SELECT status, finished_at FROM job_runs WHERE run_id = ?")
+                .bind(orphan)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, STATUS_INTERRUPTED);
+        assert!(finished.is_some());
+
+        // The already-finished row is untouched.
+        let (status, _): (String, Option<i64>) =
+            sqlx::query_as("SELECT status, finished_at FROM job_runs WHERE run_id = ?")
+                .bind(done)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, STATUS_OK);
+
+        // Idempotent: a second pass finds nothing left to reconcile.
+        assert_eq!(reconcile_orphaned(&pool).await.unwrap(), 0);
     }
 
     #[tokio::test]

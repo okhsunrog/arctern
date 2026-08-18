@@ -6,7 +6,7 @@ See `ARCHITECTURE.md` for the durable design (transport, protocol, ACL model, st
 
 ## Status
 
-Mid-pivot from QUIC transport to SSH transport. Slices 001-006 shipped a working QUIC-based laptop→server replication pipeline (snap + push + sink + resume tokens). The QUIC transport is now being torn out and replaced with multi-channel SSH per `ARCHITECTURE.md`. Replication semantics (planner, GUID intersection, resume tokens, `discard_partial_recv`) and the snap job are preserved verbatim.
+Transport is multi-channel SSH per `ARCHITECTURE.md`: a long-lived tarpc control channel plus per-step recv channels and a one-way events channel, all multiplexed over a single `openssh` session with ControlMaster. The QUIC→SSH pivot is complete; the original QUIC transport has been fully removed. Replication semantics (planner, GUID intersection, resume tokens, `discard_partial_recv`) and the snap job were preserved verbatim across the pivot.
 
 The spec-kit workflow is dropped. Future work goes straight to feature commits — no `specs/00X-*` directories, no spec/plan/tasks ceremony.
 
@@ -44,6 +44,7 @@ The daemon binary exposes only:
 - `arctern daemon` — runs the daemon (which serves the local web UI).
 - `arctern stdinserver-dispatch <identity>` — SSH transport entry point, invoked by `sshd` via `authorized_keys` `command="..."`. Reads `SSH_ORIGINAL_COMMAND` to determine `<job> <op>`, validates the identity against config, dispatches to the control or recv handler.
 - `arctern configcheck <path>` — one-shot config validation for CI / pre-deploy scripts.
+- `arctern openapi` — print the OpenAPI spec as JSON to stdout and exit; used to regenerate the UI's typed client.
 
 Everything else (status, signal, wakeup, snapshot listing, log tail) is web UI.
 
@@ -52,22 +53,25 @@ Everything else (status, signal, wakeup, snapshot listing, log tail) is web UI.
 ```
 crates/
   api/         HTTP API request/response types (serde + utoipa::ToSchema)
+  client/      thin async HTTP/1.1-over-UNIX-socket client (used by the stdinserver proxy)
   config/      TOML schema, filter resolver, prune algorithm, grid retention
-  transport/   wire protocol enums (RequestFrame, ResponseFrame, RecvHeader, SendHeader),
-               LengthDelimitedCodec wrapper. Pure types; no I/O.
+  transport/   the tarpc `ArcternControl` service definition plus recv/event framing
+               types (ResponseFrame, RecvHeader, SendHeader) and the
+               LengthDelimitedCodec + JSON transport helper. Pure types; no I/O.
 daemon/        binary crate
   src/
     main.rs                  daemon + dispatch entry points (split via subcommand)
     auth.rs                  PeerCredentials connect-info for UDS
     handlers/                axum handlers (local + proxied to peers)
-    jobs/                    JobManager, snap, push
+    jobs/                    JobManager, snap, push, prune
     peer/                    PeerLink, ControlClient, RecvChannel, reconnect
     stdinserver/             dispatch + control + recv handlers
     state/                   SQLite pool, migrations, queries
     router.rs                axum wiring
     error.rs                 ApiError → HTTP response mapping
 admin-ui/                    Vue 3 SPA, embedded via build.rs
-docs/                        deploy-snap-only.md, deploy-full-mirror.md, example-config.toml
+docs/                        install.md, deploy-snap-only.md, deploy-full-mirror.md,
+                             migrate-from-zrepl.md, roadmap.md, example-config.toml (+ diagrams/, screenshots/)
 packaging/systemd/           arctern.service unit
 ```
 

@@ -82,7 +82,6 @@ name = "arctern_databak_trial"
 path = "okdata/data/nas"
 
 [jobs.snapshotting]
-type = "periodic"
 interval = "4h"
 prefix = "arctern_"   # NOTE: distinct from zrepl_ to avoid pruning collisions
 

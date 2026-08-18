@@ -271,7 +271,7 @@ The sender's daemon mounts, besides its local API, a generic passthrough:
 
 ```
 GET    /api/v1/peers                              configured peers + routes + reachability
-ANY    /api/v1/peers/{peer}/proxy/{*rest}         → the peer daemon's /api/v1/{rest}
+ANY    /api/v1/peers/{peer}/proxy/api/v1/{*rest}  → the peer daemon's /api/v1/{rest}
 GET    /api/v1/peers/{peer}/events                proxied SSE (events channel + backlog)
 ```
 

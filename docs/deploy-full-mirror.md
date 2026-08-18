@@ -196,7 +196,6 @@ path = "novafs/arch0/data/home"   # the ONE dataset you picked
 recursive = false
 
 [jobs.snapshotting]
-type = "periodic"
 interval = "15m"
 prefix = "arctern_"
 

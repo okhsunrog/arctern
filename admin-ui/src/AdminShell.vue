@@ -228,9 +228,7 @@ function toggleMode() {
             />
           </UTooltip>
           <UDashboardSidebarCollapse />
-          <span v-if="!collapsed" class="microlabel ms-auto">
-            zfs console<template v-if="version"> · v{{ version }}</template>
-          </span>
+          <span v-if="!collapsed && version" class="microlabel ms-auto">v{{ version }}</span>
         </div>
       </template>
     </UDashboardSidebar>

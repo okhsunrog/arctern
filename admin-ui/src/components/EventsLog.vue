@@ -23,8 +23,12 @@ const filtered = computed(() =>
   }),
 )
 
+// Key on the newest row's id, not the count: the event buffer is a
+// fixed-size ring, so once it fills the length stops changing while rows
+// keep rolling. Watching the tail id fires on every new event (and on
+// filter churn that swaps the last row without changing the count).
 watch(
-  () => filtered.value.length,
+  () => filtered.value[filtered.value.length - 1]?.id,
   async () => {
     if (!props.autoScroll || !scrollRoot.value) return
     await nextTick()

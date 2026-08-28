@@ -50,19 +50,46 @@ pub fn load_from_path(path: &Path) -> Result<Config, ConfigError> {
         path: display.clone(),
         source,
     })?;
-    let mut cfg: Config = toml::from_str(&raw).map_err(|source| ConfigError::Parse {
-        path: display.clone(),
-        source,
-    })?;
+    load_from_str(&raw, &display)
+}
+
+pub fn load_from_str(raw: &str, display: &str) -> Result<Config, ConfigError> {
+    let mut cfg: Config =
+        toml::from_str(raw).map_err(|source| classify_toml_error(raw, display, source))?;
     resolve_defaults(&mut cfg).map_err(|message| ConfigError::Validate {
-        path: display.clone(),
+        path: display.to_string(),
         message,
     })?;
     validate(&cfg).map_err(|message| ConfigError::Validate {
-        path: display,
+        path: display.to_string(),
         message,
     })?;
     Ok(cfg)
+}
+
+/// `toml::from_str` reports everything as a "TOML parse error" -- syntax
+/// errors, but also missing/unknown fields and the `custom` errors our
+/// field deserializers raise. Only the first kind is a parse error; the
+/// rest are schema violations in a well-formed document and should read
+/// as such, with the line kept so the operator still knows where to look.
+fn classify_toml_error(raw: &str, display: &str, source: toml::de::Error) -> ConfigError {
+    if raw.parse::<toml::Table>().is_err() {
+        return ConfigError::Parse {
+            path: display.to_string(),
+            source,
+        };
+    }
+    let message = match source.span() {
+        Some(span) => {
+            let line = raw[..span.start.min(raw.len())].matches('\n').count() + 1;
+            format!("line {line}: {}", source.message())
+        }
+        None => source.message().to_string(),
+    };
+    ConfigError::Validate {
+        path: display.to_string(),
+        message,
+    }
 }
 
 /// Fill missing per-job fields from `[defaults]`. Mutates in place;
@@ -463,19 +490,7 @@ mod tests {
     use super::*;
 
     fn parse(s: &str) -> Result<Config, ConfigError> {
-        let mut cfg: Config = toml::from_str(s).map_err(|source| ConfigError::Parse {
-            path: "<test>".into(),
-            source,
-        })?;
-        resolve_defaults(&mut cfg).map_err(|message| ConfigError::Validate {
-            path: "<test>".into(),
-            message,
-        })?;
-        validate(&cfg).map_err(|message| ConfigError::Validate {
-            path: "<test>".into(),
-            message,
-        })?;
-        Ok(cfg)
+        load_from_str(s, "<test>")
     }
 
     const MIN_OK: &str = r#"
@@ -948,7 +963,28 @@ name = "x"
 filesystems = { "tank/data" = true, "tank/other" = false }
 "#;
         let err = parse(s).unwrap_err();
-        assert!(err.to_string().contains("tank/other"), "got: {err}");
+        assert!(
+            matches!(err, ConfigError::Validate { .. }),
+            "orphan exclude is a schema error, not a syntax error: {err}"
+        );
+        let text = err.to_string();
+        assert!(text.contains("tank/other"), "got: {text}");
+        assert!(text.contains("line 9:"), "got: {text}");
+        assert!(!text.contains("TOML parse error"), "got: {text}");
+    }
+
+    #[test]
+    fn malformed_toml_is_a_parse_error() {
+        let err = parse("[[jobs]\ntype = \"snap\"").unwrap_err();
+        assert!(matches!(err, ConfigError::Parse { .. }), "got: {err}");
+    }
+
+    #[test]
+    fn unknown_field_is_a_validate_error() {
+        let s = format!("{MIN_OK}\nbogus = 1\n");
+        let err = parse(&s).unwrap_err();
+        assert!(matches!(err, ConfigError::Validate { .. }), "got: {err}");
+        assert!(err.to_string().contains("bogus"), "got: {err}");
     }
 
     #[test]

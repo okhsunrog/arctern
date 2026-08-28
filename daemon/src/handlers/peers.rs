@@ -5,15 +5,16 @@
 use std::sync::Arc;
 
 use arctern_api::{ApiErrorBody, JobStatus, LogEvent, PeerReachability, PeerRoute, PeerSummary};
-use arctern_transport::{ErrorCode, ProxyReply};
+use arctern_transport::ProxyReply;
 use axum::{
     Json,
     extract::{Path, State},
-    http::{HeaderMap, HeaderValue, StatusCode},
+    http::StatusCode,
 };
 use time::format_description::well_known::Rfc3339;
 
 use crate::app_state::AppState;
+use crate::error::ApiError;
 use crate::peer::PeerLink;
 use crate::peer::state::PeerStatus;
 
@@ -73,66 +74,17 @@ fn render_reachability(s: &PeerStatus) -> PeerReachability {
 
 /// Look up a peer's PeerLink. On miss / not connected, returns 503 with
 /// a Retry-After hint matching the reconnect cap.
-async fn require_link(
-    state: &AppState,
-    peer: &str,
-) -> Result<Arc<PeerLink>, (StatusCode, HeaderMap, Json<ApiErrorBody>)> {
+async fn require_link(state: &AppState, peer: &str) -> Result<Arc<PeerLink>, ApiError> {
     let g = state.peers.read().await;
     if let Some(entry) = g.get(peer) {
         if let Some(link) = &entry.link {
             return Ok(link.clone());
         }
-        return Err(unavailable(format!(
+        return Err(ApiError::PeerUnavailable(format!(
             "peer {peer:?} is not currently connected"
         )));
     }
-    Err((
-        StatusCode::NOT_FOUND,
-        HeaderMap::new(),
-        Json(ApiErrorBody {
-            error: "peer_not_found".into(),
-            message: format!("no peer named {peer:?}"),
-        }),
-    ))
-}
-
-fn unavailable(message: String) -> (StatusCode, HeaderMap, Json<ApiErrorBody>) {
-    let mut headers = HeaderMap::new();
-    // Match the reconnect cap so a polling client backs off appropriately.
-    headers.insert("Retry-After", HeaderValue::from_static("60"));
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        headers,
-        Json(ApiErrorBody {
-            error: "peer_unavailable".into(),
-            message,
-        }),
-    )
-}
-
-fn rpc_error_to_http(message: String) -> (StatusCode, HeaderMap, Json<ApiErrorBody>) {
-    unavailable(format!("peer rpc: {message}"))
-}
-
-fn map_response_error(
-    code: ErrorCode,
-    message: String,
-) -> (StatusCode, HeaderMap, Json<ApiErrorBody>) {
-    let (status, kind) = match code {
-        ErrorCode::BadRequest => (StatusCode::BAD_REQUEST, "bad_request"),
-        ErrorCode::Unauthorized => (StatusCode::FORBIDDEN, "unauthorized"),
-        ErrorCode::Zfs => (StatusCode::INTERNAL_SERVER_ERROR, "zfs"),
-        ErrorCode::NotFound => (StatusCode::NOT_FOUND, "not_found"),
-        ErrorCode::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
-    };
-    (
-        status,
-        HeaderMap::new(),
-        Json(ApiErrorBody {
-            error: kind.into(),
-            message,
-        }),
-    )
+    Err(ApiError::PeerNotFound(format!("no peer named {peer:?}")))
 }
 
 /// Any-method passthrough `/api/v1/peers/{peer}/proxy/{*rest}` → the
@@ -160,29 +112,13 @@ pub async fn proxy_any(
     // break single-segment routes on the peer.
     let raw = request.uri().path();
     let Some((_, encoded_rest)) = raw.split_once("/proxy/") else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiErrorBody {
-                error: "bad_request".into(),
-                message: "malformed proxy path".into(),
-            }),
-        )
-            .into_response();
+        return ApiError::bad_request("malformed proxy path").into_response();
     };
     let path = format!("/{encoded_rest}{query}");
     let body = match axum::body::to_bytes(request.into_body(), 1 << 20).await {
         Ok(b) if b.is_empty() => None,
         Ok(b) => Some(String::from_utf8_lossy(&b).into_owned()),
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiErrorBody {
-                    error: "bad_request".into(),
-                    message: format!("read body: {e}"),
-                }),
-            )
-                .into_response();
-        }
+        Err(e) => return ApiError::bad_request(format!("read body: {e}")).into_response(),
     };
     let link = match require_link(&state, &peer).await {
         Ok(l) => l,
@@ -198,10 +134,7 @@ pub async fn proxy_any(
             )
                 .into_response()
         }
-        Err(crate::peer::RpcError::Server(e)) => {
-            map_response_error(e.code, e.message).into_response()
-        }
-        Err(e) => rpc_error_to_http(format!("{e}")).into_response(),
+        Err(e) => ApiError::from(e).into_response(),
     }
 }
 
@@ -227,7 +160,7 @@ pub async fn stream_peer_jobs(
     axum::response::Sse<
         impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
     >,
-    (StatusCode, HeaderMap, Json<ApiErrorBody>),
+    ApiError,
 > {
     use axum::response::Sse;
     use axum::response::sse::{Event, KeepAlive};
@@ -292,7 +225,7 @@ pub async fn stream_peer_events(
     axum::response::Sse<
         impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
     >,
-    (StatusCode, HeaderMap, Json<ApiErrorBody>),
+    ApiError,
 > {
     use axum::response::Sse;
     use axum::response::sse::{Event, KeepAlive};
@@ -303,10 +236,7 @@ pub async fn stream_peer_events(
     // PeerLink sends the SubscribeEvents RPC once per link (first
     // subscriber) and fans frames out via its broadcast — additional
     // SSE clients reuse the same server-side pusher.
-    let rx = link
-        .subscribe_events()
-        .await
-        .map_err(|e| rpc_error_to_http(format!("{e}")))?;
+    let rx = link.subscribe_events().await.map_err(ApiError::from)?;
     // Backlog: the broadcast only carries frames pushed after the FIRST
     // subscriber attached; every later EventSource would start blank.
     // Pull a JSON tail through the generic proxy so each fresh page

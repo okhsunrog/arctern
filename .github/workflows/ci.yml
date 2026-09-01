@@ -36,7 +36,10 @@ jobs:
         working-directory: arctern
       - run: cargo fmt --all --check
         working-directory: arctern
-      - run: cargo clippy --workspace -- -D warnings
+      # --all-targets so test code is linted too, matching `just lint`.
+      # Without it CI passed on lints that only fail on the developer's
+      # machine, which is the wrong way round.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
         working-directory: arctern
       - run: cargo test --workspace
         working-directory: arctern

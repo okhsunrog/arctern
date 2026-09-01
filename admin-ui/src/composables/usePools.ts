@@ -45,6 +45,5 @@ export function usePool(name: MaybeRefOrGetter<string>, scope: MaybeRefOrGetter<
     /** True while THIS action is in flight, so only its button goes busy. */
     isScrubbing: (action: ScrubRequest['action']) =>
       scrubMutation.isLoading.value && scrubMutation.variables.value === action,
-    scrubBusy: computed(() => scrubMutation.isLoading.value),
   }
 }

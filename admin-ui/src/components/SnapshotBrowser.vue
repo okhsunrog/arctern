@@ -177,8 +177,13 @@ function holdsFor(tag: string): SnapshotHold[] {
 // next to the authoritative usedbysnapshots property.
 const snapshotsUsedSum = computed(() => snapshots.value.reduce((acc, s) => acc + (s.used ?? 0), 0))
 
-function invalidateDataset() {
-  const ds = dataset.value
+// Every mutation carries the dataset it was issued against. Reading
+// `dataset.value` at execution time meant a bulk destroy — which loops
+// with the tree still clickable — would follow the selection: click
+// another dataset mid-loop and the remaining tags are destroyed THERE.
+// Snap jobs give every dataset identically named snapshots, so a
+// same-named victim is the norm, not a coincidence.
+function invalidateDataset(ds: string) {
   return Promise.all([
     queryCache.invalidateQueries({ key: ['snapshots', props.scope, ds] }),
     queryCache.invalidateQueries({ key: ['dataset-holds', props.scope, ds] }),
@@ -188,7 +193,7 @@ function invalidateDataset() {
 }
 
 function refreshSnapshots() {
-  void invalidateDataset()
+  void invalidateDataset(dataset.value)
 }
 
 // ── Detail slideover ────────────────────────────────────────────
@@ -205,96 +210,100 @@ function openDetail(s: SnapshotRow) {
 const detailHolds = computed(() => (detailSnap.value ? holdsFor(detailSnap.value.tag) : []))
 
 // ── Mutations ───────────────────────────────────────────────────
+interface OnDataset {
+  ds: string
+}
+
 const holdMutation = useMutation({
-  mutation: ({ tag, holdTag }: { tag: string; holdTag: string }) =>
+  mutation: ({ ds, tag, holdTag }: OnDataset & { tag: string; holdTag: string }) =>
     createHold({
-      path: { name: dataset.value, snapshot: tag },
+      path: { name: ds, snapshot: tag },
       body: { tag: holdTag },
       baseUrl: baseUrl(),
     }).then(unwrap),
-  onSuccess: (_d, { tag }) => toaster.success(onHost(`Held ${dataset.value}@${tag}`)),
-  onError: (e, { tag }) => toaster.failure(onHost(`Holding ${dataset.value}@${tag} failed`), e),
-  onSettled: invalidateDataset,
+  onSuccess: (_d, { ds, tag }) => toaster.success(onHost(`Held ${ds}@${tag}`)),
+  onError: (e, { ds, tag }) => toaster.failure(onHost(`Holding ${ds}@${tag} failed`), e),
+  onSettled: (_d, _e, { ds }) => invalidateDataset(ds),
 })
 
 const releaseMutation = useMutation({
-  mutation: ({ tag, holdTag }: { tag: string; holdTag: string }) =>
+  mutation: ({ ds, tag, holdTag }: OnDataset & { tag: string; holdTag: string }) =>
     releaseHold({
-      path: { name: dataset.value, snapshot: tag, tag: holdTag },
+      path: { name: ds, snapshot: tag, tag: holdTag },
       baseUrl: baseUrl(),
     }).then(unwrap),
   onSuccess: (_d, { holdTag }) => toaster.success(onHost(`Released ${holdTag}`)),
   onError: (e, { holdTag }) => toaster.failure(onHost(`Releasing ${holdTag} failed`), e),
-  onSettled: invalidateDataset,
+  onSettled: (_d, _e, { ds }) => invalidateDataset(ds),
 })
 
 const createMutation = useMutation({
-  mutation: ({ name, recursive }: { name: string; recursive: boolean }) =>
+  mutation: ({ ds, name, recursive }: OnDataset & { name: string; recursive: boolean }) =>
     createSnapshot({
-      path: { name: dataset.value },
+      path: { name: ds },
       body: { snapshot_name: name, recursive },
       baseUrl: baseUrl(),
     }).then(unwrap),
-  onSuccess: (_d, { name }) => toaster.success(onHost(`Created ${dataset.value}@${name}`)),
-  onError: (e, { name }) => {
+  onSuccess: (_d, { ds, name }) => toaster.success(onHost(`Created ${ds}@${name}`)),
+  onError: (e, { ds, name }) => {
     if (apiErrorCode(e) === 'snapshot_exists') {
       toaster.report({
-        title: `${dataset.value}@${name} already exists`,
+        title: `${ds}@${name} already exists`,
         description: 'Pick another name, or destroy the existing snapshot first.',
         tone: 'warning',
       })
       return
     }
-    toaster.failure(onHost(`Creating ${dataset.value}@${name} failed`), e)
+    toaster.failure(onHost(`Creating ${ds}@${name} failed`), e)
   },
-  onSettled: invalidateDataset,
+  onSettled: (_d, _e, { ds }) => invalidateDataset(ds),
 })
 
 const destroyMutation = useMutation({
-  mutation: ({ tag }: { tag: string; silent?: boolean }) =>
+  mutation: ({ ds, tag }: OnDataset & { tag: string; silent?: boolean }) =>
     destroySnapshot({
-      path: { name: dataset.value, snapshot: tag },
+      path: { name: ds, snapshot: tag },
       baseUrl: baseUrl(),
     }).then(unwrap),
-  onSuccess: (_d, { tag, silent }) => {
-    if (!silent) toaster.success(onHost(`Destroyed ${dataset.value}@${tag}`))
+  onSuccess: (_d, { ds, tag, silent }) => {
+    if (!silent) toaster.success(onHost(`Destroyed ${ds}@${tag}`))
   },
-  onError: (e, { tag }) => {
+  onError: (e, { ds, tag }) => {
     // Surface the lock itself rather than the daemon's raw error: the
     // holds are already loaded, so name the tags that block the destroy.
     if (apiErrorCode(e) === 'snapshot_held') {
       const tags = holdsFor(tag).map((x) => x.tag)
-      toaster.failure(`Cannot destroy ${dataset.value}@${tag}`, {
+      toaster.failure(`Cannot destroy ${ds}@${tag}`, {
         message: `Held by ${tags.length || 'unknown'} tag(s)${
           tags.length ? ` — ${tags.join(', ')}` : ''
         }. Release them before destroying.`,
       })
       return
     }
-    toaster.failure(onHost(`Destroying ${dataset.value}@${tag} failed`), e)
+    toaster.failure(onHost(`Destroying ${ds}@${tag} failed`), e)
   },
-  onSettled: invalidateDataset,
+  onSettled: (_d, _e, { ds }) => invalidateDataset(ds),
 })
 
 async function addHold() {
   const s = detailSnap.value
   const tag = newHoldTag.value.trim()
   if (!s || !tag) return
-  await holdMutation.mutateAsync({ tag: s.tag, holdTag: tag })
+  await holdMutation.mutateAsync({ ds: dataset.value, tag: s.tag, holdTag: tag })
   newHoldTag.value = ''
 }
 
 function releaseHoldTag(holdTag: string) {
   const s = detailSnap.value
   if (!s) return
-  releaseMutation.mutate({ tag: s.tag, holdTag })
+  releaseMutation.mutate({ ds: dataset.value, tag: s.tag, holdTag })
 }
 
 // ── Create / destroy ────────────────────────────────────────────
 const createOpen = ref(false)
 
 function confirmCreate(payload: { name: string; recursive: boolean }) {
-  createMutation.mutate(payload)
+  createMutation.mutate({ ds: dataset.value, ...payload })
 }
 
 const destroyOpen = ref(false)
@@ -306,7 +315,7 @@ function askDestroy(tag: string) {
 }
 
 function confirmDestroy(full: string) {
-  destroyMutation.mutate({ tag: tagOf(full) })
+  destroyMutation.mutate({ ds: dataset.value, tag: tagOf(full) })
 }
 
 const bulkOpen = ref(false)
@@ -318,11 +327,13 @@ const selectedTags = computed(() =>
 
 async function confirmBulkDestroy() {
   bulkOpen.value = false
+  // Pinned once: the loop below awaits, and the tree stays clickable.
+  const ds = dataset.value
   const tags = selectedTags.value
   let failed = 0
   for (const tag of tags) {
     try {
-      await destroyMutation.mutateAsync({ tag, silent: true })
+      await destroyMutation.mutateAsync({ ds, tag, silent: true })
     } catch {
       failed += 1
     }
@@ -331,7 +342,7 @@ async function confirmBulkDestroy() {
   // One summary instead of N toasts; failures already toasted their own
   // reason, so this only has to report the count.
   if (failed === 0) {
-    toaster.success(onHost(`Destroyed ${tags.length} snapshots`))
+    toaster.success(onHost(`Destroyed ${tags.length} snapshots in ${ds}`))
   } else {
     toaster.report({
       title: onHost(`Destroyed ${tags.length - failed} of ${tags.length} snapshots`),
@@ -558,6 +569,8 @@ const columns = computed<TableColumn<SnapshotRow>[]>(() => [
                 variant="soft"
                 size="xs"
                 icon="i-lucide-trash-2"
+                :loading="bulkBusy"
+                :disabled="bulkBusy"
                 @click="bulkOpen = true"
               >
                 Destroy {{ selectedTags.length }} selected
@@ -624,7 +637,13 @@ const columns = computed<TableColumn<SnapshotRow>[]>(() => [
       <template #footer>
         <div class="flex justify-end gap-2 w-full">
           <UButton variant="ghost" @click="bulkOpen = false">Cancel</UButton>
-          <UButton color="error" icon="i-lucide-trash-2" @click="confirmBulkDestroy">
+          <UButton
+            color="error"
+            icon="i-lucide-trash-2"
+            :loading="bulkBusy"
+            :disabled="bulkBusy"
+            @click="confirmBulkDestroy"
+          >
             Destroy {{ selectedTags.length }}
           </UButton>
         </div>

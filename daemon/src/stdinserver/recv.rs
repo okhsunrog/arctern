@@ -30,6 +30,13 @@ use zfskit::runner::CommandRunner;
 
 use super::recv_lock::RecvLocks;
 
+/// Properties that decide WHERE and WHETHER a received dataset mounts.
+/// Mount policy is the receiving host's to set, never the sending
+/// host's, so these are inherited from the receive parent (which the
+/// dispatcher creates with `mountpoint=none`) instead of being taken
+/// from the stream.
+const MOUNT_POLICY_PROPERTIES: [&str; 2] = ["mountpoint", "canmount"];
+
 /// Drive one recv channel from start to finish. Errors are surfaced as
 /// `Response::Error` written back to the caller; the function only
 /// returns `Err` on stdin/stdout I/O failures so the calling process
@@ -141,6 +148,38 @@ async fn advance_last_hold(
     }
 }
 
+/// Build the `zfs recv` invocation for one step.
+///
+/// `-s` for resumable, `-u` so the receive itself does not mount. But
+/// `-u` only covers THIS receive — the properties the stream writes
+/// outlive it, and a `zfs send -p` carries the sender's `mountpoint` and
+/// `canmount`. Without stripping those, a sender could land a dataset
+/// with `mountpoint=/root/.ssh, canmount=on` and the receiver's next
+/// `zfs mount -a` would honour it. Mount policy belongs to the receiving
+/// host, so both are inherited from the receive parent (created with
+/// `mountpoint=none`) rather than taken from the stream.
+///
+/// `[allowed_clients.recv]` still wins where it speaks: setting `-o` and
+/// `-x` for the same property is an error, so the config is applied
+/// first and the defaults only fill what it left alone.
+fn recv_args(target: &str, acl: &AllowedClient) -> RecvArgs {
+    let mut args = RecvArgs::new(target.to_string()).unmounted().resumable();
+    for key in &acl.recv.inherit_properties {
+        args = args.property_inherit(key);
+    }
+    for (k, v) in &acl.recv.override_properties {
+        args = args.property_override(k, v);
+    }
+    for key in MOUNT_POLICY_PROPERTIES {
+        let spoken_for = acl.recv.override_properties.contains_key(key)
+            || acl.recv.inherit_properties.iter().any(|k| k == key);
+        if !spoken_for {
+            args = args.property_inherit(key);
+        }
+    }
+    args
+}
+
 async fn drive<R>(
     runner: &Arc<dyn CommandRunner>,
     acl: &AllowedClient,
@@ -190,19 +229,7 @@ where
             }
         }
     }
-    // -s for resumable, -u to keep the receive unmounted (the operator's
-    // mountpoint policy is set elsewhere). `acl.recv` carries any
-    // per-client `-o k=v` / `-x k` flags from arctern.toml — mirrors
-    // zrepl's `recv.properties.override` / `recv.properties.inherit`.
-    let mut args = RecvArgs::new(header.target_dataset.clone())
-        .unmounted()
-        .resumable();
-    for key in &acl.recv.inherit_properties {
-        args = args.property_inherit(key);
-    }
-    for (k, v) in &acl.recv.override_properties {
-        args = args.property_override(k, v);
-    }
+    let args = recv_args(&header.target_dataset, acl);
     let mut handle = zfs_recv(runner.as_ref(), &args)
         .await
         .map_err(|e| (ErrorCode::Zfs, format!("spawn zfs recv: {e}")))?;
@@ -328,6 +355,79 @@ mod tests {
                 discard_partial_recv: false,
             },
         }
+    }
+
+    fn acl_with(inherit: &[&str], overrides: &[(&str, &str)]) -> AllowedClient {
+        AllowedClient {
+            identity: "laptop".into(),
+            fingerprint: None,
+            jobs: vec![],
+            operations: vec!["recv".into()],
+            root_fs: None,
+            recv: arctern_config::RecvConfig {
+                inherit_properties: inherit.iter().map(|s| s.to_string()).collect(),
+                override_properties: overrides
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            },
+        }
+    }
+
+    // A `zfs send -p` stream carries the sender's mountpoint and canmount.
+    // Verified against real ZFS: with these flags a stream claiming
+    // `mountpoint=/root/.ssh, canmount=on` lands as `mountpoint=none
+    // (inherited from the parent)`, on both full and incremental receives.
+    #[test]
+    fn mount_policy_is_taken_away_from_the_stream_by_default() {
+        let args = recv_args("tank/backups/laptop", &acl_with(&[], &[]))
+            .build_args()
+            .expect("args build");
+        for property in MOUNT_POLICY_PROPERTIES {
+            let at = args.iter().position(|a| a == property);
+            assert!(at.is_some(), "{property} not stripped: {args:?}");
+            assert_eq!(args[at.unwrap() - 1], "-x", "{property} not inherited");
+        }
+        assert!(args.iter().any(|a| a == "-u"));
+        assert!(args.iter().any(|a| a == "-s"));
+        assert!(!args.iter().any(|a| a == "-F"), "never force rollback");
+    }
+
+    // Setting both -o and -x for one property is an error, so an operator
+    // who states a policy must win outright rather than collide with ours.
+    #[test]
+    fn an_explicit_override_replaces_the_default_rather_than_joining_it() {
+        let args = recv_args(
+            "tank/backups/laptop",
+            &acl_with(&[], &[("mountpoint", "/srv/backups")]),
+        )
+        .build_args()
+        .expect("args build");
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-o" && w[1] == "mountpoint=/srv/backups"),
+            "operator override missing: {args:?}"
+        );
+        assert!(
+            !args
+                .windows(2)
+                .any(|w| w[0] == "-x" && w[1] == "mountpoint"),
+            "-x and -o for one property is a zfs error: {args:?}"
+        );
+        // The property the operator did not mention keeps its default.
+        assert!(args.windows(2).any(|w| w[0] == "-x" && w[1] == "canmount"));
+    }
+
+    #[test]
+    fn an_explicit_inherit_is_not_duplicated() {
+        let args = recv_args("tank/backups/laptop", &acl_with(&["canmount"], &[]))
+            .build_args()
+            .expect("args build");
+        assert_eq!(
+            args.iter().filter(|a| *a == "canmount").count(),
+            1,
+            "canmount listed twice: {args:?}"
+        );
     }
 
     #[test]

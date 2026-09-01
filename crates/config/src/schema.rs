@@ -170,9 +170,10 @@ pub struct AllowedClient {
     pub operations: Vec<String>,
     #[serde(default)]
     pub root_fs: Option<String>,
-    /// Per-client recv-side tuning. Empty defaults match the
-    /// historical hardcoded behaviour: unmounted, no property mutation
-    /// beyond the implicit `mountpoint=none` on placeholders.
+    /// Per-client recv-side tuning. Left empty, the receive is unmounted
+    /// and `mountpoint`/`canmount` are inherited from the receive parent
+    /// rather than taken from the stream — mount policy is the receiving
+    /// host's to set. Naming either property here overrides that default.
     #[serde(default)]
     pub recv: RecvConfig,
 }

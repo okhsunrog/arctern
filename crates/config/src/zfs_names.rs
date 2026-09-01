@@ -1,8 +1,8 @@
 //! Minimal ZFS target-name validation for Arctern policy boundaries.
 //!
-//! This is intentionally conservative. Palimpsest remains the low-level ZFS
-//! command wrapper; these helpers decide what Arctern accepts from config and
-//! remote clients before invoking Palimpsest.
+//! This is intentionally conservative. zfskit remains the low-level ZFS
+//! command wrapper; these helpers decide what arctern accepts from config and
+//! remote clients before invoking zfskit.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotTarget<'a> {

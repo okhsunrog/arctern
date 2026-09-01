@@ -296,6 +296,19 @@ async fn handle_proxy(
             format!("proxy path must be under /api/v1/: {path:?}"),
         ));
     }
+    // The proxy grants a client the API of THIS host, not of the hosts
+    // this host can reach. `/api/v1/peers/{peer}/proxy/...` is itself a
+    // forwarding route, so allowing it would let a client with
+    // `control:proxy_read` read a third host's config under our identity
+    // — and with `control:proxy_admin`, mutate it. `/api/v1/peers` alone
+    // is refused for the same reason: it enumerates our peers, their ssh
+    // targets and their fingerprints.
+    if path == "/api/v1/peers" || path.starts_with("/api/v1/peers/") {
+        return Err(WireError::new(
+            ErrorCode::Unauthorized,
+            "proxy does not forward peer routes: the grant covers this host only".to_string(),
+        ));
+    }
     match arctern_client::raw(
         &daemon_socket(config),
         method,
@@ -551,6 +564,48 @@ mod tests {
             "got: {}",
             e.message
         );
+    }
+
+    // The proxy forwards to THIS host's API. Peer routes are themselves
+    // forwarding routes, so honouring them would turn one `control` grant
+    // into read (or, with proxy_admin, write) access to every host this
+    // one can reach, under this host's identity.
+    #[tokio::test]
+    async fn proxy_refuses_to_forward_peer_routes() {
+        let c = client(Arc::new(RecordingRunner::new()), acl(None));
+        for path in [
+            "/api/v1/peers",
+            "/api/v1/peers/elsewhere/proxy/api/v1/config",
+            "/api/v1/peers/elsewhere/jobs/stream",
+        ] {
+            let e = c
+                .proxy(ctx(), "GET".into(), path.into(), None)
+                .await
+                .unwrap()
+                .unwrap_err();
+            assert_eq!(e.code, ErrorCode::Unauthorized, "path {path} was allowed");
+            assert!(e.message.contains("this host only"), "got: {}", e.message);
+        }
+    }
+
+    // A dataset segment may legitimately contain the word "peers"; only
+    // the route prefix is refused.
+    #[tokio::test]
+    async fn proxy_still_forwards_paths_that_merely_mention_peers() {
+        let c = client(Arc::new(RecordingRunner::new()), acl(None));
+        let e = c
+            .proxy(
+                ctx(),
+                "GET".into(),
+                "/api/v1/datasets/tank%2Fpeers/snapshots".into(),
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+        // Reaches the forwarding step (no local daemon in the test), so it
+        // was not refused by the guard.
+        assert_eq!(e.code, ErrorCode::Internal);
     }
 
     #[tokio::test]

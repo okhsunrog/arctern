@@ -122,6 +122,42 @@ pub enum PlanError {
     },
 }
 
+/// Why one replication step stopped.
+///
+/// Cancellation is a variant, not a message: it used to travel as the
+/// literal string `"cancelled"` inside `Result<_, String>` and be
+/// recognised by comparing that string. Any caller that wrapped the
+/// message for context — `format!("execute {path}: {e}")` — silently
+/// turned an interruption into a failure, and the peer-level and
+/// run-level classifiers had already drifted apart because of it.
+#[derive(Debug, thiserror::Error)]
+pub enum StepError {
+    /// The cycle token fired: operator pause/stop, or daemon shutdown.
+    /// The replication itself did not fail.
+    #[error("cancelled")]
+    Cancelled,
+    #[error("{0}")]
+    Failed(String),
+}
+
+impl From<String> for StepError {
+    fn from(message: String) -> Self {
+        StepError::Failed(message)
+    }
+}
+
+impl From<&str> for StepError {
+    fn from(message: &str) -> Self {
+        StepError::Failed(message.to_string())
+    }
+}
+
+impl From<std::io::Error> for StepError {
+    fn from(e: std::io::Error) -> Self {
+        StepError::Failed(e.to_string())
+    }
+}
+
 pub async fn list_sender_snaps(
     runner: &dyn CommandRunner,
     sender_dataset: &str,
@@ -653,7 +689,7 @@ async fn execute_one_plan(
     cancel: &CancellationToken,
     transfers: &Mutex<HashMap<String, TransferInfo>>,
     transfer_key: &str,
-) -> Result<(), String> {
+) -> Result<(), StepError> {
     let Some(send_header) = build_send_header(plan, flags) else {
         return Err("build_send_header returned None for non-Nothing plan".into());
     };
@@ -687,7 +723,7 @@ async fn execute_one_plan(
     // the job/cycle CancellationToken. On cancel the recv channel's
     // stdin closes (SIGPIPE to the remote zfs recv, which keeps its
     // resumable partial state) and the local send child is killed.
-    let copy_res: std::io::Result<u64> = async {
+    let copy_res: Result<u64, StepError> = async {
         let mut buf = vec![0u8; 256 * 1024];
         let mut copied: u64 = 0;
         let mut last_published: u64 = 0;
@@ -705,7 +741,7 @@ async fn execute_one_plan(
                     tokio::select! {
                         biased;
                         _ = cancel.cancelled() => {
-                            return Err(std::io::Error::other("cancelled"));
+                            return Err(StepError::Cancelled);
                         }
                         r = &mut read => break (r?, waiting),
                         _ = &mut slow, if !waiting => {
@@ -736,7 +772,7 @@ async fn execute_one_plan(
                     tokio::select! {
                         biased;
                         _ = cancel.cancelled() => {
-                            return Err(std::io::Error::other("cancelled"));
+                            return Err(StepError::Cancelled);
                         }
                         r = &mut write => {
                             r?;
@@ -780,29 +816,32 @@ async fn execute_one_plan(
     if let Err(error) = copy_res {
         close_stream_writer(channel_stdin).await;
         let _ = child.cancel().await;
-        if cancel.is_cancelled() {
+        // Cancellation arrives as its own variant now, so this no longer
+        // has to re-read the token and guess whether an I/O error was
+        // really an interruption.
+        if matches!(error, StepError::Cancelled) {
             // EOF only asks the remote zfs recv to stop. Keep the channel
             // alive until it has actually exited so a retry cannot race the
             // old receiver for the same dataset.
             set_transfer_phase(transfers, transfer_key, "cancelling");
             let _ = channel.finish().await;
-            return Err("cancelled".into());
+            return Err(StepError::Cancelled);
         }
-        return Err(format!("stream copy: {error}"));
+        return Err(StepError::Failed(format!("stream copy: {error}")));
     }
     set_transfer_phase(transfers, transfer_key, "finalizing");
     close_stream_writer(channel_stdin).await;
     child
         .finish()
         .await
-        .map_err(|e| format!("zfs send failed: {e}"))?;
+        .map_err(|e| StepError::Failed(format!("zfs send failed: {e}")))?;
     let resp = channel
         .finish()
         .await
-        .map_err(|e| format!("read recv response: {e}"))?;
+        .map_err(|e| StepError::Failed(format!("read recv response: {e}")))?;
     match resp {
         Response::Ok => Ok(()),
-        Response::Error { message, .. } => Err(format!("receiver: {message}")),
+        Response::Error { message, .. } => Err(StepError::Failed(format!("receiver: {message}"))),
     }
 }
 
@@ -848,7 +887,7 @@ async fn run_one_filesystem(
     cancel: &CancellationToken,
     transfers: &Mutex<HashMap<String, TransferInfo>>,
     transfer_key: &str,
-) -> Result<(), String> {
+) -> Result<(), StepError> {
     let to_hold_target: Option<(String, u64)> = match plan {
         SnapshotPlan::Full { to, .. }
         | SnapshotPlan::Incremental { to, .. }
@@ -876,7 +915,9 @@ async fn run_one_filesystem(
         // hold is idempotent at the zfskit layer (no-op when the
         // tag already exists for that snapshot).
         if let Err(e) = zfskit::hold::hold(runner, snap, &tag).await {
-            return Err(format!("step hold failed for {snap} with tag {tag}: {e}"));
+            return Err(StepError::Failed(format!(
+                "step hold failed for {snap} with tag {tag}: {e}"
+            )));
         }
     }
 
@@ -996,13 +1037,29 @@ struct PeerOutcome {
 
 type PeerOutcomes = HashMap<String, PeerOutcome>;
 
-fn classify_peer_attempt(cancelled: bool, errors: &[String]) -> (&'static str, Option<String>) {
-    if cancelled {
+/// One peer's attempt, as recorded in `push_syncs` and shown per target.
+///
+/// Cancellation wins over any accumulated messages: a cancelled step
+/// reports whatever it managed to say on the way out, and calling that a
+/// failure is how a routine `systemctl restart` used to paint the job
+/// red. `cancelled` covers the case where the token fired between steps,
+/// so no step got to report it.
+fn classify_peer_attempt(cancelled: bool, errors: &[StepError]) -> (&'static str, Option<String>) {
+    if cancelled || errors.iter().any(|e| matches!(e, StepError::Cancelled)) {
         ("cancelled", None)
     } else if errors.is_empty() {
         ("ok", None)
     } else {
-        ("error", Some(errors.join("; ")))
+        (
+            "error",
+            Some(
+                errors
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            ),
+        )
     }
 }
 
@@ -1222,7 +1279,7 @@ impl PushJob {
     ///   couldn't run.
     async fn select_targets(
         &self,
-        errors: &mut Vec<String>,
+        errors: &mut Vec<StepError>,
     ) -> Vec<(String, Arc<PeerLink>, &'static str)> {
         let manual: BTreeSet<String> = std::mem::take(&mut *self.manual_requests.lock().unwrap());
         let mut selected = Vec::new();
@@ -1235,7 +1292,9 @@ impl PushJob {
                         tracing::info!(peer = %name, route = %route, "manual push queued");
                         selected.push((name.clone(), l, "manual"));
                     }
-                    None => errors.push(format!("manual push to {name:?}: peer not connected")),
+                    None => errors.push(StepError::Failed(format!(
+                        "manual push to {name:?}: peer not connected"
+                    ))),
                 }
                 continue;
             }
@@ -1273,10 +1332,10 @@ impl PushJob {
                     if let Some(ts) = last_success
                         && now - ts > cadence.saturating_mul(3)
                     {
-                        errors.push(format!(
+                        errors.push(StepError::Failed(format!(
                             "auto target {name:?} has no auto-eligible route and last successful sync is {}h old",
                             (now - ts) / 3600
-                        ));
+                        )));
                     }
                 }
             }
@@ -1289,15 +1348,15 @@ impl PushJob {
         ctx: &JobContext,
         cancel: &CancellationToken,
         selected: Vec<(String, Arc<PeerLink>, &'static str)>,
-        mut errors: Vec<String>,
-    ) -> (u64, Result<(), String>) {
+        mut errors: Vec<StepError>,
+    ) -> (u64, Result<(), StepError>) {
         let mut total_bytes: u64 = 0;
         for (peer_name, link, reason) in selected {
             if cancel.is_cancelled() {
                 break;
             }
             tracing::info!(peer = %peer_name, reason, "push: replicating to target");
-            let mut peer_errors: Vec<String> = Vec::new();
+            let mut peer_errors: Vec<StepError> = Vec::new();
             let bytes = self
                 .run_for_peer(ctx, cancel, &peer_name, &link, &mut peer_errors)
                 .await;
@@ -1327,10 +1386,20 @@ impl PushJob {
             }
             errors.extend(peer_errors);
         }
-        let result = if errors.is_empty() {
+        // The run is cancelled if any step was; otherwise its message is
+        // everything that went wrong, joined.
+        let result = if errors.iter().any(|e| matches!(e, StepError::Cancelled)) {
+            Err(StepError::Cancelled)
+        } else if errors.is_empty() {
             Ok(())
         } else {
-            Err(errors.join("; "))
+            Err(StepError::Failed(
+                errors
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            ))
         };
         (total_bytes, result)
     }
@@ -1343,13 +1412,13 @@ impl PushJob {
         cancel: &CancellationToken,
         peer_name: &str,
         peer: &Arc<PeerLink>,
-        errors: &mut Vec<String>,
+        errors: &mut Vec<StepError>,
     ) -> u64 {
         let runner = ctx.zfs.command_runner();
         let sender_paths = match self.expand_filesystems(runner).await {
             Ok(p) => p,
             Err(e) => {
-                errors.push(e);
+                errors.push(StepError::Failed(e));
                 return 0;
             }
         };
@@ -1393,7 +1462,7 @@ impl PushJob {
         peer_name: &str,
         peer: &Arc<PeerLink>,
         sender_path: &str,
-    ) -> (u64, Option<String>) {
+    ) -> (u64, Option<StepError>) {
         let runner = ctx.zfs.command_runner();
         // FR-005: literal concat — target = root_fs/sender_path.
         let target = format!("{}/{}", self.config.target.root_fs, sender_path);
@@ -1406,7 +1475,7 @@ impl PushJob {
                 Err(e) => {
                     let msg = format!("plan {sender_path}: {e}");
                     warn!(error = %msg);
-                    return (0, Some(msg));
+                    return (0, Some(StepError::Failed(msg)));
                 }
             };
         // If the planner picked discard, send the explicit RPC before
@@ -1431,7 +1500,7 @@ impl PushJob {
             } else if let Err(e) = peer.discard_partial_recv(target.clone()).await {
                 let msg = format!("discard partial receive {target}: {e}");
                 warn!(target = %target, error = %e, "discard_partial_recv RPC failed; refusing to open recv stream");
-                return (0, Some(msg));
+                return (0, Some(StepError::Failed(msg)));
             }
         }
         match &plan {
@@ -1523,14 +1592,16 @@ impl PushJob {
             .unwrap_or(0);
         match res {
             Ok(()) => (bytes, None),
-            Err(e) if cancel.is_cancelled() || e == "cancelled" => {
+            Err(StepError::Cancelled) => {
                 tracing::info!(sender = %sender_path, "push: transfer cancelled");
-                (bytes, Some("cancelled".into()))
+                (bytes, Some(StepError::Cancelled))
             }
             Err(e) => {
+                // Context is added to the message, never around the
+                // variant — wrapping used to erase the cancelled case.
                 let msg = format!("execute {sender_path}: {e}");
                 warn!(error = %msg);
-                (bytes, Some(msg))
+                (bytes, Some(StepError::Failed(msg)))
             }
         }
     }
@@ -1759,7 +1830,7 @@ impl PushJob {
         }
         let job_name = &self.config.name;
         self.ensure_outcomes_loaded(ctx).await;
-        let mut errors: Vec<String> = Vec::new();
+        let mut errors: Vec<StepError> = Vec::new();
         let selected = self.select_targets(&mut errors).await;
         // A tick where nothing is due (auto_interval not elapsed, no
         // manual request, nothing to report) records no job_runs row —
@@ -1785,12 +1856,23 @@ impl PushJob {
         let (bytes, outcome) = self.run_cycle(ctx, &cycle_token, selected, errors).await;
         *self.cycle_cancel.lock().unwrap() = None;
         let finished_at = OffsetDateTime::now_utc().unix_timestamp();
+        // Cancellation is read off the variant, so this agrees with the
+        // per-peer classifier by construction. It used to be
+        // `cycle_token.is_cancelled() && !cancel.is_cancelled()`, which
+        // excluded daemon shutdown and therefore recorded a routine
+        // restart mid-transfer as an error run while `push_syncs` recorded
+        // the very same event as cancelled.
+        let rendered;
         let (status, err_msg) = match &outcome {
             Ok(()) => (crate::state::job_runs::STATUS_OK, None),
-            Err(_) if cycle_token.is_cancelled() && !cancel.is_cancelled() => {
-                (crate::state::job_runs::STATUS_CANCELLED, None)
+            Err(StepError::Cancelled) => (crate::state::job_runs::STATUS_CANCELLED, None),
+            Err(e) => {
+                rendered = e.to_string();
+                (
+                    crate::state::job_runs::STATUS_ERROR,
+                    Some(rendered.as_str()),
+                )
             }
-            Err(e) => (crate::state::job_runs::STATUS_ERROR, Some(e.as_str())),
         };
         if let (Some(pool), Some(run_id)) = (ctx.state.as_ref(), run_id) {
             let _ = crate::state::job_runs::record_finish(
@@ -1805,7 +1887,7 @@ impl PushJob {
         }
         self.record_cycle(
             match status {
-                "error" => outcome.err(),
+                "error" => outcome.err().map(|e| e.to_string()),
                 _ => None,
             },
             interval,
@@ -1968,8 +2050,59 @@ target = {{ root_fs = "backup/nova" }}
 
     #[test]
     fn cancellation_is_not_a_peer_error() {
-        let errors = vec!["cancelled".to_string()];
-        assert_eq!(classify_peer_attempt(true, &errors), ("cancelled", None));
+        assert_eq!(
+            classify_peer_attempt(true, &[StepError::Cancelled]),
+            ("cancelled", None)
+        );
+    }
+
+    // The token can clear between the step reporting and the classifier
+    // reading it, so the variant has to carry the verdict on its own.
+    #[test]
+    fn a_cancelled_step_outranks_a_token_that_already_cleared() {
+        assert_eq!(
+            classify_peer_attempt(false, &[StepError::Cancelled]),
+            ("cancelled", None)
+        );
+    }
+
+    // The sentinel this replaced was a bare "cancelled" string, so any
+    // caller adding context turned an interruption into a failure. A
+    // message that merely CONTAINS the word must stay an error.
+    #[test]
+    fn a_failure_mentioning_cancellation_is_still_a_failure() {
+        let (status, message) = classify_peer_attempt(
+            false,
+            &[StepError::Failed(
+                "execute tank/a: receiver: cancelled".into(),
+            )],
+        );
+        assert_eq!(status, "error");
+        assert_eq!(
+            message.as_deref(),
+            Some("execute tank/a: receiver: cancelled")
+        );
+    }
+
+    #[test]
+    fn several_failures_are_reported_together() {
+        let (status, message) = classify_peer_attempt(
+            false,
+            &[
+                StepError::Failed("plan tank/a: boom".into()),
+                StepError::Failed("plan tank/b: bang".into()),
+            ],
+        );
+        assert_eq!(status, "error");
+        assert_eq!(
+            message.as_deref(),
+            Some("plan tank/a: boom; plan tank/b: bang")
+        );
+    }
+
+    #[test]
+    fn a_clean_peer_attempt_is_ok() {
+        assert_eq!(classify_peer_attempt(false, &[]), ("ok", None));
     }
 
     fn s(name: &str, guid: u64) -> SnapshotEntry {

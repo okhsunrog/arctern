@@ -43,6 +43,12 @@ jobs:
         working-directory: arctern
       - run: cargo test --workspace
         working-directory: arctern
+      # The integration tests need a ZFS host over SSH, so they cannot run
+      # here — but `cargo test --workspace` does not even compile them
+      # (they are `#![cfg(feature = "integration")]`), which let them rot
+      # unnoticed between VM runs. Type-check them without running.
+      - run: cargo check --workspace --all-targets --features integration
+        working-directory: arctern
 
   frontend:
     name: Frontend

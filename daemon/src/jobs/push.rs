@@ -677,19 +677,39 @@ impl RateLimiter {
 /// on cancel we drop the recv channel (closing the SSH child's stdin)
 /// and `start_kill` the local send child.
 #[allow(clippy::too_many_arguments)]
+/// What stays the same for every filesystem in one cycle.
+///
+/// `run_one_filesystem` took fourteen parameters and `execute_one_plan`
+/// twelve; eight of them were these, threaded unchanged through every
+/// call. Grouping them leaves each signature describing what the step is
+/// actually about — which dataset, which plan, which transfer slot.
+struct StepCtx<'a> {
+    runner: &'a dyn CommandRunner,
+    peer: &'a PeerLink,
+    job_name: &'a str,
+    peer_name: &'a str,
+    flags: &'a SendFlagsConfig,
+    limiter: Option<&'a RateLimiter>,
+    cancel: &'a CancellationToken,
+    transfers: &'a Mutex<HashMap<String, TransferInfo>>,
+}
+
 async fn execute_one_plan(
-    runner: &dyn CommandRunner,
-    peer: &PeerLink,
-    job_name: &str,
+    ctx: &StepCtx<'_>,
     plan: &SnapshotPlan,
     target_dataset: &str,
     sender_dataset: &str,
-    flags: &SendFlagsConfig,
-    limiter: Option<&RateLimiter>,
-    cancel: &CancellationToken,
-    transfers: &Mutex<HashMap<String, TransferInfo>>,
     transfer_key: &str,
 ) -> Result<(), StepError> {
+    let (runner, peer, job_name, flags, limiter, cancel, transfers) = (
+        ctx.runner,
+        ctx.peer,
+        ctx.job_name,
+        ctx.flags,
+        ctx.limiter,
+        ctx.cancel,
+        ctx.transfers,
+    );
     let Some(send_header) = build_send_header(plan, flags) else {
         return Err("build_send_header returned None for non-Nothing plan".into());
     };
@@ -874,20 +894,15 @@ fn set_transfer_phase(
 /// first, stale same-(job, peer) cursors destroyed after — crash-safe.
 #[allow(clippy::too_many_arguments)]
 async fn run_one_filesystem(
-    runner: &dyn CommandRunner,
-    peer: &PeerLink,
-    job_name: &str,
-    peer_name: &str,
+    ctx: &StepCtx<'_>,
     sender_dataset: &str,
     target_dataset: &str,
     plan: &SnapshotPlan,
     sender_snaps: &[SnapshotEntry],
-    flags: &SendFlagsConfig,
-    limiter: Option<&RateLimiter>,
-    cancel: &CancellationToken,
-    transfers: &Mutex<HashMap<String, TransferInfo>>,
     transfer_key: &str,
 ) -> Result<(), StepError> {
+    let (runner, job_name, peer_name, transfers) =
+        (ctx.runner, ctx.job_name, ctx.peer_name, ctx.transfers);
     let to_hold_target: Option<(String, u64)> = match plan {
         SnapshotPlan::Full { to, .. }
         | SnapshotPlan::Incremental { to, .. }
@@ -923,20 +938,7 @@ async fn run_one_filesystem(
 
     // Leave the step hold in place on failure — it protects the snapshot
     // for the next cycle's retry. Hence `?` propagates without a release.
-    execute_one_plan(
-        runner,
-        peer,
-        job_name,
-        plan,
-        target_dataset,
-        sender_dataset,
-        flags,
-        limiter,
-        cancel,
-        transfers,
-        transfer_key,
-    )
-    .await?;
+    execute_one_plan(ctx, plan, target_dataset, sender_dataset, transfer_key).await?;
 
     if let Some((snap, guid)) = &to_hold_target {
         set_transfer_phase(transfers, transfer_key, "committing");
@@ -1567,22 +1569,17 @@ impl PushJob {
                 phase_since: OffsetDateTime::now_utc().unix_timestamp(),
             },
         );
-        let res = run_one_filesystem(
+        let step = StepCtx {
             runner,
-            peer.as_ref(),
-            &self.config.name,
+            peer: peer.as_ref(),
+            job_name: &self.config.name,
             peer_name,
-            sender_path,
-            &target,
-            &plan,
-            &sender_snaps,
-            &self.config.send,
-            self.limiter.as_deref(),
+            flags: &self.config.send,
+            limiter: self.limiter.as_deref(),
             cancel,
-            &self.transfers,
-            &key,
-        )
-        .await;
+            transfers: &self.transfers,
+        };
+        let res = run_one_filesystem(&step, sender_path, &target, &plan, &sender_snaps, &key).await;
         let bytes = self
             .transfers
             .lock()

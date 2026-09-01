@@ -103,3 +103,35 @@ describe('pushOutcome', () => {
     expect(out.description).not.toContain('within seconds')
   })
 })
+
+describe('pushOutcome during a cycle with no transfer', () => {
+  // The planning window: the cycle is running but has registered no
+  // transfer yet, so "mid-transfer" would name something that is not there.
+  it('says a cycle is running rather than claiming a transfer', () => {
+    const out = pushOutcome(job({ running: true, transfers: [] }), 'push_to_mira', 'mira')
+    expect(out.description).toContain('already running a cycle')
+    expect(out.description).not.toContain('mid-transfer')
+  })
+
+  it('still says mid-transfer when that peer is actually receiving', () => {
+    const out = pushOutcome(
+      job({
+        running: true,
+        transfers: [
+          {
+            dataset: 'novafs/arch0/data/root',
+            peer: 'mira',
+            kind: 'incremental',
+            bytes_sent: 1,
+            started_at: 0,
+            phase: 'sending',
+            phase_since: 0,
+          },
+        ],
+      }),
+      'push_to_mira',
+      'mira',
+    )
+    expect(out.description).toContain('mid-transfer')
+  })
+})

@@ -6,7 +6,7 @@ import IncomingTransfers from '../components/IncomingTransfers.vue'
 import JobActions from '../components/JobActions.vue'
 import { useJobs } from '../composables/useJobs'
 import { formatNextRun, formatRelative } from '../utils/format'
-import { formatLastSync, formatNextSync } from '../utils/pushTimes'
+import { formatLastSync, formatSyncState } from '../utils/pushTimes'
 import { jobFailureMessage, jobStatus } from '../utils/status'
 import type { JobStatus } from '../client'
 
@@ -97,9 +97,7 @@ const columns = computed<TableColumn<JobStatus>[]>(() => [
     header: 'Next',
     cell: ({ row }) =>
       row.original.kind === 'push'
-        ? row.original.running
-          ? 'replicating now'
-          : formatNextSync(row.original)
+        ? formatSyncState(row.original)
         : formatNextRun(row.original.next_run, row.original.running),
   },
   {

@@ -78,9 +78,15 @@ export function wakeOutcome(job: JobStatus | undefined, name: string): ActionOut
  */
 export function pushOutcome(job: JobStatus | undefined, name: string, peer: string): ActionOutcome {
   if (job?.running) {
+    // The running cycle already took its snapshot of the request set, so
+    // this one drains on the next cycle either way — whether the job is
+    // sending bytes or still deciding what to send.
+    const doing = isTransferring(job, { peer } as TargetStatus)
+      ? 'is mid-transfer'
+      : 'is already running a cycle'
     return {
       title: `Queued push to ${peer}`,
-      description: `${name} is mid-transfer; this will start once it finishes.`,
+      description: `${name} ${doing}; this will start once it finishes.`,
       tone: 'success',
     }
   }

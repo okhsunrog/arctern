@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vite-plus/test'
 import type { JobStatus, TargetStatus } from '../client'
-import { formatNextSync, lastSync, nextSync } from './pushTimes'
+import { formatNextSync, formatSyncState, lastSync, nextSync } from './pushTimes'
 
 const HOUR = 3600
 const now = () => Math.floor(Date.now() / 1000)
@@ -81,5 +81,37 @@ describe('lastSync', () => {
 
   it('is null before anything has ever synced', () => {
     expect(lastSync(job([target({ last_success: undefined })]))).toBeNull()
+  })
+})
+
+describe('formatSyncState', () => {
+  it('reports a real transfer as replicating', () => {
+    const j = job([target()])
+    j.running = true
+    j.transfers = [
+      {
+        dataset: 'novafs/arch0/data/root',
+        peer: 'mira',
+        kind: 'incremental',
+        bytes_sent: 1,
+        started_at: 0,
+        phase: 'sending',
+        phase_since: 0,
+      },
+    ]
+    expect(formatSyncState(j)).toBe('replicating now')
+  })
+
+  // A cycle that is planning, or that found nothing to send, is running
+  // without any transfer — the card used to call that "replicating now".
+  it('does not claim replication while the cycle is still deciding', () => {
+    const j = job([target()])
+    j.running = true
+    j.transfers = []
+    expect(formatSyncState(j)).toBe('checking for changes')
+  })
+
+  it('falls back to the schedule when idle', () => {
+    expect(formatSyncState(job([target()]))).toBe(formatNextSync(job([target()])))
   })
 })

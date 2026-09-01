@@ -6,7 +6,7 @@ import { useHost } from '../composables/useHost'
 import { useJobs } from '../composables/useJobs'
 import { useJobRuns } from '../composables/useJobRuns'
 import { formatBytes, formatTimestamp } from '../utils/format'
-import { formatLastSync, formatNextSync } from '../utils/pushTimes'
+import { formatLastSync, formatSyncState } from '../utils/pushTimes'
 import { jobStatus, runStatus } from '../utils/status'
 import JobActions from '../components/JobActions.vue'
 import TransferPanel from '../components/TransferPanel.vue'
@@ -143,7 +143,7 @@ const tableColumns = computed<TableColumn<JobRun>[]>(() => [
                   <dt class="text-muted">Last sync</dt>
                   <dd>{{ formatLastSync(job) }}</dd>
                   <dt class="text-muted">Next sync</dt>
-                  <dd>{{ job.running ? 'replicating now' : formatNextSync(job) }}</dd>
+                  <dd>{{ formatSyncState(job) }}</dd>
                 </template>
                 <template v-else>
                   <dt class="text-muted">Last run</dt>

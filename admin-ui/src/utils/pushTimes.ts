@@ -5,6 +5,7 @@
 
 import type { JobStatus, TargetStatus } from '../client'
 import { formatDuration } from './format'
+import { jobActivity } from './status'
 
 export interface NextSync {
   kind: 'due' | 'at' | 'blocked' | 'manual'
@@ -76,5 +77,22 @@ export function formatNextSync(job: JobStatus): string {
       return n.reason ?? 'blocked'
     case 'manual':
       return 'on Send now'
+  }
+}
+
+/**
+ * The "Next sync" cell. Three surfaces rendered
+ * `running ? 'replicating now' : formatNextSync(j)`, which called every
+ * running cycle a transfer — including the planning phase and cycles that
+ * find nothing to send.
+ */
+export function formatSyncState(job: JobStatus): string {
+  switch (jobActivity(job)) {
+    case 'sending':
+      return 'replicating now'
+    case 'checking':
+      return 'checking for changes'
+    case 'idle':
+      return formatNextSync(job)
   }
 }

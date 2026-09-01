@@ -45,6 +45,20 @@ export function jobStatus(j: JobStatus): StatusView {
   return view('neutral', 'i-lucide-circle-dashed', 'idle')
 }
 
+/**
+ * What a running job is actually doing. A cycle registers a transfer only
+ * once it has a plan: before that it is listing snapshots locally and
+ * asking the receiver for its GUIDs, and a cycle that finds nothing to
+ * send never registers one at all. Reporting all of that as "replicating
+ * now" describes a transfer that does not exist.
+ */
+export type JobActivity = 'sending' | 'checking' | 'idle'
+
+export function jobActivity(j: JobStatus): JobActivity {
+  if (!j.running) return 'idle'
+  return (j.transfers?.length ?? 0) > 0 ? 'sending' : 'checking'
+}
+
 export function jobFailureMessage(j: JobStatus): string | null {
   if (j.last_error) return j.last_error
   const activePeers = new Set((j.transfers ?? []).map((transfer) => transfer.peer))

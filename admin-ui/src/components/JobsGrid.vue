@@ -2,7 +2,7 @@
 import { useHost } from '../composables/useHost'
 import type { JobStatus } from '../client'
 import { formatNextRun, formatRelative } from '../utils/format'
-import { formatLastSync, formatNextSync } from '../utils/pushTimes'
+import { formatLastSync, formatSyncState } from '../utils/pushTimes'
 import { jobStatus } from '../utils/status'
 import JobActions from './JobActions.vue'
 import TransferPanel from './TransferPanel.vue'
@@ -58,7 +58,7 @@ defineProps<{
           </div>
           <div class="flex justify-between">
             <dt class="text-muted">Next sync</dt>
-            <dd>{{ j.running ? 'replicating now' : formatNextSync(j) }}</dd>
+            <dd>{{ formatSyncState(j) }}</dd>
           </div>
         </template>
         <template v-else>

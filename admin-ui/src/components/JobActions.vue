@@ -4,8 +4,9 @@
 // it offered "cancel" in states where the card correctly hid it. One
 // component, one answer.
 
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import type { JobStatus } from '../client'
+import { jobActivity } from '../utils/status'
 import ConfirmModal from './ConfirmModal.vue'
 
 const props = defineProps<{
@@ -28,6 +29,25 @@ const iconOnly = () => (props.variant ?? 'label') === 'icon'
 function askStop() {
   confirmStop.value = true
 }
+
+// A cycle is abortable before it has anything to send — it is still
+// listing snapshots and asking the receiver for its GUIDs — but calling
+// that "stop transfer" names a transfer that does not exist.
+const stop = computed(() =>
+  jobActivity(props.job) === 'sending'
+    ? {
+        label: 'Stop transfer',
+        title: 'Stop this transfer?',
+        description:
+          'The send is aborted and the receiver releases the dataset. The partial state is kept, so a later cycle resumes from it rather than starting over.',
+      }
+    : {
+        label: 'Stop cycle',
+        title: 'Stop this cycle?',
+        description:
+          'The job is still working out what to send. Nothing has been transferred yet, so stopping now simply ends the cycle.',
+      },
+)
 </script>
 
 <template>
@@ -73,14 +93,14 @@ function askStop() {
 
     <!-- `cancellable` is the daemon's own answer: it drops to false once
          every slot has handed off to zfs recv, where cancel is a no-op. -->
-    <UTooltip v-if="job.cancellable" text="Stop transfer">
+    <UTooltip v-if="job.cancellable" :text="stop.label">
       <UButton
         size="xs"
         :variant="iconOnly() ? 'ghost' : 'soft'"
         color="error"
         icon="i-lucide-circle-x"
-        :label="iconOnly() ? undefined : 'Stop transfer'"
-        aria-label="Stop transfer"
+        :label="iconOnly() ? undefined : stop.label"
+        :aria-label="stop.label"
         :loading="isCancelling?.(job.name)"
         @click="askStop"
       />
@@ -88,10 +108,10 @@ function askStop() {
 
     <ConfirmModal
       v-model:open="confirmStop"
-      title="Stop this transfer?"
-      description="The send is aborted and the receiver releases the dataset. The partial state is kept, so a later cycle resumes from it rather than starting over."
+      :title="stop.title"
+      :description="stop.description"
       :subject="job.name"
-      confirm-label="Stop transfer"
+      :confirm-label="stop.label"
       :loading="isCancelling?.(job.name)"
       @confirm="onCancel?.(job.name)"
     />

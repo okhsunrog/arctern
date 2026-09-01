@@ -8,6 +8,8 @@ use axum::{
     http::StatusCode,
 };
 use serde::Deserialize;
+use std::collections::HashMap;
+use zfskit::SnapshotName;
 use zfskit::dataset::{DestroyOptions, ListOptions, SnapshotOptions};
 use zfskit::models::DatasetType;
 
@@ -197,6 +199,68 @@ pub async fn list_holds(
         })
         .collect();
     out.sort_by_key(|h| h.timestamp);
+    Ok(Json(out))
+}
+
+/// `zfs holds -p -H <snap>...` over every snapshot of `{name}` in one
+/// (chunked) invocation. The per-snapshot endpoint costs one `zfs holds`
+/// per row, so a browser showing a dataset with hundreds of snapshots
+/// turns every refresh into hundreds of process spawns — through the
+/// control channel when the dataset lives on a peer. This is the shape
+/// the snapshot browser uses.
+///
+/// Snapshots without holds are absent from the map. The response always
+/// covers the whole dataset, so a missing key means "no holds", never
+/// "not fetched".
+#[utoipa::path(
+    get,
+    path = "/api/v1/datasets/{name}/holds",
+    tag = "snapshots",
+    params(
+        ("name" = String, Path, description = "Parent dataset (URL-encode `/` as %2F)"),
+    ),
+    responses(
+        (status = 200, description = "Snapshot tag to its holds, oldest first",
+         body = HashMap<String, Vec<SnapshotHold>>),
+        (status = 404, description = "Dataset not found", body = ApiErrorBody),
+        (status = 500, description = "ZFS returned an error", body = ApiErrorBody),
+    ),
+)]
+pub async fn list_dataset_holds(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<HashMap<String, Vec<SnapshotHold>>>, ApiError> {
+    check_dataset(&name)?;
+    let opts = ListOptions {
+        recursive: false,
+        types: vec![DatasetType::Snapshot],
+        roots: vec![name.clone()],
+        ..ListOptions::default()
+    };
+    let entries = state.zfs.list_datasets(&opts).await?;
+    let names: Vec<SnapshotName> = entries
+        .iter()
+        .filter_map(|e| SnapshotName::parse(e.name.clone()).ok())
+        .collect();
+
+    // The snapshots become argv, so chunk rather than trusting a dataset
+    // to stay under ARG_MAX.
+    const HOLDS_ARGV_CHUNK: usize = 500;
+    let mut out: HashMap<String, Vec<SnapshotHold>> = HashMap::new();
+    for chunk in names.chunks(HOLDS_ARGV_CHUNK) {
+        for h in state.zfs.list_holds_many(chunk).await? {
+            let Some((_, tag)) = h.dataset.split_once('@') else {
+                continue;
+            };
+            out.entry(tag.to_owned()).or_default().push(SnapshotHold {
+                tag: h.tag,
+                timestamp: h.timestamp,
+            });
+        }
+    }
+    for holds in out.values_mut() {
+        holds.sort_by_key(|h| h.timestamp);
+    }
     Ok(Json(out))
 }
 

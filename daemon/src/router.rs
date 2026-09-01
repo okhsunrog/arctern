@@ -50,6 +50,7 @@ fn openapi_router() -> OpenApiRouter<AppState> {
         .routes(routes!(handlers::snapshots::list_snapshots))
         .routes(routes!(handlers::snapshots::create_snapshot))
         .routes(routes!(handlers::snapshots::destroy_snapshot))
+        .routes(routes!(handlers::snapshots::list_dataset_holds))
         .routes(routes!(handlers::snapshots::list_holds))
         .routes(routes!(handlers::snapshots::create_hold))
         .routes(routes!(handlers::snapshots::release_hold))

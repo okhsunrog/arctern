@@ -521,6 +521,42 @@ export type ListDatasetsResponses = {
 
 export type ListDatasetsResponse = ListDatasetsResponses[keyof ListDatasetsResponses];
 
+export type ListDatasetHoldsData = {
+    body?: never;
+    path: {
+        /**
+         * Parent dataset (URL-encode `/` as %2F)
+         */
+        name: string;
+    };
+    query?: never;
+    url: '/api/v1/datasets/{name}/holds';
+};
+
+export type ListDatasetHoldsErrors = {
+    /**
+     * Dataset not found
+     */
+    404: ApiErrorBody;
+    /**
+     * ZFS returned an error
+     */
+    500: ApiErrorBody;
+};
+
+export type ListDatasetHoldsError = ListDatasetHoldsErrors[keyof ListDatasetHoldsErrors];
+
+export type ListDatasetHoldsResponses = {
+    /**
+     * Snapshot tag to its holds, oldest first
+     */
+    200: {
+        [key: string]: Array<SnapshotHold>;
+    };
+};
+
+export type ListDatasetHoldsResponse = ListDatasetHoldsResponses[keyof ListDatasetHoldsResponses];
+
 export type ListSnapshotsData = {
     body?: never;
     path: {

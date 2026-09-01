@@ -2,7 +2,7 @@
 
 import type { Client, ClientMeta, Options as Options2, RequestResult, TDataShape } from './client';
 import { client } from './client.gen';
-import type { CancelData, CancelErrors, CancelResponses, CreateHoldData, CreateHoldErrors, CreateHoldResponses, CreateSnapshotData, CreateSnapshotErrors, CreateSnapshotResponses, DestroySnapshotData, DestroySnapshotErrors, DestroySnapshotResponses, GetArcData, GetArcErrors, GetArcHistoryData, GetArcHistoryResponses, GetArcResponses, GetConfigData, GetConfigErrors, GetConfigResponses, GetPoolData, GetPoolErrors, GetPoolResponses, GetSystemInfoData, GetSystemInfoResponses, ListDatasetsData, ListDatasetsErrors, ListDatasetsResponses, ListHoldsData, ListHoldsErrors, ListHoldsResponses, ListJobsData, ListJobsResponses, ListPeersData, ListPeersResponses, ListPoolsData, ListPoolsErrors, ListPoolsResponses, ListRunsData, ListRunsResponses, ListSnapshotsData, ListSnapshotsErrors, ListSnapshotsResponses, PauseData, PauseErrors, PauseResponses, PoolScrubData, PoolScrubErrors, PoolScrubResponses, PushToPeerData, PushToPeerErrors, PushToPeerResponses, RecentEventsData, RecentEventsResponses, RecentTransfersData, RecentTransfersResponses, ReleaseHoldData, ReleaseHoldErrors, ReleaseHoldResponses, ResumeData, ResumeErrors, ResumeResponses, StreamEventsData, StreamEventsResponses, StreamJobsData, StreamJobsResponses, StreamPeerEventsData, StreamPeerEventsErrors, StreamPeerEventsResponses, StreamPeerJobsData, StreamPeerJobsErrors, StreamPeerJobsResponses, WakeupData, WakeupErrors, WakeupResponses } from './types.gen';
+import type { CancelData, CancelErrors, CancelResponses, CreateHoldData, CreateHoldErrors, CreateHoldResponses, CreateSnapshotData, CreateSnapshotErrors, CreateSnapshotResponses, DestroySnapshotData, DestroySnapshotErrors, DestroySnapshotResponses, GetArcData, GetArcErrors, GetArcHistoryData, GetArcHistoryResponses, GetArcResponses, GetConfigData, GetConfigErrors, GetConfigResponses, GetPoolData, GetPoolErrors, GetPoolResponses, GetSystemInfoData, GetSystemInfoResponses, ListDatasetHoldsData, ListDatasetHoldsErrors, ListDatasetHoldsResponses, ListDatasetsData, ListDatasetsErrors, ListDatasetsResponses, ListHoldsData, ListHoldsErrors, ListHoldsResponses, ListJobsData, ListJobsResponses, ListPeersData, ListPeersResponses, ListPoolsData, ListPoolsErrors, ListPoolsResponses, ListRunsData, ListRunsResponses, ListSnapshotsData, ListSnapshotsErrors, ListSnapshotsResponses, PauseData, PauseErrors, PauseResponses, PoolScrubData, PoolScrubErrors, PoolScrubResponses, PushToPeerData, PushToPeerErrors, PushToPeerResponses, RecentEventsData, RecentEventsResponses, RecentTransfersData, RecentTransfersResponses, ReleaseHoldData, ReleaseHoldErrors, ReleaseHoldResponses, ResumeData, ResumeErrors, ResumeResponses, StreamEventsData, StreamEventsResponses, StreamJobsData, StreamJobsResponses, StreamPeerEventsData, StreamPeerEventsErrors, StreamPeerEventsResponses, StreamPeerJobsData, StreamPeerJobsErrors, StreamPeerJobsResponses, WakeupData, WakeupErrors, WakeupResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean, TResponse = unknown> = Options2<TData, ThrowOnError, TResponse> & {
     /**
@@ -25,6 +25,20 @@ export const getConfig = <ThrowOnError extends boolean = false>(options?: Option
  * RealRunner in production and the SSH test runner only for dev/integration.
  */
 export const listDatasets = <ThrowOnError extends boolean = false>(options?: Options<ListDatasetsData, ThrowOnError>): RequestResult<ListDatasetsResponses, ListDatasetsErrors, ThrowOnError> => (options?.client ?? client).get<ListDatasetsResponses, ListDatasetsErrors, ThrowOnError>({ url: '/api/v1/datasets', ...options });
+
+/**
+ * `zfs holds -p -H <snap>...` over every snapshot of `{name}` in one
+ * (chunked) invocation. The per-snapshot endpoint costs one `zfs holds`
+ * per row, so a browser showing a dataset with hundreds of snapshots
+ * turns every refresh into hundreds of process spawns — through the
+ * control channel when the dataset lives on a peer. This is the shape
+ * the snapshot browser uses.
+ *
+ * Snapshots without holds are absent from the map. The response always
+ * covers the whole dataset, so a missing key means "no holds", never
+ * "not fetched".
+ */
+export const listDatasetHolds = <ThrowOnError extends boolean = false>(options: Options<ListDatasetHoldsData, ThrowOnError>): RequestResult<ListDatasetHoldsResponses, ListDatasetHoldsErrors, ThrowOnError> => (options.client ?? client).get<ListDatasetHoldsResponses, ListDatasetHoldsErrors, ThrowOnError>({ url: '/api/v1/datasets/{name}/holds', ...options });
 
 /**
  * List snapshots of `{name}` (one dataset, non-recursive). Properties

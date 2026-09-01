@@ -73,6 +73,68 @@
         }
       }
     },
+    "/api/v1/datasets/{name}/holds": {
+      "get": {
+        "tags": [
+          "snapshots"
+        ],
+        "summary": "`zfs holds -p -H <snap>...` over every snapshot of `{name}` in one\n(chunked) invocation. The per-snapshot endpoint costs one `zfs holds`\nper row, so a browser showing a dataset with hundreds of snapshots\nturns every refresh into hundreds of process spawns — through the\ncontrol channel when the dataset lives on a peer. This is the shape\nthe snapshot browser uses.",
+        "description": "Snapshots without holds are absent from the map. The response always\ncovers the whole dataset, so a missing key means \"no holds\", never\n\"not fetched\".",
+        "operationId": "list_dataset_holds",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Parent dataset (URL-encode `/` as %2F)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Snapshot tag to its holds, oldest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/SnapshotHold"
+                    }
+                  },
+                  "propertyNames": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Dataset not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "ZFS returned an error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/datasets/{name}/snapshots": {
       "get": {
         "tags": [

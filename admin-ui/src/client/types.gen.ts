@@ -158,6 +158,13 @@ export type JobStatus = {
      */
     paused?: boolean;
     /**
+     * True while a cancel request would actually abort something. False
+     * once every in-flight transfer has passed the point where cancel is
+     * a no-op (finalizing/committing) — the decision belongs to the job,
+     * not to each UI surface that draws a stop button.
+     */
+    cancellable?: boolean;
+    /**
      * In-flight transfers, one per parallel send slot. UI derives
      * speed from `bytes_sent` deltas between live snapshots.
      */
@@ -372,6 +379,13 @@ export type TargetStatus = {
      * Whether the active route permits scheduled replication.
      */
     route_auto?: boolean;
+    /**
+     * A manual push to this peer is queued and will run on the next
+     * cycle. Set from the moment the request is accepted until the
+     * cycle that drains it starts, so an operator who pressed "send
+     * now" during a running transfer can see that it was taken.
+     */
+    manual_queued?: boolean;
     /**
      * For auto mode: the configured `auto_interval` in seconds. The
      * next auto sync is `last_success + auto_interval_secs` (or the

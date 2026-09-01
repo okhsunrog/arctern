@@ -1552,6 +1552,7 @@ impl Job for PushJob {
             v.sort_by(|a, b| (a.started_at, &a.dataset).cmp(&(b.started_at, &b.dataset)));
             v
         };
+        s.cancellable = self.cycle_cancel.lock().unwrap().is_some() && self.cancellable_now();
         // Best-effort snapshot via try_read: status() is sync and the
         // peers map is an async RwLock; a missed read shows the peer as
         // disconnected for one 5s poll — harmless.
@@ -1576,6 +1577,7 @@ impl Job for PushJob {
             },
             None => HashMap::new(),
         };
+        let queued: BTreeSet<String> = self.manual_requests.lock().unwrap().clone();
         let outcomes = self.peer_outcomes.lock().unwrap();
         s.targets = self
             .config
@@ -1594,6 +1596,7 @@ impl Job for PushJob {
                     connected: is_connected,
                     route,
                     route_auto,
+                    manual_queued: queued.contains(name),
                     auto_interval_secs: self.peer_auto_interval(name).map(|d| d.as_secs()),
                     last_success: outcome.last_success,
                     last_attempt: outcome.last_attempt,
@@ -1615,28 +1618,17 @@ impl Job for PushJob {
         let Some(token) = token else {
             return false;
         };
-        let transfers = self.transfers.lock().unwrap();
-        if !transfers.is_empty()
-            && transfers
-                .values()
-                .all(|t| matches!(t.phase.as_str(), "finalizing" | "committing" | "cancelling"))
-        {
+        if !self.cancellable_now() {
             return false;
         }
-        drop(transfers);
         token.cancel();
         true
     }
     fn pause(&self) -> bool {
         self.paused.store(true, Ordering::Relaxed);
-        let cancellable = {
-            let transfers = self.transfers.lock().unwrap();
-            transfers.is_empty()
-                || transfers.values().any(|t| {
-                    !matches!(t.phase.as_str(), "finalizing" | "committing" | "cancelling")
-                })
-        };
-        if cancellable && let Some(tok) = self.cycle_cancel.lock().unwrap().as_ref() {
+        if self.cancellable_now()
+            && let Some(tok) = self.cycle_cancel.lock().unwrap().as_ref()
+        {
             tok.cancel();
         }
         true
@@ -1711,6 +1703,19 @@ impl Job for PushJob {
 }
 
 impl PushJob {
+    /// Whether aborting the cycle would still cut short real work. Once
+    /// every slot has handed off to `zfs recv` there is nothing left to
+    /// interrupt, so cancel/pause degrade to no-ops. Shared by
+    /// `cancel_current`, `pause` and `status` so the daemon and every UI
+    /// surface answer this question identically.
+    fn cancellable_now(&self) -> bool {
+        let transfers = self.transfers.lock().unwrap();
+        transfers.is_empty()
+            || transfers
+                .values()
+                .any(|t| !matches!(t.phase.as_str(), "finalizing" | "committing" | "cancelling"))
+    }
+
     /// How long to sleep before the next scheduling decision. Earliest
     /// auto-target due time wins; a due-but-blocked target degrades to
     /// a fixed retry so the loop doesn't spin; no auto targets = the
@@ -1811,6 +1816,106 @@ impl PushJob {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_config(targets: &[&str]) -> PushJobConfig {
+        let list = targets
+            .iter()
+            .map(|t| format!("{t:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        toml::from_str(&format!(
+            r#"
+name = "push_test"
+targets = [{list}]
+filesystems = {{ "novafs/data<" = true }}
+target = {{ root_fs = "backup/nova" }}
+"#
+        ))
+        .expect("test config parses")
+    }
+
+    fn test_job(targets: &[&str]) -> PushJob {
+        PushJob::new(test_config(targets), None, &[], None).expect("job builds")
+    }
+
+    fn transfer(peer: &str, phase: &str) -> TransferInfo {
+        TransferInfo {
+            dataset: "novafs/data".into(),
+            peer: peer.into(),
+            kind: "incremental".into(),
+            bytes_sent: 1,
+            total_bytes: None,
+            started_at: 0,
+            phase: phase.into(),
+            phase_since: 0,
+        }
+    }
+
+    // The console shows a "send now" button per target; before
+    // `manual_queued` existed it had no way to say the request had been
+    // taken, so pressing it during a running cycle looked like a no-op.
+    #[tokio::test]
+    async fn manual_request_is_visible_in_status_until_the_cycle_drains_it() {
+        let job = test_job(&["mira"]);
+        assert!(!job.status().targets[0].manual_queued);
+
+        job.request_push("mira").expect("mira is a target");
+        assert!(job.status().targets[0].manual_queued);
+
+        let mut errors = Vec::new();
+        job.select_targets(&mut errors).await;
+        assert!(
+            !job.status().targets[0].manual_queued,
+            "select_targets drains the request set, so the flag must clear with it"
+        );
+    }
+
+    #[test]
+    fn manual_request_rejects_a_peer_that_is_not_a_target() {
+        let job = test_job(&["mira"]);
+        assert!(job.request_push("nowhere").is_err());
+        assert!(!job.status().targets[0].manual_queued);
+    }
+
+    // `cancellable` is what every UI surface draws its stop button from,
+    // so it has to agree with what `cancel_current` would actually do.
+    #[test]
+    fn cancellable_is_false_without_a_running_cycle() {
+        let job = test_job(&["mira"]);
+        assert!(!job.status().cancellable);
+        assert!(!job.cancel_current(), "nothing to cancel when idle");
+    }
+
+    #[test]
+    fn cancellable_tracks_the_transfer_phases() {
+        let job = test_job(&["mira"]);
+        *job.cycle_cancel.lock().unwrap() = Some(CancellationToken::new());
+
+        // A cycle with no transfer yet is still interruptible.
+        assert!(job.status().cancellable);
+
+        job.transfers
+            .lock()
+            .unwrap()
+            .insert("a".into(), transfer("mira", "sending"));
+        assert!(job.status().cancellable);
+
+        // Past the hand-off to zfs recv, cancelling does nothing.
+        job.transfers
+            .lock()
+            .unwrap()
+            .insert("a".into(), transfer("mira", "finalizing"));
+        assert!(!job.status().cancellable);
+        assert!(!job.cancel_current());
+
+        // One live slot among finished ones is enough to keep it useful.
+        job.transfers
+            .lock()
+            .unwrap()
+            .insert("b".into(), transfer("mira", "waiting_receiver"));
+        assert!(job.status().cancellable);
+        assert!(job.cancel_current());
+    }
 
     struct TrackedWriter {
         shutdown: Arc<AtomicBool>,

@@ -6,7 +6,7 @@
     "license": {
       "name": ""
     },
-    "version": "0.2.2"
+    "version": "0.2.3"
   },
   "paths": {
     "/api/v1/config": {
@@ -1542,6 +1542,10 @@
             "type": "boolean",
             "description": "True while the job is paused: the current transfer was aborted\n(resumably) and scheduled cycles are suspended until resumed."
           },
+          "cancellable": {
+            "type": "boolean",
+            "description": "True while a cancel request would actually abort something. False\nonce every in-flight transfer has passed the point where cancel is\na no-op (finalizing/committing) — the decision belongs to the job,\nnot to each UI surface that draws a stop button."
+          },
           "transfers": {
             "type": "array",
             "items": {
@@ -2002,6 +2006,10 @@
           "route_auto": {
             "type": "boolean",
             "description": "Whether the active route permits scheduled replication."
+          },
+          "manual_queued": {
+            "type": "boolean",
+            "description": "A manual push to this peer is queued and will run on the next\ncycle. Set from the moment the request is accepted until the\ncycle that drains it starts, so an operator who pressed \"send\nnow\" during a running transfer can see that it was taken."
           },
           "auto_interval_secs": {
             "type": [

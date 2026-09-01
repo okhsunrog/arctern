@@ -82,6 +82,12 @@ pub struct JobStatus {
     /// (resumably) and scheduled cycles are suspended until resumed.
     #[serde(default)]
     pub paused: bool,
+    /// True while a cancel request would actually abort something. False
+    /// once every in-flight transfer has passed the point where cancel is
+    /// a no-op (finalizing/committing) — the decision belongs to the job,
+    /// not to each UI surface that draws a stop button.
+    #[serde(default)]
+    pub cancellable: bool,
     /// In-flight transfers, one per parallel send slot. UI derives
     /// speed from `bytes_sent` deltas between live snapshots.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -133,6 +139,12 @@ pub struct TargetStatus {
     /// Whether the active route permits scheduled replication.
     #[serde(default)]
     pub route_auto: bool,
+    /// A manual push to this peer is queued and will run on the next
+    /// cycle. Set from the moment the request is accepted until the
+    /// cycle that drains it starts, so an operator who pressed "send
+    /// now" during a running transfer can see that it was taken.
+    #[serde(default)]
+    pub manual_queued: bool,
     /// For auto mode: the configured `auto_interval` in seconds. The
     /// next auto sync is `last_success + auto_interval_secs` (or the
     /// next planner tick when unset/no history).

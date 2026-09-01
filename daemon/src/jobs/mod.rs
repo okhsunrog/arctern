@@ -29,6 +29,9 @@ pub struct JobStatusInner {
     /// True while the job is paused (current transfer aborted resumably,
     /// scheduled cycles suspended).
     pub paused: bool,
+    /// True while `cancel_current` would abort real work. Kinds without
+    /// a cancellable cycle leave this false.
+    pub cancellable: bool,
     /// In-flight transfer progress (push jobs only), one entry per
     /// parallel send slot.
     pub transfers: Vec<arctern_api::TransferInfo>,

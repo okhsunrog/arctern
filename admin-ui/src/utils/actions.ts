@@ -91,12 +91,36 @@ export function pushOutcome(job: JobStatus | undefined, name: string, peer: stri
   }
 }
 
-/** True while the daemon reports this peer's manual push as still queued. */
-export function isQueued(target: TargetStatus): boolean {
-  return target.manual_queued === true
-}
-
 /** A target currently receiving bytes, per the job's transfer list. */
 export function isTransferring(job: JobStatus, target: TargetStatus): boolean {
   return (job.transfers ?? []).some((t) => t.peer === target.peer)
+}
+
+export type SendControl =
+  /** Pressing it will queue a push. */
+  | { kind: 'available'; tooltip: string }
+  /** Nothing to offer: the thing the button asks for is already happening. */
+  | { kind: 'hidden' }
+  /** Normally available, blocked by something outside the operator's hands. */
+  | { kind: 'disabled'; tooltip: string }
+
+/**
+ * Whether to offer "send now" for this target, and in what state.
+ *
+ * The distinction that matters: when the push is already under way or
+ * already queued, the button is not merely unavailable — it is redundant,
+ * because the badge beside it (and the progress bar above it) already say
+ * so. A disabled button in `soft` variant is only slightly dimmed, so
+ * leaving one there reads as a live call to action next to a running
+ * transfer, which is exactly the contradiction this panel kept showing.
+ * An unreachable peer is different: the action is normally available and
+ * will be again, so the affordance stays, inert and explained.
+ */
+export function sendControl(job: JobStatus, target: TargetStatus): SendControl {
+  if (isTransferring(job, target)) return { kind: 'hidden' }
+  if (target.manual_queued) return { kind: 'hidden' }
+  if (!target.connected) {
+    return { kind: 'disabled', tooltip: `${target.peer} is unreachable` }
+  }
+  return { kind: 'available', tooltip: `Replicate to ${target.peer} now` }
 }

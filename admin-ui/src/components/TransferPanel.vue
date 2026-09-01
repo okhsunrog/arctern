@@ -1,6 +1,7 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { JobStatus, TargetStatus } from '../client'
-import { isTransferring } from '../utils/actions'
+import { isTransferring, sendControl } from '../utils/actions'
 import { formatAge, formatDuration } from '../utils/format'
 import TransferSlot from './TransferSlot.vue'
 
@@ -84,14 +85,6 @@ function targetLine(tg: TargetStatus): string {
   return due <= 0 ? `${synced} · auto: due now` : `${synced} · next auto in ~${formatDuration(due)}`
 }
 
-/** Why the send button is unavailable, or null when it is usable. */
-function sendBlockedReason(tg: TargetStatus): string | null {
-  if (!tg.connected) return 'Peer is unreachable'
-  if (isTransferring(props.job, tg)) return `Already replicating to ${tg.peer}`
-  if (tg.manual_queued) return 'A manual push to this peer is already queued'
-  return null
-}
-
 /** Detail line worth repeating per target, beyond the card's summary. */
 function showDetail(tg: TargetStatus): boolean {
   return (
@@ -101,6 +94,18 @@ function showDetail(tg: TargetStatus): boolean {
     (tg.connected && !tg.route_auto)
   )
 }
+
+// Decided once per target per render. The template used to call
+// modeBadge() three times and the send predicate twice for every row.
+const rows = computed(() =>
+  (props.job.targets ?? []).map((tg) => ({
+    tg,
+    badge: modeBadge(tg),
+    send: sendControl(props.job, tg),
+    line: targetLine(tg),
+    detail: showDetail(tg),
+  })),
+)
 </script>
 
 <template>
@@ -117,7 +122,7 @@ function showDetail(tg: TargetStatus): boolean {
 
     <!-- Per-target policy + manual trigger -->
     <div v-if="job.targets?.length" class="space-y-2">
-      <div v-for="tg in job.targets ?? []" :key="tg.peer" class="space-y-0.5">
+      <div v-for="{ tg, badge, send, line, detail } in rows" :key="tg.peer" class="space-y-0.5">
         <div class="flex items-center gap-2 text-sm min-w-0">
           <span
             class="inline-block w-2 h-2 rounded-full shrink-0"
@@ -137,38 +142,34 @@ function showDetail(tg: TargetStatus): boolean {
           <UBadge
             variant="subtle"
             size="sm"
-            :color="modeBadge(tg).color"
-            :title="modeBadge(tg).title"
+            :color="badge.color"
+            :title="badge.title"
             class="shrink-0"
           >
-            {{ modeBadge(tg).label }}
+            {{ badge.label }}
           </UBadge>
-          <UTooltip
-            :text="sendBlockedReason(tg) ?? `Replicate to ${tg.peer} now`"
-            class="shrink-0 ms-auto"
-          >
+          <!-- Offered only when pressing it would do something. While the
+               push is running or queued the badge above already says so,
+               and a second control saying "send now" beside a live
+               progress bar just contradicts it. -->
+          <UTooltip v-if="send.kind !== 'hidden'" :text="send.tooltip" class="shrink-0 ms-auto">
             <UButton
               size="xs"
               variant="soft"
-              :icon="tg.manual_queued ? 'i-lucide-clock' : 'i-lucide-send'"
+              icon="i-lucide-send"
               :loading="isPushing?.(job.name, tg.peer)"
-              :disabled="sendBlockedReason(tg) != null || isPushing?.(job.name, tg.peer)"
+              :disabled="send.kind === 'disabled' || isPushing?.(job.name, tg.peer)"
               @click="onPushTo?.(job.name, tg.peer)"
             >
-              {{ tg.manual_queued ? 'Queued' : 'Send now' }}
+              Send now
             </UButton>
           </UTooltip>
         </div>
         <!-- For single-target jobs the card-level Last/Next sync rows
              already say this; repeat per-target only when there is more
              than one target or something needs explaining. -->
-        <div
-          v-if="showDetail(tg)"
-          class="text-xs ml-4 truncate"
-          :class="targetTone(tg)"
-          :title="targetLine(tg)"
-        >
-          {{ targetLine(tg) }}
+        <div v-if="detail" class="text-xs ml-4 truncate" :class="targetTone(tg)" :title="line">
+          {{ line }}
         </div>
       </div>
     </div>

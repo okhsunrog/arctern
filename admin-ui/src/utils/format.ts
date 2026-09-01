@@ -48,3 +48,22 @@ export function formatBytes(n: number | null | undefined): string {
   }
   return `${v.toFixed(v >= 100 || i === 0 ? 0 : v >= 10 ? 1 : 2)} ${units[i]}`
 }
+
+// Unix-second helpers. These lived as four near-identical private copies
+// across TransferPanel, TransferSlot, IncomingTransfers and pushTimes;
+// two of the four were byte-for-byte the same function.
+
+/** Coarse duration, for "3h left" / "next auto in ~2d". */
+export function formatDuration(seconds: number): string {
+  const s = Math.max(0, seconds)
+  if (s < 90) return `${Math.max(1, Math.round(s))}s`
+  if (s < 5400) return `${Math.round(s / 60)}m`
+  if (s < 129600) return `${Math.round(s / 3600)}h`
+  return `${Math.round(s / 86400)}d`
+}
+
+/** How long ago a unix-second timestamp was. */
+export function formatAge(unixSec: number | null | undefined): string {
+  if (!unixSec) return 'never'
+  return `${formatDuration(Math.floor(Date.now() / 1000) - unixSec)} ago`
+}

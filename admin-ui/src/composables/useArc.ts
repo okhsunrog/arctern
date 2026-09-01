@@ -1,38 +1,20 @@
-import { onUnmounted, ref } from 'vue'
-import { getArc, getArcHistory } from '../client'
-import type { ArcHistoryPoint, ArcStats } from '../client'
+import { computed, toValue, type MaybeRefOrGetter } from 'vue'
+import { useQuery } from '@pinia/colada'
+import { arcHistoryQuery, arcQuery } from '../queries'
 
-function errMessage(e: unknown): string {
-  if (e && typeof e === 'object' && 'message' in e) {
-    return String((e as { message: unknown }).message)
+export function useArc(scope: MaybeRefOrGetter<string> = '') {
+  const query = useQuery(() => arcQuery(toValue(scope)))
+  return {
+    arc: computed(() => query.data.value ?? null),
+    error: computed(() => query.error.value?.message ?? null),
+    loading: computed(() => query.isPending.value && !query.data.value),
   }
-  return String(e)
 }
 
-export function useArc(refreshMs = 5000, includeHistory = false, limit = 120, baseUrl = '') {
-  const arc = ref<ArcStats | null>(null)
-  const history = ref<ArcHistoryPoint[]>([])
-  const error = ref<string | null>(null)
-  const loading = ref(true)
-
-  async function refresh() {
-    const a = await getArc({ baseUrl })
-    if (a.error) error.value = errMessage(a.error)
-    else {
-      arc.value = a.data ?? null
-      error.value = null
-    }
-    if (includeHistory) {
-      const h = await getArcHistory({ query: { limit }, baseUrl })
-      if (h.error) error.value = errMessage(h.error)
-      else history.value = h.data ?? []
-    }
-    loading.value = false
+export function useArcHistory(scope: MaybeRefOrGetter<string> = '', limit = 120) {
+  const query = useQuery(() => arcHistoryQuery({ scope: toValue(scope), limit }))
+  return {
+    history: computed(() => query.data.value ?? []),
+    error: computed(() => query.error.value?.message ?? null),
   }
-
-  void refresh()
-  const handle = setInterval(() => void refresh(), refreshMs)
-  onUnmounted(() => clearInterval(handle))
-
-  return { arc, history, error, loading, refresh }
 }

@@ -1,41 +1,62 @@
 <script setup lang="ts">
-import { computed, h, onUnmounted, ref, resolveComponent, watch } from 'vue'
+import { computed, h, ref, resolveComponent, watch } from 'vue'
+import { useMutation, useQuery, useQueryCache } from '@pinia/colada'
 import type { TableColumn, TreeItem } from '@nuxt/ui'
-import type { DatasetSummary, SnapshotHold } from '../client'
-import type { SnapshotRow, SnapshotSource } from '../composables/snapshotSources'
-import { useMutation } from '../composables/useMutation'
+import {
+  createHold,
+  createSnapshot,
+  destroySnapshot,
+  releaseHold,
+  type DatasetSummary,
+  type SnapshotHold,
+} from '../client'
+import { baseUrlFor } from '../composables/useHost'
+import { useToaster } from '../composables/useToaster'
+import { datasetHoldsQuery, datasetsQuery, snapshotsQuery } from '../queries'
 import { formatBytes } from '../utils/format'
+import { apiErrorCode, unwrap } from '../utils/errors'
 import CreateSnapshotModal from './CreateSnapshotModal.vue'
 import DestroySnapshotModal from './DestroySnapshotModal.vue'
 
-const props = defineProps<{ source: SnapshotSource }>()
+// Host scoping happens at the transport level: a peer exposes the SAME
+// endpoints as the local host, so the browser is the same component
+// against a different query scope — no parallel lesser implementation.
+const props = defineProps<{
+  /** '' for this daemon, otherwise the peer name. */
+  scope: string
+}>()
 
 /** Selected dataset — parents can v-model it (deep links). */
 const dataset = defineModel<string>('dataset', { default: '' })
 
-const { mutate } = useMutation()
+const toaster = useToaster()
+const queryCache = useQueryCache()
+const baseUrl = () => baseUrlFor(props.scope || null)
+const hostLabel = computed(() => props.scope)
 
 function onHost(action: string): string {
-  return props.source.hostLabel ? `${action} on ${props.source.hostLabel}` : action
+  return hostLabel.value ? `${action} on ${hostLabel.value}` : action
+}
+
+/** One snapshot row, flattened from the dataset listing's property map. */
+export interface SnapshotRow {
+  tag: string
+  creation: number | null
+  used: number | null
+  properties?: Record<string, string>
+}
+
+function tagOf(full: string): string {
+  const at = full.indexOf('@')
+  return at >= 0 ? full.slice(at + 1) : full
 }
 
 // ── Datasets + tree ─────────────────────────────────────────────
-const datasets = ref<DatasetSummary[]>([])
-const dsError = ref<string | null>(null)
-const dsLoading = ref(false)
-
-async function refreshDatasets() {
-  dsLoading.value = true
-  const r = await props.source.listDatasets()
-  if (r.error) {
-    dsError.value = String((r.error as { message?: string })?.message ?? JSON.stringify(r.error))
-  } else {
-    datasets.value = r.data ?? []
-    dsError.value = null
-  }
-  dsLoading.value = false
-}
-void refreshDatasets()
+const datasetsResult = useQuery(() => datasetsQuery(props.scope))
+const datasets = computed<DatasetSummary[]>(() => datasetsResult.data.value ?? [])
+const dsError = computed(() => datasetsResult.error.value?.message ?? null)
+const dsLoading = computed(() => datasetsResult.isLoading.value)
+const refreshDatasets = () => void datasetsResult.refetch()
 
 const treeFilter = ref('')
 /** 'name' | 'size' — size ordering answers "what eats my space". */
@@ -112,7 +133,7 @@ watch(
     if (d && selectedNode.value?.value !== d) {
       selectedNode.value = { label: d, value: d, used: null }
     }
-    void refreshSnapshots()
+    rowSelection.value = {}
   },
   { immediate: true },
 )
@@ -124,52 +145,51 @@ const selectedUsedBySnapshots = computed(() => {
 })
 
 // ── Snapshots ───────────────────────────────────────────────────
-const snapshots = ref<SnapshotRow[]>([])
-const snapsError = ref<string | null>(null)
-const snapsLoading = ref(false)
-const holds = ref<Map<string, SnapshotHold[]>>(new Map())
+const snapshotsResult = useQuery(() =>
+  snapshotsQuery({ scope: props.scope, dataset: dataset.value }),
+)
+const snapshots = computed<SnapshotRow[]>(() =>
+  (snapshotsResult.data.value ?? []).map((s) => ({
+    tag: tagOf(s.name),
+    creation: Number(s.properties?.creation ?? 0) || null,
+    used: s.properties?.used != null ? Number(s.properties.used) : null,
+    properties: s.properties,
+  })),
+)
+const snapsError = computed(() => snapshotsResult.error.value?.message ?? null)
+const snapsLoading = computed(() => snapshotsResult.isLoading.value)
 const rowSelection = ref<Record<string, boolean>>({})
 
-async function refreshSnapshots() {
-  rowSelection.value = {}
-  if (!dataset.value) {
-    snapshots.value = []
-    return
-  }
-  snapsLoading.value = true
-  const r = await props.source.listSnapshots(dataset.value)
-  if (r.error) {
-    snapsError.value = String((r.error as { message?: string })?.message ?? JSON.stringify(r.error))
-  } else {
-    snapsError.value = null
-    snapshots.value = r.data ?? []
-    void loadAllHolds()
-  }
-  snapsLoading.value = false
+// Every hold on the dataset in ONE request. Asking per snapshot turned a
+// 15s refresh of a dataset with hundreds of snapshots into hundreds of
+// `zfs holds` spawns — through the SSH control channel for a peer.
+// A tag absent from the map has no holds; the response covers the whole
+// dataset, so absence is an answer rather than a gap.
+const holdsResult = useQuery(() =>
+  datasetHoldsQuery({ scope: props.scope, dataset: dataset.value }),
+)
+const holds = computed<Record<string, SnapshotHold[]>>(() => holdsResult.data.value ?? {})
+function holdsFor(tag: string): SnapshotHold[] {
+  return holds.value[tag] ?? []
 }
-
-// Eager holds: the lock must be visible BEFORE a destroy attempt.
-async function loadAllHolds() {
-  const ds = dataset.value
-  const rows = snapshots.value
-  const next = new Map<string, SnapshotHold[]>()
-  await Promise.all(
-    rows.map(async (row) => {
-      const r = await props.source.listHolds(ds, row.tag)
-      if (!r.error) next.set(row.tag, r.data ?? [])
-    }),
-  )
-  if (dataset.value === ds) holds.value = next
-}
-
-const pollHandle = setInterval(() => {
-  if (dataset.value && !snapsLoading.value) void refreshSnapshots()
-}, 15_000)
-onUnmounted(() => clearInterval(pollHandle))
 
 // Sum of listed snapshot `used` — the quick "who eats space" readout
 // next to the authoritative usedbysnapshots property.
 const snapshotsUsedSum = computed(() => snapshots.value.reduce((acc, s) => acc + (s.used ?? 0), 0))
+
+function invalidateDataset() {
+  const ds = dataset.value
+  return Promise.all([
+    queryCache.invalidateQueries({ key: ['snapshots', props.scope, ds] }),
+    queryCache.invalidateQueries({ key: ['dataset-holds', props.scope, ds] }),
+    // `usedbysnapshots` on the parent moves with every create/destroy.
+    queryCache.invalidateQueries({ key: ['datasets', props.scope] }),
+  ])
+}
+
+function refreshSnapshots() {
+  void invalidateDataset()
+}
 
 // ── Detail slideover ────────────────────────────────────────────
 const detailOpen = ref(false)
@@ -182,41 +202,99 @@ function openDetail(s: SnapshotRow) {
   detailOpen.value = true
 }
 
-const detailHolds = computed(() =>
-  detailSnap.value ? (holds.value.get(detailSnap.value.tag) ?? []) : [],
-)
+const detailHolds = computed(() => (detailSnap.value ? holdsFor(detailSnap.value.tag) : []))
+
+// ── Mutations ───────────────────────────────────────────────────
+const holdMutation = useMutation({
+  mutation: ({ tag, holdTag }: { tag: string; holdTag: string }) =>
+    createHold({
+      path: { name: dataset.value, snapshot: tag },
+      body: { tag: holdTag },
+      baseUrl: baseUrl(),
+    }).then(unwrap),
+  onSuccess: (_d, { tag }) => toaster.success(onHost(`Held ${dataset.value}@${tag}`)),
+  onError: (e, { tag }) => toaster.failure(onHost(`Holding ${dataset.value}@${tag} failed`), e),
+  onSettled: invalidateDataset,
+})
+
+const releaseMutation = useMutation({
+  mutation: ({ tag, holdTag }: { tag: string; holdTag: string }) =>
+    releaseHold({
+      path: { name: dataset.value, snapshot: tag, tag: holdTag },
+      baseUrl: baseUrl(),
+    }).then(unwrap),
+  onSuccess: (_d, { holdTag }) => toaster.success(onHost(`Released ${holdTag}`)),
+  onError: (e, { holdTag }) => toaster.failure(onHost(`Releasing ${holdTag} failed`), e),
+  onSettled: invalidateDataset,
+})
+
+const createMutation = useMutation({
+  mutation: ({ name, recursive }: { name: string; recursive: boolean }) =>
+    createSnapshot({
+      path: { name: dataset.value },
+      body: { snapshot_name: name, recursive },
+      baseUrl: baseUrl(),
+    }).then(unwrap),
+  onSuccess: (_d, { name }) => toaster.success(onHost(`Created ${dataset.value}@${name}`)),
+  onError: (e, { name }) => {
+    if (apiErrorCode(e) === 'snapshot_exists') {
+      toaster.report({
+        title: `${dataset.value}@${name} already exists`,
+        description: 'Pick another name, or destroy the existing snapshot first.',
+        tone: 'warning',
+      })
+      return
+    }
+    toaster.failure(onHost(`Creating ${dataset.value}@${name} failed`), e)
+  },
+  onSettled: invalidateDataset,
+})
+
+const destroyMutation = useMutation({
+  mutation: ({ tag }: { tag: string; silent?: boolean }) =>
+    destroySnapshot({
+      path: { name: dataset.value, snapshot: tag },
+      baseUrl: baseUrl(),
+    }).then(unwrap),
+  onSuccess: (_d, { tag, silent }) => {
+    if (!silent) toaster.success(onHost(`Destroyed ${dataset.value}@${tag}`))
+  },
+  onError: (e, { tag }) => {
+    // Surface the lock itself rather than the daemon's raw error: the
+    // holds are already loaded, so name the tags that block the destroy.
+    if (apiErrorCode(e) === 'snapshot_held') {
+      const tags = holdsFor(tag).map((x) => x.tag)
+      toaster.failure(`Cannot destroy ${dataset.value}@${tag}`, {
+        message: `Held by ${tags.length || 'unknown'} tag(s)${
+          tags.length ? ` — ${tags.join(', ')}` : ''
+        }. Release them before destroying.`,
+      })
+      return
+    }
+    toaster.failure(onHost(`Destroying ${dataset.value}@${tag} failed`), e)
+  },
+  onSettled: invalidateDataset,
+})
 
 async function addHold() {
   const s = detailSnap.value
   const tag = newHoldTag.value.trim()
-  if (!s || !tag || !props.source.holdCreate) return
-  const ok = await mutate(onHost(`Held ${dataset.value}@${s.tag}`), () =>
-    props.source.holdCreate!(dataset.value, s.tag, tag),
-  )
-  if (ok) {
-    newHoldTag.value = ''
-    await loadAllHolds()
-  }
+  if (!s || !tag) return
+  await holdMutation.mutateAsync({ tag: s.tag, holdTag: tag })
+  newHoldTag.value = ''
 }
 
-async function releaseHoldTag(holdTag: string) {
+function releaseHoldTag(holdTag: string) {
   const s = detailSnap.value
-  if (!s || !props.source.holdRelease) return
-  const ok = await mutate(onHost(`Released ${holdTag}`), () =>
-    props.source.holdRelease!(dataset.value, s.tag, holdTag),
-  )
-  if (ok) await loadAllHolds()
+  if (!s) return
+  releaseMutation.mutate({ tag: s.tag, holdTag })
 }
 
 // ── Create / destroy ────────────────────────────────────────────
 const createOpen = ref(false)
 
-async function confirmCreate(payload: { name: string; recursive: boolean }) {
-  if (!props.source.create) return
-  await mutate(onHost(`Created ${dataset.value}@${payload.name}`), () =>
-    props.source.create!(dataset.value, payload.name, payload.recursive),
-  )
-  await refreshSnapshots()
+function confirmCreate(payload: { name: string; recursive: boolean }) {
+  createMutation.mutate(payload)
 }
 
 const destroyOpen = ref(false)
@@ -227,11 +305,8 @@ function askDestroy(tag: string) {
   destroyOpen.value = true
 }
 
-async function confirmDestroy(full: string) {
-  const at = full.indexOf('@')
-  const tag = at >= 0 ? full.slice(at + 1) : full
-  await mutate(onHost(`Destroyed ${full}`), () => props.source.destroy(dataset.value, tag))
-  await refreshSnapshots()
+function confirmDestroy(full: string) {
+  destroyMutation.mutate({ tag: tagOf(full) })
 }
 
 const bulkOpen = ref(false)
@@ -243,15 +318,30 @@ const selectedTags = computed(() =>
 
 async function confirmBulkDestroy() {
   bulkOpen.value = false
-  for (const tag of selectedTags.value) {
-    await mutate(
-      onHost(`Destroyed ${dataset.value}@${tag}`),
-      () => props.source.destroy(dataset.value, tag),
-      { silentSuccess: true },
-    )
+  const tags = selectedTags.value
+  let failed = 0
+  for (const tag of tags) {
+    try {
+      await destroyMutation.mutateAsync({ tag, silent: true })
+    } catch {
+      failed += 1
+    }
   }
-  await refreshSnapshots()
+  rowSelection.value = {}
+  // One summary instead of N toasts; failures already toasted their own
+  // reason, so this only has to report the count.
+  if (failed === 0) {
+    toaster.success(onHost(`Destroyed ${tags.length} snapshots`))
+  } else {
+    toaster.report({
+      title: onHost(`Destroyed ${tags.length - failed} of ${tags.length} snapshots`),
+      description: `${failed} could not be destroyed.`,
+      tone: 'warning',
+    })
+  }
 }
+
+const bulkBusy = computed(() => destroyMutation.isLoading.value)
 
 // ── Table ───────────────────────────────────────────────────────
 const UBadge = resolveComponent('UBadge')
@@ -328,8 +418,8 @@ const columns = computed<TableColumn<SnapshotRow>[]>(() => [
     header: 'Holds',
     enableSorting: false,
     cell: ({ row }) => {
-      const hs = holds.value.get(row.original.tag)
-      if (!hs || hs.length === 0) return ''
+      const hs = holdsFor(row.original.tag)
+      if (hs.length === 0) return ''
       return h(
         'div',
         { class: 'flex gap-1 flex-wrap' },
@@ -443,8 +533,8 @@ const columns = computed<TableColumn<SnapshotRow>[]>(() => [
           icon="i-lucide-database"
           title="Pick a dataset"
           :description="
-            source.hostLabel
-              ? `The tree shows what ${source.hostLabel}'s ACL allows this host to see.`
+            hostLabel
+              ? `The tree shows what ${hostLabel}'s ACL allows this host to see.`
               : 'Select a dataset on the left to browse its snapshots.'
           "
         />
@@ -472,13 +562,7 @@ const columns = computed<TableColumn<SnapshotRow>[]>(() => [
               >
                 Destroy {{ selectedTags.length }} selected
               </UButton>
-              <UButton
-                v-if="source.create"
-                size="xs"
-                variant="soft"
-                icon="i-lucide-camera"
-                @click="createOpen = true"
-              >
+              <UButton size="xs" variant="soft" icon="i-lucide-camera" @click="createOpen = true">
                 Create snapshot
               </UButton>
               <UButton
@@ -506,12 +590,7 @@ const columns = computed<TableColumn<SnapshotRow>[]>(() => [
       </div>
     </div>
 
-    <CreateSnapshotModal
-      v-if="source.create"
-      v-model:open="createOpen"
-      :dataset="dataset"
-      @confirm="confirmCreate"
-    />
+    <CreateSnapshotModal v-model:open="createOpen" :dataset="dataset" @confirm="confirmCreate" />
     <DestroySnapshotModal
       v-model:open="destroyOpen"
       :snapshot-name="destroyTarget"
@@ -522,13 +601,13 @@ const columns = computed<TableColumn<SnapshotRow>[]>(() => [
     <UModal
       v-model:open="bulkOpen"
       title="Destroy selected snapshots?"
-      :description="`${selectedTags.length} snapshots will be permanently removed${source.hostLabel ? ` on ${source.hostLabel}` : ''}.`"
+      :description="`${selectedTags.length} snapshots will be permanently removed${hostLabel ? ` on ${hostLabel}` : ''}.`"
     >
       <template #body>
         <ul class="font-mono text-xs space-y-1 max-h-64 overflow-y-auto">
           <li v-for="t in selectedTags" :key="t" class="flex items-center gap-2">
             <UIcon
-              v-if="(holds.get(t)?.length ?? 0) > 0"
+              v-if="holdsFor(t).length > 0"
               name="i-lucide-lock"
               class="text-warning shrink-0"
             />
@@ -536,7 +615,7 @@ const columns = computed<TableColumn<SnapshotRow>[]>(() => [
           </li>
         </ul>
         <p
-          v-if="selectedTags.some((t) => (holds.get(t)?.length ?? 0) > 0)"
+          v-if="selectedTags.some((t) => holdsFor(t).length > 0)"
           class="text-warning text-xs mt-3"
         >
           Locked snapshots are held and will fail to destroy until their holds are released.
@@ -572,9 +651,9 @@ const columns = computed<TableColumn<SnapshotRow>[]>(() => [
               <div class="microlabel mb-1">used</div>
               <span class="font-mono">{{ formatBytes(detailSnap.used) }}</span>
             </div>
-            <div v-if="detailSnap.guid" class="col-span-2">
+            <div v-if="detailSnap.properties?.guid" class="col-span-2">
               <div class="microlabel mb-1">guid</div>
-              <code class="font-mono text-xs">{{ detailSnap.guid }}</code>
+              <code class="font-mono text-xs">{{ detailSnap.properties.guid }}</code>
             </div>
           </div>
 
@@ -596,7 +675,6 @@ const columns = computed<TableColumn<SnapshotRow>[]>(() => [
                   {{ new Date(hold.timestamp * 1000).toLocaleString() }}
                 </span>
                 <UButton
-                  v-if="source.holdRelease"
                   size="xs"
                   color="warning"
                   variant="ghost"
@@ -607,7 +685,7 @@ const columns = computed<TableColumn<SnapshotRow>[]>(() => [
                 </UButton>
               </div>
             </div>
-            <div v-if="source.holdCreate" class="flex gap-2 mt-2">
+            <div class="flex gap-2 mt-2">
               <UInput
                 v-model="newHoldTag"
                 size="xs"

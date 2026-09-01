@@ -1,30 +1,14 @@
 <script setup lang="ts">
 import type { JobStatus, TargetStatus } from '../client'
+import { isTransferring } from '../utils/actions'
+import { formatAge, formatDuration } from '../utils/format'
 import TransferSlot from './TransferSlot.vue'
 
-defineProps<{
+const props = defineProps<{
   job: JobStatus
-  onCancel?: (name: string) => void
-  onPause?: (name: string) => void
-  onResume?: (name: string) => void
   onPushTo?: (name: string, peer: string) => void
+  isPushing?: (name: string, peer: string) => boolean
 }>()
-
-function age(unixSec?: number | null): string {
-  if (!unixSec) return 'never'
-  const s = Math.max(0, Math.floor(Date.now() / 1000) - unixSec)
-  if (s < 90) return `${s}s ago`
-  if (s < 5400) return `${Math.round(s / 60)}m ago`
-  if (s < 129600) return `${Math.round(s / 3600)}h ago`
-  return `${Math.round(s / 86400)}d ago`
-}
-
-function fmtIn(s: number): string {
-  if (s < 90) return `${Math.max(1, Math.round(s))}s`
-  if (s < 5400) return `${Math.round(s / 60)}m`
-  if (s < 129600) return `${Math.round(s / 3600)}h`
-  return `${Math.round(s / 86400)}d`
-}
 
 function friendlyFailure(message?: string | null): string {
   if (!message) return 'No details were reported'
@@ -37,65 +21,85 @@ function targetOutcome(tg: TargetStatus): string | null {
   return tg.last_outcome ?? (tg.last_error ? 'error' : null)
 }
 
-function targetIsRetrying(job: JobStatus, tg: TargetStatus): boolean {
-  return (job.transfers ?? []).some((transfer) => transfer.peer === tg.peer)
-}
-
-function targetTone(job: JobStatus, tg: TargetStatus): string {
-  if (targetIsRetrying(job, tg) && targetOutcome(tg) === 'error') return 'text-info'
+function targetTone(tg: TargetStatus): string {
+  if (isTransferring(props.job, tg) && targetOutcome(tg) === 'error') return 'text-info'
   if (targetOutcome(tg) === 'error') return 'text-error'
-  if (targetOutcome(tg) === 'cancelled') return 'text-muted'
   return 'text-muted'
 }
 
-function canCancel(job: JobStatus): boolean {
-  if (!job.running) return false
-  const transfers = job.transfers ?? []
-  if (transfers.length === 0) return true
-  return transfers.some(
-    (t) => !['finalizing', 'committing', 'cancelling'].includes(t.phase ?? 'sending'),
-  )
+interface Badge {
+  label: string
+  color: 'info' | 'neutral' | 'success'
+  title?: string
 }
 
-/** Effective replication mode for the badge. The config-level policy
- * alone reads as a contradiction when the active route is manual-only
- * ("auto" badge next to "route is manual-only") — show what will
- * actually happen instead. */
-function modeBadge(tg: { mode: string; connected: boolean; route_auto?: boolean }): {
-  label: string
-  color: 'info' | 'neutral'
-  title?: string
-} {
+/**
+ * What will happen to this target, in one word. Precedence matters: a
+ * live transfer and a queued request are facts about right now, while
+ * the mode/route pair only describes the schedule. Showing "auto paused"
+ * next to a running progress bar — which is what this card used to do —
+ * is technically true and completely unreadable.
+ */
+function modeBadge(tg: TargetStatus): Badge {
+  if (isTransferring(props.job, tg)) {
+    return { label: 'sending', color: 'success', title: 'Replicating to this peer right now.' }
+  }
+  if (tg.manual_queued) {
+    return {
+      label: 'queued',
+      color: 'info',
+      title: 'A manual push is queued and starts on the next cycle.',
+    }
+  }
   if (tg.mode !== 'auto') return { label: 'manual', color: 'neutral' }
-  if (tg.connected && !tg.route_auto)
+  if (tg.connected && !tg.route_auto) {
     return {
       label: 'auto paused',
       color: 'neutral',
       title: 'Scheduled sync is suspended while the active route is manual-only.',
     }
+  }
   return { label: 'auto', color: 'info' }
 }
 
-/** One human line per target: last sync + (for auto) when the next
- * automatic sync becomes due. */
-function targetLine(job: JobStatus, tg: TargetStatus): string {
+/** One human line per target: last sync + when the next one is due. */
+function targetLine(tg: TargetStatus): string {
   if (targetOutcome(tg) === 'error') {
-    const previous = `previous attempt failed ${age(tg.last_attempt)}`
+    const previous = `previous attempt failed ${formatAge(tg.last_attempt)}`
     const details = friendlyFailure(tg.last_message ?? tg.last_error)
-    return targetIsRetrying(job, tg)
+    return isTransferring(props.job, tg)
       ? `Retrying now · ${previous}: ${details}`
-      : `Failed ${age(tg.last_attempt)} · ${details}`
+      : `Failed ${formatAge(tg.last_attempt)} · ${details}`
   }
   if (targetOutcome(tg) === 'cancelled') {
-    const previous = tg.last_success ? ` · last sync ${age(tg.last_success)}` : ''
-    return `Cancelled by operator ${age(tg.last_attempt)}${previous}`
+    const previous = tg.last_success ? ` · last sync ${formatAge(tg.last_success)}` : ''
+    return `Cancelled by operator ${formatAge(tg.last_attempt)}${previous}`
   }
-  const synced = tg.last_success ? `synced ${age(tg.last_success)}` : 'never synced'
+  const synced = tg.last_success ? `synced ${formatAge(tg.last_success)}` : 'never synced'
+  if (tg.manual_queued) return `${synced} · manual push queued`
   if (tg.mode !== 'auto') return synced
   if (tg.connected && !tg.route_auto) return `${synced} · route is manual-only`
   if (!tg.auto_interval_secs || !tg.last_success) return `${synced} · auto: every cycle`
   const due = tg.last_success + tg.auto_interval_secs - Math.floor(Date.now() / 1000)
-  return due <= 0 ? `${synced} · auto: due now` : `${synced} · next auto in ~${fmtIn(due)}`
+  return due <= 0 ? `${synced} · auto: due now` : `${synced} · next auto in ~${formatDuration(due)}`
+}
+
+/** Why the send button is unavailable, or null when it is usable. */
+function sendBlockedReason(tg: TargetStatus): string | null {
+  if (!tg.connected) return 'Peer is unreachable'
+  if (isTransferring(props.job, tg)) return `Already replicating to ${tg.peer}`
+  if (tg.manual_queued) return 'A manual push to this peer is already queued'
+  return null
+}
+
+/** Detail line worth repeating per target, beyond the card's summary. */
+function showDetail(tg: TargetStatus): boolean {
+  return (
+    (props.job.targets?.length ?? 0) > 1 ||
+    (targetOutcome(tg) != null && targetOutcome(tg) !== 'ok') ||
+    tg.manual_queued === true ||
+    (tg.connected && !tg.route_auto)
+  )
 }
 </script>
 
@@ -139,63 +143,34 @@ function targetLine(job: JobStatus, tg: TargetStatus): string {
           >
             {{ modeBadge(tg).label }}
           </UBadge>
-          <UButton
-            size="xs"
-            variant="soft"
-            icon="i-lucide-send"
+          <UTooltip
+            :text="sendBlockedReason(tg) ?? `Replicate to ${tg.peer} now`"
             class="shrink-0 ms-auto"
-            :disabled="!tg.connected"
-            @click="onPushTo?.(job.name, tg.peer)"
-            >Send now</UButton
           >
+            <UButton
+              size="xs"
+              variant="soft"
+              :icon="tg.manual_queued ? 'i-lucide-clock' : 'i-lucide-send'"
+              :loading="isPushing?.(job.name, tg.peer)"
+              :disabled="sendBlockedReason(tg) != null || isPushing?.(job.name, tg.peer)"
+              @click="onPushTo?.(job.name, tg.peer)"
+            >
+              {{ tg.manual_queued ? 'Queued' : 'Send now' }}
+            </UButton>
+          </UTooltip>
         </div>
         <!-- For single-target jobs the card-level Last/Next sync rows
              already say this; repeat per-target only when there is more
-             than one target or something is wrong. -->
+             than one target or something needs explaining. -->
         <div
-          v-if="
-            (job.targets?.length ?? 0) > 1 ||
-            (targetOutcome(tg) != null && targetOutcome(tg) !== 'ok') ||
-            (tg.connected && !tg.route_auto)
-          "
+          v-if="showDetail(tg)"
           class="text-xs ml-4 truncate"
-          :class="targetTone(job, tg)"
-          :title="targetLine(job, tg)"
+          :class="targetTone(tg)"
+          :title="targetLine(tg)"
         >
-          {{ targetLine(job, tg) }}
+          {{ targetLine(tg) }}
         </div>
       </div>
-    </div>
-
-    <!-- Controls -->
-    <div class="flex gap-2">
-      <UButton
-        v-if="job.running && !job.paused"
-        size="xs"
-        color="warning"
-        variant="soft"
-        icon="i-lucide-circle-pause"
-        @click="onPause?.(job.name)"
-        >Pause</UButton
-      >
-      <UButton
-        v-if="job.paused"
-        size="xs"
-        color="success"
-        variant="soft"
-        icon="i-lucide-circle-play"
-        @click="onResume?.(job.name)"
-        >Resume</UButton
-      >
-      <UButton
-        v-if="canCancel(job)"
-        size="xs"
-        color="error"
-        variant="soft"
-        icon="i-lucide-circle-x"
-        @click="onCancel?.(job.name)"
-        >Stop transfer</UButton
-      >
     </div>
   </div>
 </template>

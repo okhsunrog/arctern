@@ -4,6 +4,7 @@
 // reached a peer, and when it will next do so — from TargetStatus.
 
 import type { JobStatus, TargetStatus } from '../client'
+import { formatDuration } from './format'
 
 export interface NextSync {
   kind: 'due' | 'at' | 'blocked' | 'manual'
@@ -40,30 +41,28 @@ export function nextSync(job: JobStatus): NextSync {
     }
   }
   if (!best) return { kind: 'manual' }
-  if (bestAt > now) return { kind: 'at', at: bestAt }
-  // Due — will it actually run?
-  if (best.connected && best.route_auto) return { kind: 'due' }
+  // A manual-only active route bars scheduled replication outright, so it
+  // is reported before the clock: counting down to a sync that the route
+  // will refuse anyway ("next sync in ~1h") is worse than saying why.
+  // Unreachability is treated as transient by contrast — the peer may
+  // well be back before the target comes due — so it only counts once
+  // the sync is actually owed.
   if (best.connected && !best.route_auto) {
     return {
       kind: 'blocked',
       reason: best.route ? `manual-only route (${best.route}) active` : 'manual-only route active',
     }
   }
+  if (bestAt > now) return { kind: 'at', at: bestAt }
+  if (best.connected) return { kind: 'due' }
   return { kind: 'blocked', reason: `${best.peer} unreachable` }
-}
-
-function fmtIn(s: number): string {
-  if (s < 90) return `${Math.max(1, Math.round(s))}s`
-  if (s < 5400) return `${Math.round(s / 60)}m`
-  if (s < 129600) return `${Math.round(s / 3600)}h`
-  return `${Math.round(s / 86400)}d`
 }
 
 export function formatLastSync(job: JobStatus): string {
   const ts = lastSync(job)
   if (ts == null) return 'never'
   const s = Math.max(0, Math.floor(Date.now() / 1000) - ts)
-  return `${fmtIn(s)} ago`
+  return `${formatDuration(s)} ago`
 }
 
 export function formatNextSync(job: JobStatus): string {
@@ -72,7 +71,7 @@ export function formatNextSync(job: JobStatus): string {
     case 'due':
       return 'due now'
     case 'at':
-      return `in ~${fmtIn((n.at ?? 0) - Math.floor(Date.now() / 1000))}`
+      return `in ~${formatDuration((n.at ?? 0) - Math.floor(Date.now() / 1000))}`
     case 'blocked':
       return n.reason ?? 'blocked'
     case 'manual':

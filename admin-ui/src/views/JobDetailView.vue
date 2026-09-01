@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, resolveComponent } from 'vue'
+import { computed, defineAsyncComponent, h, resolveComponent } from 'vue'
 import { useRoute } from 'vue-router'
 import type { TableColumn } from '@nuxt/ui'
 import { useHost } from '../composables/useHost'
@@ -8,14 +8,20 @@ import { useJobRuns } from '../composables/useJobRuns'
 import { formatBytes, formatTimestamp } from '../utils/format'
 import { formatLastSync, formatNextSync } from '../utils/pushTimes'
 import { jobStatus, runStatus } from '../utils/status'
-import RunsCharts from '../components/RunsCharts.vue'
+import JobActions from '../components/JobActions.vue'
 import TransferPanel from '../components/TransferPanel.vue'
 import type { JobRun } from '../client'
+
+// chart.js is ~200kB and this view is a static router import, so a plain
+// import dragged the whole charting stack into the entry chunk — loaded
+// on every page including the login screen. The charts only render once
+// runs exist, so they load then too.
+const RunsCharts = defineAsyncComponent(() => import('../components/RunsCharts.vue'))
 
 const route = useRoute()
 const name = computed(() => String(route.params.name))
 
-const { host, baseUrl, prefix } = useHost()
+const { host, scope, prefix } = useHost()
 const {
   jobs,
   error: jobsError,
@@ -25,10 +31,15 @@ const {
   pause,
   resume,
   pushTo,
-} = useJobs(baseUrl)
+  isWaking,
+  isCancelling,
+  isPausing,
+  isResuming,
+  isPushing,
+} = useJobs(scope)
 const job = computed(() => jobs.value.find((j) => j.name === name.value))
 
-const { runs, error: runsError, loading: runsLoading } = useJobRuns(name, 10_000, 100, baseUrl)
+const { runs, error: runsError, loading: runsLoading } = useJobRuns(name, scope)
 
 const UBadge = resolveComponent('UBadge')
 
@@ -91,9 +102,19 @@ const tableColumns = computed<TableColumn<JobRun>[]>(() => [
           >
             {{ jobStatus(job).label }}
           </UBadge>
-          <UButton v-if="job" icon="i-lucide-alarm-clock" size="sm" @click="wake(job.name)">
-            Wake up
-          </UButton>
+          <JobActions
+            v-if="job"
+            :job="job"
+            variant="label"
+            :on-wake="wake"
+            :on-cancel="cancel"
+            :on-pause="pause"
+            :on-resume="resume"
+            :is-waking="isWaking"
+            :is-cancelling="isCancelling"
+            :is-pausing="isPausing"
+            :is-resuming="isResuming"
+          />
         </template>
       </UDashboardNavbar>
     </template>
@@ -137,13 +158,7 @@ const tableColumns = computed<TableColumn<JobRun>[]>(() => [
               </dl>
             </div>
             <div v-if="job.transfers?.length || job.targets?.length || job.paused" class="mt-4">
-              <TransferPanel
-                :job="job"
-                :on-cancel="cancel"
-                :on-pause="pause"
-                :on-resume="resume"
-                :on-push-to="pushTo"
-              />
+              <TransferPanel :job="job" :on-push-to="pushTo" :is-pushing="isPushing" />
             </div>
           </UCard>
 

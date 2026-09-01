@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { TransferInfo } from '../client'
-import { formatBytes } from '../utils/format'
+import { formatBytes, formatDuration } from '../utils/format'
+import { useNowSeconds } from '../composables/useNow'
 
 const props = defineProps<{
   transfer: TransferInfo
@@ -15,9 +16,7 @@ const props = defineProps<{
 // deltas between live snapshots.
 const lastSample = ref<{ bytes: number; at: number } | null>(null)
 const rate = ref<number | null>(null)
-const now = ref(Math.floor(Date.now() / 1000))
-const clock = setInterval(() => (now.value = Math.floor(Date.now() / 1000)), 1000)
-onUnmounted(() => clearInterval(clock))
+const now = useNowSeconds()
 
 watch(
   () => props.transfer.bytes_sent,
@@ -50,18 +49,12 @@ const pct = computed(() => {
 const eta = computed(() => {
   const t = props.transfer
   if (phase.value !== 'sending' || !t.total_bytes || !rate.value || rate.value < 1) return null
-  const left = (t.total_bytes - t.bytes_sent) / rate.value
-  if (left < 90) return `${Math.round(left)}s`
-  if (left < 5400) return `${Math.round(left / 60)}m`
-  return `${(left / 3600).toFixed(1)}h`
+  return formatDuration((t.total_bytes - t.bytes_sent) / rate.value)
 })
 const elapsed = computed(() => {
   const t = props.transfer
   if (!t.started_at) return null
-  const s = Math.max(0, now.value - t.started_at)
-  if (s < 90) return `${Math.max(1, Math.round(s))}s`
-  if (s < 5400) return `${Math.round(s / 60)}m`
-  return `${Math.round(s / 3600)}h`
+  return formatDuration(now.value - t.started_at)
 })
 
 const phase = computed(() => props.transfer.phase || 'sending')

@@ -1,4 +1,5 @@
-import { onUnmounted, ref, watch, type Ref } from 'vue'
+import { computed, onScopeDispose, toValue, watch, type MaybeRefOrGetter } from 'vue'
+import { useMutation, useQuery, useQueryCache } from '@pinia/colada'
 import {
   cancel as cancelJob,
   pause as pauseJob,
@@ -7,84 +8,153 @@ import {
   wakeup,
 } from '../client'
 import type { JobStatus } from '../client'
-import { useMutation } from './useMutation'
-import { createReconnectingEventSource } from './reconnectingEventSource'
+import { baseUrlFor } from './useHost'
+import { jobsQuery } from '../queries'
+import { jobActionKey, useJobActions } from '../stores/jobActions'
+import { useJobsStream } from '../stores/jobsStream'
+import { useToaster } from './useToaster'
+import { pushOutcome, wakeOutcome } from '../utils/actions'
+import { unwrap } from '../utils/errors'
 
-export function jobsStreamPath(baseUrl: string): string {
-  const peer = /^\/api\/v1\/peers\/([^/]+)\/proxy\/?$/.exec(baseUrl)
-  return peer ? `/api/v1/peers/${peer[1]}/jobs/stream` : '/api/v1/jobs/stream'
-}
+/**
+ * Live job state for one host scope ('' = this daemon, otherwise a peer
+ * name). The SSE stream owns the data and writes it into the query
+ * cache, so calling this from the sidebar and from a view costs one
+ * connection, not two.
+ */
+export function useJobs(scope: MaybeRefOrGetter<string> = '') {
+  const stream = useJobsStream()
+  const queryCache = useQueryCache()
+  const toaster = useToaster()
 
-export function useJobs(baseUrl: string | Ref<string> = '') {
-  const jobs = ref<JobStatus[]>([])
-  const error = ref<string | null>(null)
-  const warning = ref<string | null>(null)
-  const loading = ref(true)
-  const { mutate } = useMutation()
+  // One subscription per consumer, moved with the scope and released
+  // with the component. Subscribing writes to the store, so it belongs
+  // in a watcher rather than inside the query's options getter — that
+  // getter runs during dependency tracking, where a store mutation can
+  // re-trigger the very effect that caused it.
+  let release: (() => void) | null = null
+  watch(
+    () => toValue(scope),
+    (next) => {
+      release?.()
+      release = stream.subscribe(next)
+    },
+    { immediate: true },
+  )
+  onScopeDispose(() => release?.())
 
-  function currentBaseUrl(): string {
-    return typeof baseUrl === 'object' ? baseUrl.value : baseUrl
+  const query = useQuery(() => jobsQuery(toValue(scope)))
+
+  const jobs = computed<JobStatus[]>(() => query.data.value ?? [])
+  const loading = computed(() => query.isPending.value && jobs.value.length === 0)
+  const error = computed(() => (query.error.value ? query.error.value.message : null))
+  const warning = computed(() =>
+    stream.status[toValue(scope)] === 'down' ? 'Live job updates interrupted. Reconnecting…' : null,
+  )
+  /** True while the stream is connected — drives the "live" chrome. */
+  const live = computed(() => stream.status[toValue(scope)] === 'live')
+
+  function jobNamed(name: string): JobStatus | undefined {
+    return jobs.value.find((j) => j.name === name)
   }
 
-  const connection = createReconnectingEventSource({
-    url: () => jobsStreamPath(currentBaseUrl()),
-    subscribe(stream) {
-      loading.value = jobs.value.length === 0
-      stream.addEventListener('jobs', (event) => {
-        try {
-          jobs.value = JSON.parse(event.data) as JobStatus[]
-          error.value = null
-          warning.value = null
-          loading.value = false
-        } catch {
-          error.value = 'invalid job status update'
-        }
-      })
-    },
-    onOpen() {
-      warning.value = null
-    },
-    onDisconnect() {
-      warning.value = 'Live job updates interrupted. Reconnecting…'
-    },
+  const baseUrl = () => baseUrlFor(toValue(scope) || null)
+  const refresh = () => queryCache.invalidateQueries({ key: ['jobs', toValue(scope)] })
+
+  // In-flight actions live in a shared store, so an action triggered from
+  // the command palette greys out the matching button on the card behind
+  // it. A mutation's own `variables` ref would not do: it holds only the
+  // LAST call, so two quick clicks on different jobs would clear the
+  // first button while its request is still running — exactly the
+  // double-submit the busy state exists to prevent.
+  const actions = useJobActions()
+  const busy = (key: string) => actions.inFlight.has(key)
+
+  // Key builders are shared by the mutation hooks and the `isX` helpers,
+  // so the two cannot drift, and each is typed against its mutation's
+  // variables rather than compared as opaque JSON.
+  const wakeKey = (name: string) => jobActionKey('wake', toValue(scope), name)
+  const cancelKey = (name: string) => jobActionKey('cancel', toValue(scope), name)
+  const pauseKey = (name: string) => jobActionKey('pause', toValue(scope), name)
+  const resumeKey = (name: string) => jobActionKey('resume', toValue(scope), name)
+  const pushKey = (v: { name: string; peer: string }) =>
+    jobActionKey('push', toValue(scope), v.name, v.peer)
+
+  /** Mark the action in flight for its key, and re-read jobs when it ends. */
+  function tracking<TVars>(key: (vars: TVars) => string) {
+    return {
+      onMutate: (vars: TVars) => {
+        actions.inFlight.add(key(vars))
+      },
+      onSettled: (_data: unknown, _error: unknown, vars: TVars) => {
+        actions.inFlight.delete(key(vars))
+        void refresh()
+      },
+    }
+  }
+
+  const wakeMutation = useMutation({
+    mutation: (name: string) => wakeup({ path: { name }, baseUrl: baseUrl() }).then(unwrap),
+    onSuccess: (_data, name) => toaster.report(wakeOutcome(jobNamed(name), name)),
+    onError: (e, name) => toaster.failure(`Waking ${name} failed`, e),
+    ...tracking(wakeKey),
   })
 
-  if (typeof baseUrl === 'object') {
-    watch(baseUrl, connection.restart)
-  }
-  onUnmounted(() => connection.close())
+  const cancelMutation = useMutation({
+    mutation: (name: string) => cancelJob({ path: { name }, baseUrl: baseUrl() }).then(unwrap),
+    onSuccess: (_data, name) =>
+      toaster.report({
+        title: `Stopping ${name}`,
+        description: 'Waiting for the receiver to release the dataset safely.',
+        tone: 'success',
+      }),
+    onError: (e, name) => toaster.failure(`Stopping ${name} failed`, e),
+    ...tracking(cancelKey),
+  })
 
-  async function wake(name: string) {
-    await mutate(`Woke up ${name}`, () => wakeup({ path: { name }, baseUrl: currentBaseUrl() }))
-  }
+  const pauseMutation = useMutation({
+    mutation: (name: string) => pauseJob({ path: { name }, baseUrl: baseUrl() }).then(unwrap),
+    onSuccess: (_data, name) =>
+      toaster.report({
+        title: `Paused ${name}`,
+        description: 'The partial transfer is kept; resume continues from it.',
+        tone: 'success',
+      }),
+    onError: (e, name) => toaster.failure(`Pausing ${name} failed`, e),
+    ...tracking(pauseKey),
+  })
 
-  async function cancel(name: string) {
-    await mutate(
-      `Stopping ${name}`,
-      () => cancelJob({ path: { name }, baseUrl: currentBaseUrl() }),
-      {
-        successDescription: 'Waiting for the receiver to release the dataset safely.',
-      },
-    )
-  }
+  const resumeMutation = useMutation({
+    mutation: (name: string) => resumeJob({ path: { name }, baseUrl: baseUrl() }).then(unwrap),
+    onSuccess: (_data, name) => toaster.report({ title: `Resumed ${name}`, tone: 'success' }),
+    onError: (e, name) => toaster.failure(`Resuming ${name} failed`, e),
+    ...tracking(resumeKey),
+  })
 
-  async function pause(name: string) {
-    await mutate(`Paused ${name}`, () => pauseJob({ path: { name }, baseUrl: currentBaseUrl() }))
-  }
+  const pushMutation = useMutation({
+    mutation: ({ name, peer }: { name: string; peer: string }) =>
+      pushToPeer({ path: { name, peer }, baseUrl: baseUrl() }).then(unwrap),
+    onSuccess: (_data, { name, peer }) => toaster.report(pushOutcome(jobNamed(name), name, peer)),
+    onError: (e, { name, peer }) => toaster.failure(`Push from ${name} to ${peer} failed`, e),
+    ...tracking(pushKey),
+  })
 
-  async function resume(name: string) {
-    await mutate(`Resumed ${name}`, () => resumeJob({ path: { name }, baseUrl: currentBaseUrl() }))
+  return {
+    jobs,
+    error,
+    warning,
+    loading,
+    live,
+    refresh,
+    wake: (name: string) => wakeMutation.mutate(name),
+    cancel: (name: string) => cancelMutation.mutate(name),
+    pause: (name: string) => pauseMutation.mutate(name),
+    resume: (name: string) => resumeMutation.mutate(name),
+    pushTo: (name: string, peer: string) => pushMutation.mutate({ name, peer }),
+    isWaking: (name: string) => busy(wakeKey(name)),
+    isCancelling: (name: string) => busy(cancelKey(name)),
+    isPausing: (name: string) => busy(pauseKey(name)),
+    isResuming: (name: string) => busy(resumeKey(name)),
+    isPushing: (name: string, peer: string) => busy(pushKey({ name, peer })),
   }
-
-  async function pushTo(name: string, peer: string) {
-    await mutate(
-      `Queued push to ${peer}`,
-      () => pushToPeer({ path: { name, peer }, baseUrl: currentBaseUrl() }),
-      {
-        successDescription: `${name} will replicate to ${peer} within seconds.`,
-      },
-    )
-  }
-
-  return { jobs, error, warning, loading, wake, cancel, pause, resume, pushTo }
 }

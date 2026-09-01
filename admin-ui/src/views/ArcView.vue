@@ -16,7 +16,7 @@ import { Line } from 'vue-chartjs'
 import { useColorMode } from '@vueuse/core'
 import { areaGradient, baseOptions, chartColors, lineDataset } from '../utils/chartTheme'
 import { useHost } from '../composables/useHost'
-import { useArc } from '../composables/useArc'
+import { useArc, useArcHistory } from '../composables/useArc'
 import { formatBytes } from '../utils/format'
 import ArcGauge from '../components/ArcGauge.vue'
 
@@ -32,8 +32,9 @@ ChartJS.register(
 )
 
 const mode = useColorMode({ emitAuto: false })
-const { host, baseUrl } = useHost()
-const { arc, history, error, loading } = useArc(5000, true, 720, baseUrl.value)
+const { host, scope } = useHost()
+const { arc, error, loading } = useArc(scope)
+const { history } = useArcHistory(scope, 720)
 const title = computed(() => (host.value ? `${host.value} · ARC` : 'ARC'))
 
 // Reverse so the chart goes oldest → newest.

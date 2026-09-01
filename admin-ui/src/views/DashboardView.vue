@@ -12,14 +12,26 @@ import { peerStatus, poolStatus } from '../utils/status'
 import JobsGrid from '../components/JobsGrid.vue'
 import EventsLog from '../components/EventsLog.vue'
 
-const { host, baseUrl, prefix } = useHost()
-const { jobs, error, warning, loading, wake, cancel, pause, resume, pushTo } = useJobs(baseUrl)
-const { events, connected } = useEvents({
-  cap: 200,
-  peer: computed(() => host.value ?? undefined),
-})
-const { arc } = useArc(5000, false, 120, baseUrl.value)
-const { pools } = usePools(5000, baseUrl.value)
+const { host, scope, prefix } = useHost()
+const {
+  jobs,
+  error,
+  warning,
+  loading,
+  wake,
+  cancel,
+  pause,
+  resume,
+  pushTo,
+  isWaking,
+  isCancelling,
+  isPausing,
+  isResuming,
+  isPushing,
+} = useJobs(scope)
+const { events, connected } = useEvents(scope)
+const { arc } = useArc(scope)
+const { pools } = usePools(scope)
 // The peer tiles describe THIS host's outbound links; inside a peer's
 // console they would show the peer's own (usually empty) peer list.
 const { peers } = usePeers()
@@ -144,6 +156,11 @@ const jobsSummary = computed(() => {
             :on-pause="pause"
             :on-resume="resume"
             :on-push-to="pushTo"
+            :is-waking="isWaking"
+            :is-cancelling="isCancelling"
+            :is-pausing="isPausing"
+            :is-resuming="isResuming"
+            :is-pushing="isPushing"
           />
         </div>
 

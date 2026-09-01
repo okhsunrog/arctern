@@ -1,29 +1,19 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { getConfig } from '../client'
-import type { ConfigView as ConfigViewT } from '../client'
-import { apiErrorMessage } from '../composables/useMutation'
+import { computed, ref } from 'vue'
+import { useQuery } from '@pinia/colada'
 import { useHost } from '../composables/useHost'
+import { configQuery } from '../queries'
 
-const config = ref<ConfigViewT | null>(null)
-const error = ref<string | null>(null)
 const copied = ref(false)
 const raw = ref(false)
 
-const { host, baseUrl } = useHost()
+const { host, scope } = useHost()
 const title = computed(() => (host.value ? `${host.value} · Config` : 'Config'))
 
-async function refresh() {
-  const r = await getConfig({ baseUrl: baseUrl.value })
-  if (r.error) {
-    error.value = apiErrorMessage(r.error)
-  } else {
-    config.value = r.data ?? null
-    error.value = null
-  }
-}
-
-onMounted(refresh)
+const query = useQuery(() => configQuery(scope.value))
+const refresh = () => void query.refetch()
+const config = computed(() => query.data.value ?? null)
+const error = computed(() => query.error.value?.message ?? null)
 
 async function copy() {
   if (!config.value) return

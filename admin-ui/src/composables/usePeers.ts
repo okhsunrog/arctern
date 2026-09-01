@@ -1,30 +1,16 @@
-import { onUnmounted, ref } from 'vue'
-import { listPeers } from '../client'
-import type { PeerSummary } from '../client'
+import { computed } from 'vue'
+import { useQuery } from '@pinia/colada'
+import { peersQuery } from '../queries'
 
-export function usePeers(refreshMs = 5000) {
-  const peers = ref<PeerSummary[]>([])
-  const error = ref<string | null>(null)
-  const loading = ref(true)
-
-  async function refresh() {
-    const r = await listPeers()
-    if (r.error) {
-      const e: unknown = r.error
-      error.value =
-        e && typeof e === 'object' && 'message' in e && typeof e.message === 'string'
-          ? e.message
-          : JSON.stringify(e)
-    } else {
-      peers.value = r.data ?? []
-      error.value = null
-    }
-    loading.value = false
+// Peer links are always this daemon's own outbound connections: inside a
+// peer's console they would describe that peer's (usually empty) peer
+// list, which is why this query is deliberately not host-scoped.
+export function usePeers() {
+  const query = useQuery(() => peersQuery())
+  return {
+    peers: computed(() => query.data.value ?? []),
+    error: computed(() => query.error.value?.message ?? null),
+    loading: computed(() => query.isPending.value && !query.data.value),
+    refresh: () => void query.refetch(),
   }
-
-  void refresh()
-  const handle = setInterval(() => void refresh(), refreshMs)
-  onUnmounted(() => clearInterval(handle))
-
-  return { peers, error, loading, refresh }
 }

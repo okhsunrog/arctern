@@ -4,10 +4,8 @@ import { useHost } from '../composables/useHost'
 import { useEvents } from '../composables/useEvents'
 import EventsLog from '../components/EventsLog.vue'
 
-const { host } = useHost()
-const { events, connected, error, paused, togglePause, clear } = useEvents({
-  peer: computed(() => host.value ?? undefined),
-})
+const { host, scope } = useHost()
+const { events, connected, error, paused, togglePause, clear } = useEvents(scope)
 const title = computed(() => (host.value ? `${host.value} · Events` : 'Events'))
 
 const levelFilter = ref<string>('')

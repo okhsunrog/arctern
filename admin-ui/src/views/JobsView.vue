@@ -3,17 +3,30 @@ import { computed, h, resolveComponent } from 'vue'
 import type { TableColumn } from '@nuxt/ui'
 import { useHost } from '../composables/useHost'
 import IncomingTransfers from '../components/IncomingTransfers.vue'
+import JobActions from '../components/JobActions.vue'
 import { useJobs } from '../composables/useJobs'
 import { formatNextRun, formatRelative } from '../utils/format'
 import { formatLastSync, formatNextSync } from '../utils/pushTimes'
 import { jobFailureMessage, jobStatus } from '../utils/status'
 import type { JobStatus } from '../client'
 
-const { host, baseUrl, prefix } = useHost()
-const { jobs, error, warning, loading, wake, cancel, pause, resume } = useJobs(baseUrl)
+const { host, scope, prefix } = useHost()
+const {
+  jobs,
+  error,
+  warning,
+  loading,
+  wake,
+  cancel,
+  pause,
+  resume,
+  isWaking,
+  isCancelling,
+  isPausing,
+  isResuming,
+} = useJobs(scope)
 const title = computed(() => (host.value ? `${host.value} · Jobs` : 'Jobs'))
 
-const UButton = resolveComponent('UButton')
 const UBadge = resolveComponent('UBadge')
 const UTooltip = resolveComponent('UTooltip')
 
@@ -92,33 +105,23 @@ const columns = computed<TableColumn<JobStatus>[]>(() => [
   {
     id: 'actions',
     header: '',
-    cell: ({ row }) => {
-      const j = row.original
-      const btn = (
-        icon: string,
-        label: string,
-        onClick: () => void,
-        color: 'neutral' | 'warning' | 'success' | 'error' = 'neutral',
-      ) =>
-        h(UTooltip, { text: label }, () =>
-          h(UButton, { size: 'xs', variant: 'ghost', color, icon, 'aria-label': label, onClick }),
-        )
-      const actions = [btn('i-lucide-alarm-clock', 'Wake up now', () => void wake(j.name))]
-      if (j.running && !j.paused) {
-        actions.push(
-          btn('i-lucide-circle-pause', 'Pause (resumable)', () => void pause(j.name), 'warning'),
-        )
-      }
-      if (j.paused) {
-        actions.push(btn('i-lucide-circle-play', 'Resume', () => void resume(j.name), 'success'))
-      }
-      if (j.running) {
-        actions.push(
-          btn('i-lucide-circle-x', 'Cancel transfer', () => void cancel(j.name), 'error'),
-        )
-      }
-      return h('div', { class: 'flex justify-end gap-0.5' }, actions)
-    },
+    cell: ({ row }) =>
+      h(
+        'div',
+        { class: 'flex justify-end' },
+        h(JobActions, {
+          job: row.original,
+          variant: 'icon',
+          onWake: wake,
+          onCancel: cancel,
+          onPause: pause,
+          onResume: resume,
+          isWaking,
+          isCancelling,
+          isPausing,
+          isResuming,
+        }),
+      ),
   },
 ])
 </script>
@@ -138,7 +141,7 @@ const columns = computed<TableColumn<JobStatus>[]>(() => [
           :loading="loading && jobs.length === 0"
           class="rounded-md border border-default bg-default"
         />
-        <IncomingTransfers :base-url="baseUrl" />
+        <IncomingTransfers :scope="scope" />
       </div>
     </template>
   </UDashboardPanel>

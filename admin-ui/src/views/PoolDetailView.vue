@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { useHost } from '../composables/useHost'
 import { usePool } from '../composables/usePools'
@@ -7,17 +7,22 @@ import type { ScrubRequest } from '../client'
 import { parseZpoolSize } from '../utils/pool'
 import { poolStatus, scanStatus } from '../utils/status'
 import { formatRelative } from '../utils/format'
-import { useMutation } from '../composables/useMutation'
+import ConfirmModal from '../components/ConfirmModal.vue'
 import VdevTree from '../components/VdevTree.vue'
 
 const route = useRoute()
 const name = computed(() => String(route.params.name))
-const { host, baseUrl, prefix } = useHost()
-const { pool, error, scrub } = usePool(name, 3000, baseUrl)
-const { mutate } = useMutation()
+const { host, scope, prefix } = useHost()
+const { pool, error, scrub, isScrubbing } = usePool(name, scope)
 
-async function scrubAction(action: ScrubRequest['action']) {
-  await mutate(`Scrub ${action} on ${name.value}`, () => scrub(action))
+// Stopping discards the scan's progress: the next scrub restarts from
+// the beginning rather than resuming, so it asks first. Pause does not.
+const confirmStop = ref(false)
+function askStop() {
+  confirmStop.value = true
+}
+function scrubAction(action: ScrubRequest['action']) {
+  scrub(action)
 }
 
 // Top-level vdev capacity totals so the UI can show a real "X% used".
@@ -129,6 +134,7 @@ const scrubPct = computed(() => {
                     v-if="!scrubActive"
                     size="xs"
                     icon="i-lucide-play"
+                    :loading="isScrubbing('start')"
                     @click="scrubAction('start')"
                     >Start</UButton
                   >
@@ -138,6 +144,7 @@ const scrubPct = computed(() => {
                       size="xs"
                       icon="i-lucide-play"
                       color="success"
+                      :loading="isScrubbing('resume')"
                       @click="scrubAction('resume')"
                       >Resume</UButton
                     >
@@ -146,6 +153,7 @@ const scrubPct = computed(() => {
                       size="xs"
                       icon="i-lucide-pause"
                       variant="soft"
+                      :loading="isScrubbing('pause')"
                       @click="scrubAction('pause')"
                       >Pause</UButton
                     >
@@ -154,7 +162,8 @@ const scrubPct = computed(() => {
                       icon="i-lucide-square"
                       variant="soft"
                       color="error"
-                      @click="scrubAction('stop')"
+                      :loading="isScrubbing('stop')"
+                      @click="askStop"
                       >Stop</UButton
                     >
                   </template>
@@ -217,6 +226,16 @@ const scrubPct = computed(() => {
             <VdevTree :vdevs="pool.vdevs" />
           </UCard>
         </template>
+
+        <ConfirmModal
+          v-model:open="confirmStop"
+          title="Stop this scrub?"
+          description="The scan's progress is discarded — the next scrub starts over from the beginning rather than resuming."
+          :subject="name"
+          confirm-label="Stop scrub"
+          :loading="isScrubbing('stop')"
+          @confirm="scrubAction('stop')"
+        />
       </div>
     </template>
   </UDashboardPanel>

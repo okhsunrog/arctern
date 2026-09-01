@@ -14,7 +14,7 @@ import { useSystemInfo } from './composables/useSystemInfo'
 
 const router = useRouter()
 const { logout } = useAuth()
-const { host, prefix, baseUrl } = useHost()
+const { host, prefix, scope } = useHost()
 // Three-state theme: auto follows the browser/OS preference live;
 // explicit light/dark stick. emitAuto keeps 'auto' visible to us
 // instead of resolving it away (the DOM class still resolves).
@@ -32,11 +32,12 @@ const themeLabel = {
 } as const
 
 // Shell-level live state doubles as the command palette's data source and
-// the sidebar's health chips.
-const { jobs, wake, pushTo } = useJobs(baseUrl)
-const { peers } = usePeers(10_000)
-const { pools } = usePools(15_000, baseUrl)
-const { version } = useSystemInfo(baseUrl)
+// the sidebar's health chips. These share the views' cache entries and
+// the views' single SSE connection — reading the same key twice is free.
+const { jobs, wake, pushTo } = useJobs(scope)
+const { peers } = usePeers()
+const { pools } = usePools(scope)
+const { version } = useSystemInfo(scope)
 
 const failingJobs = computed(() => jobs.value.filter((j) => jobFailureMessage(j)).length)
 const runningJobs = computed(() => jobs.value.filter((j) => j.running).length)
@@ -140,8 +141,11 @@ const searchGroups = computed(() => [
         icon: 'i-lucide-alarm-clock',
         onSelect: () => void wake(j.name),
       },
+      // A peer whose manual push is already queued is not offered again:
+      // the daemon dedups the request anyway, so the entry would be a
+      // no-op that looks like an action.
       ...(j.targets ?? [])
-        .filter((t) => t.connected)
+        .filter((t) => t.connected && !t.manual_queued)
         .map((t) => ({
           label: `${j.name} — send now to ${t.peer}`,
           suffix: t.route ? `via ${t.route}` : undefined,
@@ -235,10 +239,13 @@ function toggleMode() {
 
     <UDashboardSearch :groups="searchGroups" placeholder="Jump to, wake, send, scrub…" />
 
-    <!-- Keyed by host: local and /h/:host render the SAME components,
-           and Vue would otherwise patch the existing instance in place —
-           leaving composables holding the previous host's baseUrl. A
-           scope switch is a context switch; remount is the contract. -->
+    <!-- Keyed by host: local and /h/:host render the SAME components.
+           Server state no longer needs this — queries are keyed by scope
+           and the streams retarget — but component-local state still
+           does: the snapshot browser's selected dataset, a view's
+           filters. Those name things that exist on one host and not the
+           next, so a scope switch stays a context switch and remount
+           stays the contract. Cheap now that the data comes from cache. -->
     <RouterView v-slot="{ Component }">
       <component :is="Component" :key="host ?? 'local'" />
     </RouterView>

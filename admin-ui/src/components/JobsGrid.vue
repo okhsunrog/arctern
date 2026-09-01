@@ -4,6 +4,7 @@ import type { JobStatus } from '../client'
 import { formatNextRun, formatRelative } from '../utils/format'
 import { formatLastSync, formatNextSync } from '../utils/pushTimes'
 import { jobStatus } from '../utils/status'
+import JobActions from './JobActions.vue'
 import TransferPanel from './TransferPanel.vue'
 
 const { prefix } = useHost()
@@ -15,6 +16,11 @@ defineProps<{
   onPause?: (name: string) => void
   onResume?: (name: string) => void
   onPushTo?: (name: string, peer: string) => void
+  isWaking?: (name: string) => boolean
+  isCancelling?: (name: string) => boolean
+  isPausing?: (name: string) => boolean
+  isResuming?: (name: string) => boolean
+  isPushing?: (name: string, peer: string) => boolean
 }>()
 </script>
 
@@ -70,18 +76,21 @@ defineProps<{
         </div>
       </dl>
       <div v-if="j.transfers?.length || j.targets?.length || j.paused" class="mt-3">
-        <TransferPanel
+        <TransferPanel :job="j" :on-push-to="onPushTo" :is-pushing="isPushing" />
+      </div>
+      <template #footer>
+        <JobActions
           :job="j"
+          variant="label"
+          :on-wake="onWake"
           :on-cancel="onCancel"
           :on-pause="onPause"
           :on-resume="onResume"
-          :on-push-to="onPushTo"
+          :is-waking="isWaking"
+          :is-cancelling="isCancelling"
+          :is-pausing="isPausing"
+          :is-resuming="isResuming"
         />
-      </div>
-      <template #footer>
-        <UButton size="xs" variant="soft" icon="i-lucide-alarm-clock" @click="onWake?.(j.name)">
-          Wake up
-        </UButton>
       </template>
     </UCard>
   </div>

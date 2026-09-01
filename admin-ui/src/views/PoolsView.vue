@@ -8,8 +8,8 @@ import { poolStatus, scanStatus } from '../utils/status'
 import { formatRelative } from '../utils/format'
 
 const router = useRouter()
-const { host, baseUrl, prefix } = useHost()
-const { pools, error, loading } = usePools(5000, baseUrl.value)
+const { host, scope, prefix } = useHost()
+const { pools, error, loading } = usePools(scope)
 const title = computed(() => (host.value ? `${host.value} · Pools` : 'Pools'))
 </script>
 

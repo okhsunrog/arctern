@@ -1,37 +1,17 @@
 <script setup lang="ts">
-import { onUnmounted, ref } from 'vue'
-import { recentTransfers } from '../client'
+import { computed } from 'vue'
+import { useQuery } from '@pinia/colada'
+import { recentTransfersQuery } from '../queries'
+import { formatAge, formatBytes } from '../utils/format'
 import type { RecvTransfer } from '../client'
-import { formatBytes } from '../utils/format'
 
 // Inbound replication received BY this host, as recorded by its recv
 // channels. Rendered only when the host has ever received anything —
 // a pure sender (the laptop) never shows the section.
-const props = defineProps<{ baseUrl?: string }>()
+const props = defineProps<{ scope?: string }>()
 
-const rows = ref<RecvTransfer[]>([])
-const loaded = ref(false)
-
-async function refresh() {
-  const r = await recentTransfers({
-    baseUrl: props.baseUrl ?? '',
-    query: { limit: 20 },
-  })
-  if (!r.error) rows.value = r.data ?? []
-  loaded.value = true
-}
-
-void refresh()
-const handle = setInterval(() => void refresh(), 10000)
-onUnmounted(() => clearInterval(handle))
-
-function age(unixSec: number): string {
-  const s = Math.max(0, Math.floor(Date.now() / 1000) - unixSec)
-  if (s < 90) return `${s}s ago`
-  if (s < 5400) return `${Math.round(s / 60)}m ago`
-  if (s < 129600) return `${Math.round(s / 3600)}h ago`
-  return `${Math.round(s / 86400)}d ago`
-}
+const query = useQuery(() => recentTransfersQuery({ scope: props.scope ?? '', limit: 20 }))
+const rows = computed(() => query.data.value ?? [])
 
 function speed(t: RecvTransfer): string | null {
   if (t.duration_ms < 200 || t.bytes < 1024) return null
@@ -40,7 +20,7 @@ function speed(t: RecvTransfer): string | null {
 </script>
 
 <template>
-  <UCard v-if="loaded && rows.length">
+  <UCard v-if="rows.length">
     <template #header>
       <div class="flex items-center gap-2">
         <UIcon name="i-lucide-download" class="text-muted" />
@@ -59,7 +39,7 @@ function speed(t: RecvTransfer): string | null {
         </span>
         <span class="text-muted shrink-0 font-mono text-xs">
           from {{ t.identity }} · {{ formatBytes(t.bytes)
-          }}<template v-if="speed(t)"> · {{ speed(t) }}</template> · {{ age(t.completed_at) }}
+          }}<template v-if="speed(t)"> · {{ speed(t) }}</template> · {{ formatAge(t.completed_at) }}
         </span>
       </li>
     </ul>

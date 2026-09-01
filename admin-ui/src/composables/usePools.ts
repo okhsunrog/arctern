@@ -1,79 +1,50 @@
-import { onUnmounted, ref, toValue, watch, type MaybeRefOrGetter } from 'vue'
-import { getPool, listPools, poolScrub } from '../client'
-import type { PoolStatus, PoolSummary, ScrubRequest } from '../client'
+import { computed, toValue, type MaybeRefOrGetter } from 'vue'
+import { useMutation, useQuery, useQueryCache } from '@pinia/colada'
+import { poolScrub } from '../client'
+import type { ScrubRequest } from '../client'
+import { baseUrlFor } from './useHost'
+import { poolQuery, poolsQuery } from '../queries'
+import { useToaster } from './useToaster'
+import { unwrap } from '../utils/errors'
 
-function errMessage(e: unknown): string {
-  if (e && typeof e === 'object' && 'message' in e) {
-    return String((e as { message: unknown }).message)
+export function usePools(scope: MaybeRefOrGetter<string> = '') {
+  const query = useQuery(() => poolsQuery(toValue(scope)))
+  return {
+    pools: computed(() => query.data.value ?? []),
+    error: computed(() => query.error.value?.message ?? null),
+    loading: computed(() => query.isPending.value && !query.data.value),
+    refresh: () => void query.refetch(),
   }
-  return String(e)
 }
 
-export function usePools(refreshMs = 5000, baseUrl: MaybeRefOrGetter<string> = '') {
-  const pools = ref<PoolSummary[]>([])
-  const error = ref<string | null>(null)
-  const loading = ref(true)
+export function usePool(name: MaybeRefOrGetter<string>, scope: MaybeRefOrGetter<string> = '') {
+  const queryCache = useQueryCache()
+  const toaster = useToaster()
+  const query = useQuery(() => poolQuery({ scope: toValue(scope), name: toValue(name) }))
 
-  async function refresh() {
-    const requestedBaseUrl = toValue(baseUrl)
-    const r = await listPools({ baseUrl: requestedBaseUrl })
-    if (requestedBaseUrl !== toValue(baseUrl)) return
-    if (r.error) error.value = errMessage(r.error)
-    else {
-      pools.value = r.data ?? []
-      error.value = null
-    }
-    loading.value = false
+  const scrubMutation = useMutation({
+    mutation: (action: ScrubRequest['action']) =>
+      poolScrub({
+        path: { name: toValue(name) },
+        body: { action },
+        baseUrl: baseUrlFor(toValue(scope) || null),
+      }).then(unwrap),
+    onSuccess: (_data, action) => toaster.success(`Scrub ${action} on ${toValue(name)}`),
+    onError: (e, action) => toaster.failure(`Scrub ${action} on ${toValue(name)} failed`, e),
+    // The pool's scan block only reflects the new state after zpool has
+    // applied it, so re-read rather than guessing.
+    onSettled: () => queryCache.invalidateQueries({ key: ['pool', toValue(scope), toValue(name)] }),
+  })
+
+  return {
+    pool: computed(() => query.data.value ?? null),
+    error: computed(() => query.error.value?.message ?? null),
+    loading: computed(() => query.isPending.value && !query.data.value),
+    refresh: () => void query.refetch(),
+    scrub: (action: ScrubRequest['action']) => scrubMutation.mutate(action),
+    /** True while THIS action is in flight, so only its button goes busy. */
+    isScrubbing: (action: ScrubRequest['action']) =>
+      scrubMutation.isLoading.value && scrubMutation.variables.value === action,
+    scrubBusy: computed(() => scrubMutation.isLoading.value),
   }
-
-  watch(
-    () => toValue(baseUrl),
-    () => void refresh(),
-    { immediate: true },
-  )
-  const handle = setInterval(() => void refresh(), refreshMs)
-  onUnmounted(() => clearInterval(handle))
-
-  return { pools, error, loading, refresh }
-}
-
-export function usePool(
-  name: MaybeRefOrGetter<string>,
-  refreshMs = 3000,
-  baseUrl: MaybeRefOrGetter<string> = '',
-) {
-  const pool = ref<PoolStatus | null>(null)
-  const error = ref<string | null>(null)
-  const loading = ref(true)
-
-  async function refresh() {
-    const requestedName = toValue(name)
-    const requestedBaseUrl = toValue(baseUrl)
-    const r = await getPool({ path: { name: requestedName }, baseUrl: requestedBaseUrl })
-    if (requestedName !== toValue(name) || requestedBaseUrl !== toValue(baseUrl)) return
-    if (r.error) error.value = errMessage(r.error)
-    else {
-      pool.value = r.data ?? null
-      error.value = null
-    }
-    loading.value = false
-  }
-
-  /// Returns the raw call result so callers can toast the outcome.
-  async function scrub(action: ScrubRequest['action']): Promise<{ error?: unknown }> {
-    const r = await poolScrub({
-      path: { name: toValue(name) },
-      body: { action },
-      baseUrl: toValue(baseUrl),
-    })
-    if (r.error) error.value = errMessage(r.error)
-    await refresh()
-    return { error: r.error }
-  }
-
-  watch([() => toValue(name), () => toValue(baseUrl)], () => void refresh(), { immediate: true })
-  const handle = setInterval(() => void refresh(), refreshMs)
-  onUnmounted(() => clearInterval(handle))
-
-  return { pool, error, loading, refresh, scrub }
 }

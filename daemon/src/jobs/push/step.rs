@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use zfskit::runner::CommandRunner;
 use zfskit::send::send as zfs_send;
 
-use super::holds::{advance_cursor, step_hold_tag, sweep_step_holds};
+use super::holds::{advance_cursor, release_all_step_holds, step_hold_tag, sweep_stale_step_holds};
 use super::limiter::RateLimiter;
 use super::plan::{SnapshotPlan, build_send_args, build_send_header};
 use crate::peer::PeerLink;
@@ -306,6 +306,7 @@ pub(super) async fn run_one_filesystem(
         _ => None,
     };
     let tag = step_hold_tag(job_name, peer_name);
+    let mut held: Vec<&str> = Vec::new();
     for snap in from_hold_target
         .iter()
         .chain(to_hold_target.iter().map(|(s, _)| s))
@@ -317,7 +318,12 @@ pub(super) async fn run_one_filesystem(
                 "step hold failed for {snap} with tag {tag}: {e}"
             )));
         }
+        held.push(snap.as_str());
     }
+    // Holds this step needs are in place, so anything else still tagged
+    // is a leftover from an earlier failed cycle. Releasing it here
+    // bounds the tag at the two snapshots a step actually protects.
+    sweep_stale_step_holds(runner, sender_dataset, sender_snaps, &held, &tag).await;
 
     // Leave the step hold in place on failure — it protects the snapshot
     // for the next cycle's retry. Hence `?` propagates without a release.
@@ -326,7 +332,7 @@ pub(super) async fn run_one_filesystem(
     if let Some((snap, guid)) = &to_hold_target {
         set_transfer_phase(transfers, transfer_key, "committing");
         advance_cursor(runner, sender_dataset, job_name, peer_name, snap, *guid).await;
-        sweep_step_holds(runner, sender_dataset, sender_snaps, snap, &tag).await;
+        release_all_step_holds(runner, sender_dataset, sender_snaps, snap, &tag).await;
     }
     Ok(())
 }

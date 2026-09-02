@@ -48,7 +48,7 @@ use step::{StepCtx, run_one_filesystem};
 
 use std::collections::{BTreeSet, HashMap};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 
@@ -141,6 +141,11 @@ pub struct PushJob {
     /// Cancellation token of the currently running cycle (child of the
     /// job's own token), so cancel/pause can abort mid-transfer.
     cycle_cancel: Mutex<Option<CancellationToken>>,
+    /// Filesystems this cycle has not started yet. Cancelling is
+    /// meaningful while any remain, even when every running slot has
+    /// already handed off to `zfs recv` — it stops the rest from
+    /// starting.
+    queued_filesystems: AtomicUsize,
     /// Last known per-peer success and most recent attempt outcome.
     /// Seeded from SQLite on the first cycle, updated after every sync.
     peer_outcomes: Mutex<PeerOutcomes>,
@@ -181,6 +186,7 @@ impl PushJob {
             paused: AtomicBool::new(false),
             manual_requests: Mutex::new(BTreeSet::new()),
             cycle_cancel: Mutex::new(None),
+            queued_filesystems: AtomicUsize::new(0),
             peer_outcomes: Mutex::new(HashMap::new()),
             outcomes_loaded: AtomicBool::new(false),
         })
@@ -479,6 +485,8 @@ impl PushJob {
         // keeps the aggregate under bandwidth_limit.
         let errs = tokio::sync::Mutex::new(Vec::new());
         let cycle_bytes = std::sync::atomic::AtomicU64::new(0);
+        self.queued_filesystems
+            .store(sender_paths.len(), Ordering::Relaxed);
         futures_util::StreamExt::for_each_concurrent(
             futures_util::stream::iter(sender_paths.iter()),
             self.parallel,
@@ -486,6 +494,9 @@ impl PushJob {
                 let errs = &errs;
                 let cycle_bytes = &cycle_bytes;
                 async move {
+                    // Claimed here rather than on completion: what makes
+                    // cancelling worthwhile is work not yet STARTED.
+                    self.queued_filesystems.fetch_sub(1, Ordering::Relaxed);
                     if cancel.is_cancelled() {
                         return;
                     }
@@ -500,6 +511,7 @@ impl PushJob {
             },
         )
         .await;
+        self.queued_filesystems.store(0, Ordering::Relaxed);
         errors.extend(errs.into_inner());
         cycle_bytes.into_inner()
     }
@@ -826,6 +838,14 @@ impl PushJob {
     /// `cancel_current`, `pause` and `status` so the daemon and every UI
     /// surface answer this question identically.
     fn cancellable_now(&self) -> bool {
+        // Filesystems the cycle has not started yet: stopping now spares
+        // them, whatever the running slots are doing. A job replicating
+        // several filesystems otherwise refused to stop for as long as
+        // its last running slot sat in finalizing, even with the rest of
+        // the queue untouched.
+        if self.queued_filesystems.load(Ordering::Relaxed) > 0 {
+            return true;
+        }
         let transfers = self.transfers.lock().unwrap();
         transfers.is_empty()
             || transfers
@@ -1110,6 +1130,31 @@ target = {{ root_fs = "backup/nova" }}
         let job = test_job(&["mira"]);
         assert!(!job.status().cancellable);
         assert!(!job.cancel_current(), "nothing to cancel when idle");
+    }
+
+    // With several filesystems in a cycle, the last running slot can sit
+    // in finalizing while the rest of the queue has not started.
+    // Cancelling then is not a no-op — it spares everything still queued
+    // — but the job refused to stop, and the UI hid the button entirely.
+    #[test]
+    fn a_cycle_with_queued_filesystems_can_still_be_stopped() {
+        let job = test_job(&["mira"]);
+        *job.cycle_cancel.lock().unwrap() = Some(CancellationToken::new());
+        job.transfers
+            .lock()
+            .unwrap()
+            .insert("a".into(), transfer("mira", "finalizing"));
+
+        // Nothing left to start: the running slot is past the point where
+        // cancelling changes anything.
+        assert!(!job.status().cancellable);
+
+        job.queued_filesystems.store(2, Ordering::Relaxed);
+        assert!(
+            job.status().cancellable,
+            "queued filesystems make cancelling worthwhile"
+        );
+        assert!(job.cancel_current());
     }
 
     #[test]

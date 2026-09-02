@@ -202,6 +202,12 @@ where
         (ErrorCode::Zfs, e.to_string())
     })?;
     if header.send.discard_partial_recv {
+        // Same operation, same grant as the control RPC. Honouring the
+        // header without checking left `control:discard_partial_recv`
+        // decorative: a client with only `recv` could throw away a
+        // resumable receive by setting a flag, and the grant an operator
+        // withheld bought them nothing.
+        enforce_discard_acl(acl)?;
         tracing::info!(
             target = %header.target_dataset,
             "recv: discarding partial recv per sender request"
@@ -313,6 +319,28 @@ fn validate_snapshot_ref(field: &str, name: &str) -> Result<(), (ErrorCode, Stri
     Ok(())
 }
 
+/// The recv channel's `discard_partial_recv` flag performs the same
+/// `zfs recv -A` as the control RPC, so it answers to the same grant —
+/// and, like the RPC, does not accept the legacy `control` umbrella:
+/// throwing away a partial receive is fine-grained on purpose.
+fn enforce_discard_acl(acl: &AllowedClient) -> Result<(), (ErrorCode, String)> {
+    let allowed = acl
+        .operations
+        .iter()
+        .any(|op| op == "control:discard_partial_recv");
+    if allowed {
+        return Ok(());
+    }
+    Err((
+        ErrorCode::Unauthorized,
+        format!(
+            "identity {:?} is not allowed for control operation \
+             \"control:discard_partial_recv\"",
+            acl.identity
+        ),
+    ))
+}
+
 fn enforce_root_fs(acl: &AllowedClient, dataset: &str) -> Result<(), String> {
     let Some(root) = acl.root_fs.as_deref() else {
         return Ok(());
@@ -355,6 +383,39 @@ mod tests {
                 discard_partial_recv: false,
             },
         }
+    }
+
+    fn acl_ops(operations: &[&str]) -> AllowedClient {
+        AllowedClient {
+            identity: "laptop".into(),
+            fingerprint: None,
+            jobs: vec![],
+            operations: operations.iter().map(|s| s.to_string()).collect(),
+            root_fs: None,
+            recv: arctern_config::RecvConfig::default(),
+        }
+    }
+
+    // The recv header's discard flag runs the same `zfs recv -A` as the
+    // control RPC. Honouring it without the grant made the grant
+    // decorative: `recv` alone was enough to throw away a resumable
+    // receive.
+    #[test]
+    fn discarding_a_partial_receive_needs_its_own_grant() {
+        let e = enforce_discard_acl(&acl_ops(&["recv"])).expect_err("recv alone is not enough");
+        assert_eq!(e.0, ErrorCode::Unauthorized);
+        assert!(e.1.contains("control:discard_partial_recv"), "got: {}", e.1);
+    }
+
+    // Matches the RPC path, which passes `allow_legacy_control: false`.
+    #[test]
+    fn the_legacy_control_umbrella_does_not_cover_it() {
+        assert!(enforce_discard_acl(&acl_ops(&["recv", "control"])).is_err());
+    }
+
+    #[test]
+    fn the_fine_grained_grant_allows_it() {
+        assert!(enforce_discard_acl(&acl_ops(&["recv", "control:discard_partial_recv"])).is_ok());
     }
 
     fn acl_with(inherit: &[&str], overrides: &[(&str, &str)]) -> AllowedClient {

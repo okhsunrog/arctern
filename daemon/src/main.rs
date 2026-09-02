@@ -300,7 +300,7 @@ async fn run_daemon(
         .map_err(|e| eyre::eyre!("create state_dir {}: {e}", state_dir.display()))?;
 
     let pool = Arc::new(
-        state::open(&state_dir)
+        state::open_for_daemon(&state_dir)
             .await
             .map_err(|e| eyre::eyre!("state open: {e}"))?,
     );

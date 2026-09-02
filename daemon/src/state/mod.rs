@@ -36,11 +36,31 @@ pub enum StateError {
     Query(#[from] sqlx::Error),
 }
 
+/// Open the state database for a process that does NOT own the job
+/// scheduler — the stdinserver dispatch, which runs once per incoming
+/// replication step and only needs the event log.
+///
+/// Crucially it does not reconcile orphaned `job_runs`: those rows
+/// belong to the daemon's own jobs, and a dispatch process has no way to
+/// tell a crashed run from one the local daemon is executing right now.
+/// Reconciling from here marked the receiver's live jobs `interrupted`
+/// on every push the sender made.
+pub async fn open(state_dir: &Path) -> Result<SqlitePool, StateError> {
+    open_inner(state_dir, false).await
+}
+
+/// Open the state database for the daemon itself, reconciling any
+/// `job_runs` row left `running` by a previous process before the UI can
+/// read it as still in progress.
+pub async fn open_for_daemon(state_dir: &Path) -> Result<SqlitePool, StateError> {
+    open_inner(state_dir, true).await
+}
+
 /// Open (creating if necessary) the daemon's SQLite at
 /// `<state_dir>/state.db`, configure WAL + NORMAL, run schema migrations.
 /// Returns a connection pool sized for the daemon's expected concurrency
 /// (a handful of jobs + the tracing layer + occasional HTTP handlers).
-pub async fn open(state_dir: &Path) -> Result<SqlitePool, StateError> {
+async fn open_inner(state_dir: &Path, reconcile: bool) -> Result<SqlitePool, StateError> {
     let path = state_dir.join("state.db");
     let display = path.display().to_string();
     let opts = SqliteConnectOptions::new()
@@ -57,15 +77,17 @@ pub async fn open(state_dir: &Path) -> Result<SqlitePool, StateError> {
             source,
         })?;
     migrate(&pool).await?;
-    // Any row left `running` predates this process: its writer died
-    // before recording a terminal state. Reconcile before the UI can
-    // read stale "in progress" history.
-    let orphaned = job_runs::reconcile_orphaned(&pool).await?;
-    if orphaned > 0 {
-        tracing::warn!(
-            count = orphaned,
-            "reconciled orphaned job_runs from a prior crash"
-        );
+    if reconcile {
+        // Any row left `running` predates this process: its writer died
+        // before recording a terminal state. Reconcile before the UI can
+        // read stale "in progress" history.
+        let orphaned = job_runs::reconcile_orphaned(&pool).await?;
+        if orphaned > 0 {
+            tracing::warn!(
+                count = orphaned,
+                "reconciled orphaned job_runs from a prior crash"
+            );
+        }
     }
     Ok(pool)
 }
@@ -284,6 +306,76 @@ pub(crate) async fn open_in_memory() -> Result<SqlitePool, StateError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fresh state dir per test; removed on the way out.
+    struct TempStateDir(std::path::PathBuf);
+
+    impl TempStateDir {
+        fn new(label: &str) -> Self {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "arctern-state-{label}-{}-{nonce}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempStateDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    // One dispatch process runs per incoming replication step. Opening
+    // the state the daemon's way marked every job the receiver was
+    // running as `interrupted`, so a sender's push corrupted the
+    // receiver's own run history — several times an hour.
+    #[tokio::test]
+    async fn dispatch_open_leaves_the_daemons_running_rows_alone() {
+        let dir = TempStateDir::new("x");
+        let daemon_pool = open_for_daemon(dir.path()).await.unwrap();
+        let live = job_runs::record_start(&daemon_pool, "databak", 100)
+            .await
+            .unwrap();
+
+        let dispatch_pool = open(dir.path()).await.unwrap();
+        drop(dispatch_pool);
+
+        let (status,): (String,) = sqlx::query_as("SELECT status FROM job_runs WHERE run_id = ?")
+            .bind(live)
+            .fetch_one(&daemon_pool)
+            .await
+            .unwrap();
+        assert_eq!(status, job_runs::STATUS_RUNNING);
+    }
+
+    // The daemon owns the scheduler, so a row still `running` when it
+    // starts really is from a process that died.
+    #[tokio::test]
+    async fn daemon_open_reconciles_a_row_left_running() {
+        let dir = TempStateDir::new("x");
+        let first = open_for_daemon(dir.path()).await.unwrap();
+        let orphan = job_runs::record_start(&first, "databak", 100)
+            .await
+            .unwrap();
+        drop(first);
+
+        let second = open_for_daemon(dir.path()).await.unwrap();
+        let (status,): (String,) = sqlx::query_as("SELECT status FROM job_runs WHERE run_id = ?")
+            .bind(orphan)
+            .fetch_one(&second)
+            .await
+            .unwrap();
+        assert_eq!(status, job_runs::STATUS_INTERRUPTED);
+    }
 
     #[tokio::test]
     async fn open_in_memory_runs_migrations() {

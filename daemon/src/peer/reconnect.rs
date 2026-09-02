@@ -147,7 +147,10 @@ pub async fn run_for_peer(
                     // A streaming send starves the control channel; a
                     // timed-out probe here would be a false positive and
                     // tearing the entry down would hide the peer from
-                    // select_targets mid-transfer.
+                    // select_targets mid-transfer. Liveness during a
+                    // transfer is ssh's job instead — see
+                    // `peer::SERVER_ALIVE_INTERVAL`, which is what closes
+                    // this window rather than leaving it unwatched.
                     if link.active_recvs() > 0 {
                         continue;
                     }

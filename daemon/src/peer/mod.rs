@@ -64,6 +64,23 @@ fn strip_ansi(s: &str) -> String {
 /// hang until the kernel's SYN timeout (~2 min).
 pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// `ServerAliveInterval` for the multiplexed session.
+///
+/// The application-level probe in `peer::reconnect` deliberately skips
+/// peers with an active receive: a streaming send starves the control
+/// channel, so a probe there would time out on a healthy link. That left
+/// exactly the transfer window unwatched — when a sending laptop walks
+/// out of LAN range mid-send, the TCP connection is half-open, the copy
+/// loop blocks on a write that will never complete, and the job sits
+/// there. Cancel does not help: it waits on the same channel.
+///
+/// ssh answers keepalives regardless of what the remote command is
+/// doing, so this detects a dead peer without ever mistaking a slow
+/// receiver for one. With OpenSSH's default `ServerAliveCountMax` of 3
+/// the session tears down about a minute in, and the copy loop fails
+/// with an I/O error the cycle already knows how to report.
+pub const SERVER_ALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// Re-emit one line of a remote stdinserver's stderr at the severity
 /// the remote's own tracing-fmt layer assigned it (`<RFC3339>  LEVEL
 /// target: message`). Unparseable lines stay WARN — unexpected output
@@ -154,6 +171,7 @@ impl PeerLink {
         let session = SessionBuilder::default()
             .known_hosts_check(KnownHosts::Strict)
             .connect_timeout(CONNECT_TIMEOUT)
+            .server_alive_interval(SERVER_ALIVE_INTERVAL)
             .connect_mux(ssh_target)
             .await?;
         let session = Arc::new(session);

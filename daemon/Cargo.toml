@@ -44,6 +44,7 @@ mimalloc = "0.1.52"
 
 [dev-dependencies]
 arctern-client = { path = "../crates/client" }
+tokio = { version = "1.52.3", features = ["test-util"] }
 toml = "1.1.4"
 tower = { version = "0.5.3", features = ["util"] }
 

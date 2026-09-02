@@ -80,9 +80,13 @@ const hostsNav = computed<NavigationMenuItem[]>(() => [
     : []),
 ])
 
+// The chips read from host-scoped queries, so a peer's console counts
+// that peer's failing jobs and sick pools. They used to be hidden
+// outside the local host, from when those composables were not scoped —
+// which left a peer's console quieter about its own health than the
+// local one, against the rule that the two are the same console.
 const nav = computed<NavigationMenuItem[]>(() => {
   const pre = prefix.value
-  const local = host.value === null
   return [
     { label: host.value ?? 'this host', type: 'label' },
     { label: 'Dashboard', to: `${pre}/dashboard`, icon: 'i-lucide-layout-dashboard' },
@@ -90,16 +94,14 @@ const nav = computed<NavigationMenuItem[]>(() => {
       label: 'Jobs',
       to: `${pre}/jobs`,
       icon: 'i-lucide-list-checks',
-      badge: local
-        ? (chip(failingJobs.value, 'error') ?? chip(runningJobs.value, 'info'))
-        : undefined,
+      badge: chip(failingJobs.value, 'error') ?? chip(runningJobs.value, 'info'),
     },
     { label: 'Snapshots', to: `${pre}/snapshots`, icon: 'i-lucide-camera' },
     {
       label: 'Pools',
       to: `${pre}/pools`,
       icon: 'i-lucide-hard-drive',
-      badge: local ? chip(sickPools.value, 'error') : undefined,
+      badge: chip(sickPools.value, 'error'),
     },
     { label: 'ARC', to: `${pre}/arc`, icon: 'i-lucide-zap' },
     { label: 'Events', to: `${pre}/events`, icon: 'i-lucide-activity' },

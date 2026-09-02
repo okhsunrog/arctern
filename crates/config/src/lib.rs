@@ -264,8 +264,18 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
             JobConfig::Prune(s) => validate_prune(i, s)?,
         }
     }
+    // The dispatcher looks an identity up by name and takes the first
+    // match, so a duplicate silently shadows the later entry — including
+    // one an operator added to widen or narrow that client's grants.
+    let mut seen_identities: BTreeSet<&str> = BTreeSet::new();
     for (i, client) in cfg.allowed_clients.iter().enumerate() {
         validate_allowed_client(i, client)?;
+        if !seen_identities.insert(client.identity.as_str()) {
+            return Err(format!(
+                "allowed_clients[{i}]: duplicate identity {:?}",
+                client.identity
+            ));
+        }
     }
     Ok(())
 }
@@ -396,6 +406,24 @@ fn validate_filesystem_filter(idx: usize, fi: usize, f: &FilesystemFilter) -> Re
 fn validate_prune(idx: usize, s: &PruneJobConfig) -> Result<(), String> {
     if s.name.is_empty() {
         return Err(format!("jobs[{idx}].name: must not be empty"));
+    }
+    if s.filesystems.is_empty() {
+        return Err(format!(
+            "jobs[{idx}].filesystems: must not be empty (the job would match nothing)"
+        ));
+    }
+    // A prune job whose only purpose is retention, with no rules, keeps
+    // nothing and destroys nothing forever. Silently doing nothing is
+    // worse than saying so at load.
+    if s.pruning().keep.is_empty() {
+        return Err(format!(
+            "jobs[{idx}].pruning.keep: must not be empty for a prune job"
+        ));
+    }
+    if s.interval.is_zero() {
+        return Err(format!(
+            "jobs[{idx}].interval: must be longer than zero (a zero interval spins)"
+        ));
     }
     for (fi, f) in s.filesystems.iter().enumerate() {
         validate_filesystem_filter(idx, fi, f)?;
@@ -637,6 +665,63 @@ keep = []
         let long = "a".repeat(MAX_IDENTIFIER_LEN + 1);
         assert!(parse(&snap_job_named(&long)).is_err());
         assert!(parse(&snap_job_named(&"a".repeat(MAX_IDENTIFIER_LEN))).is_ok());
+    }
+
+    fn prune_job(filesystems: &str, keep: &str, interval: &str) -> String {
+        format!(
+            r#"
+[[jobs]]
+type = "prune"
+name = "p"
+interval = "{interval}"
+{filesystems}
+[jobs.pruning]
+keep = [{keep}]
+"#
+        )
+    }
+
+    const FS: &str = "[[jobs.filesystems]]\npath = \"tank\"";
+    const KEEP: &str = "{ type = \"grid\", grid = \"1x1d\", regex = \"^x_\" }";
+
+    #[test]
+    fn a_well_formed_prune_job_is_accepted() {
+        parse(&prune_job(FS, KEEP, "1h")).expect("valid prune job");
+    }
+
+    // Each of these is a job that loads cleanly and then does nothing
+    // useful for as long as it runs.
+    #[test]
+    fn prune_jobs_that_would_be_silent_no_ops_are_rejected() {
+        assert!(parse(&prune_job("", KEEP, "1h")).is_err(), "no filesystems");
+        assert!(parse(&prune_job(FS, "", "1h")).is_err(), "no keep rules");
+    }
+
+    #[test]
+    fn a_zero_prune_interval_is_rejected() {
+        assert!(parse(&prune_job(FS, KEEP, "0s")).is_err());
+    }
+
+    // The dispatcher takes the first identity that matches, so the later
+    // entry — which an operator added to change that client's grants —
+    // never applies.
+    #[test]
+    fn duplicate_allowed_client_identities_rejected() {
+        let s = r#"
+[[allowed_clients]]
+identity = "laptop"
+jobs = ["sink"]
+operations = ["recv"]
+root_fs = "tank/backups"
+
+[[allowed_clients]]
+identity = "laptop"
+jobs = ["sink"]
+operations = ["recv", "control"]
+root_fs = "tank/backups"
+"#;
+        let err = format!("{}", parse(s).unwrap_err());
+        assert!(err.contains("duplicate identity"), "got: {err}");
     }
 
     #[test]

@@ -102,6 +102,16 @@ impl GridSpec {
                 term: trimmed.to_string(),
                 message: format!("duration {dur_str:?}: {e}"),
             })?;
+            // A zero-length interval makes a bucket that nothing can fall
+            // into, so `fit` returns every snapshot as a victim — including
+            // the newest. zrepl refuses this too.
+            if length.is_zero() {
+                return Err(GridParseError::Term {
+                    term_index: idx,
+                    term: trimmed.to_string(),
+                    message: "interval must be longer than zero".into(),
+                });
+            }
 
             let keep_count = if let Some(modifier) = caps.get(3) {
                 let kc =
@@ -191,6 +201,15 @@ mod tests {
         assert_eq!(g.0[0].length, d("4h"));
         assert_eq!(g.0[0].keep_count, KeepCount::Exactly(1));
         assert_eq!(g.0[6].length, d("1d"));
+    }
+
+    // A zero-length bucket catches nothing, so `fit` hands every
+    // snapshot to destroy — the newest included. zrepl rejects it too.
+    #[test]
+    fn zero_length_interval_is_rejected() {
+        let e = GridSpec::parse("1x0s").expect_err("1x0s must not parse");
+        assert!(format!("{e}").contains("longer than zero"), "got: {e}");
+        assert!(GridSpec::parse("1x1h(keep=2) | 3x0m").is_err());
     }
 
     #[test]

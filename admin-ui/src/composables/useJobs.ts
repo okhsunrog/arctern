@@ -1,5 +1,5 @@
 import { computed, onScopeDispose, toValue, watch, type MaybeRefOrGetter } from 'vue'
-import { useMutation, useQuery, useQueryCache } from '@pinia/colada'
+import { useMutation, useQuery } from '@pinia/colada'
 import {
   cancel as cancelJob,
   pause as pauseJob,
@@ -24,7 +24,6 @@ import { unwrap } from '../utils/errors'
  */
 export function useJobs(scope: MaybeRefOrGetter<string> = '') {
   const stream = useJobsStream()
-  const queryCache = useQueryCache()
   const toaster = useToaster()
 
   // One subscription per consumer, moved with the scope and released
@@ -59,7 +58,6 @@ export function useJobs(scope: MaybeRefOrGetter<string> = '') {
   }
 
   const baseUrl = () => baseUrlFor(toValue(scope) || null)
-  const refresh = () => queryCache.invalidateQueries({ key: ['jobs', toValue(scope)] })
 
   // In-flight actions live in a shared store, so an action triggered from
   // the command palette greys out the matching button on the card behind
@@ -80,7 +78,16 @@ export function useJobs(scope: MaybeRefOrGetter<string> = '') {
   const pushKey = (v: { name: string; peer: string }) =>
     jobActionKey('push', toValue(scope), v.name, v.peer)
 
-  /** Mark the action in flight for its key, and re-read jobs when it ends. */
+  /**
+   * Mark the action in flight for its key, and release it when it ends.
+   *
+   * Deliberately does NOT refetch. The daemon re-renders its status every
+   * 250ms and streams a frame on any change, so a mutation's effect
+   * arrives on its own — while an invalidation raced it: the HTTP
+   * response carries the daemon's state from when the request was made,
+   * so landing after a newer stream frame overwrote it with older data
+   * and the card flickered backwards until the next frame.
+   */
   function tracking<TVars>(key: (vars: TVars) => string) {
     return {
       onMutate: (vars: TVars) => {
@@ -88,7 +95,6 @@ export function useJobs(scope: MaybeRefOrGetter<string> = '') {
       },
       onSettled: (_data: unknown, _error: unknown, vars: TVars) => {
         actions.inFlight.delete(key(vars))
-        void refresh()
       },
     }
   }
@@ -145,7 +151,6 @@ export function useJobs(scope: MaybeRefOrGetter<string> = '') {
     warning,
     loading,
     live,
-    refresh,
     wake: (name: string) => wakeMutation.mutate(name),
     cancel: (name: string) => cancelMutation.mutate(name),
     pause: (name: string) => pauseMutation.mutate(name),

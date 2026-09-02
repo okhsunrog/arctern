@@ -272,6 +272,28 @@ fn zfs_error_code(e: &ZfsError) -> ErrorCode {
 /// explicit `control:proxy_admin` grant — that single line in the
 /// receiver's config is the switch between "sender may watch this
 /// host" and "sender may manage this host like its own".
+/// Ceiling on a proxied response body.
+///
+/// The reply crosses the control channel as one length-delimited frame
+/// capped at `MAX_FRAME_LEN`, with the body re-encoded as a JSON string
+/// inside it — escaping only grows it. Exceeding the frame does not fail
+/// the request, it fails the ENCODE, and that tears down the whole tarpc
+/// transport: the control channel drops and replication stops until the
+/// link reconnects. One view losing its data is the better failure.
+///
+/// Well under the frame so escaping cannot close the gap. A response
+/// this large is a dataset with tens of thousands of snapshots, which
+/// the console cannot usefully render anyway.
+const MAX_PROXY_BODY: usize = 2 << 20;
+
+/// Endpoints that stream rather than answer. Matched exactly:
+/// `/api/v1/events/recent` is an ordinary JSON tail and the peer events
+/// bridge fetches it through the proxy.
+fn is_streaming_path(path: &str) -> bool {
+    let path = path.split('?').next().unwrap_or(path);
+    matches!(path, "/api/v1/events" | "/api/v1/jobs/stream")
+}
+
 async fn handle_proxy(
     config: &Config,
     acl: &AllowedClient,
@@ -309,6 +331,19 @@ async fn handle_proxy(
             "proxy does not forward peer routes: the grant covers this host only".to_string(),
         ));
     }
+    // The proxy reads a response to completion, so an endpoint that never
+    // completes never returns: the request would hold a handler task and
+    // an open socket for as long as the client cared to keep it. Live
+    // data has its own channels — `stdinserver <job> events` and the
+    // dedicated peer job stream — which is what the console actually
+    // uses; `/api/v1/events/recent` stays reachable because the events
+    // bridge fetches its backlog through here.
+    if is_streaming_path(path) {
+        return Err(WireError::new(
+            ErrorCode::BadRequest,
+            format!("{path:?} is a stream; the proxy carries request/response only"),
+        ));
+    }
     match arctern_client::raw(
         &daemon_socket(config),
         method,
@@ -317,6 +352,13 @@ async fn handle_proxy(
     )
     .await
     {
+        Ok((_, bytes)) if bytes.len() > MAX_PROXY_BODY => Err(WireError::new(
+            ErrorCode::Internal,
+            format!(
+                "proxied response is {} bytes, over the {MAX_PROXY_BODY}-byte proxy limit",
+                bytes.len()
+            ),
+        )),
         Ok((status, bytes)) => Ok(ProxyReply {
             status,
             body: String::from_utf8_lossy(&bytes).into_owned(),
@@ -606,6 +648,35 @@ mod tests {
         // Reaches the forwarding step (no local daemon in the test), so it
         // was not refused by the guard.
         assert_eq!(e.code, ErrorCode::Internal);
+    }
+
+    // The proxy reads a response to completion, so a stream would never
+    // return: the request would pin a handler task and a socket for as
+    // long as the client liked. Live data has its own channels.
+    #[tokio::test]
+    async fn proxy_refuses_streaming_endpoints() {
+        let c = client(Arc::new(RecordingRunner::new()), acl(None));
+        for path in ["/api/v1/events", "/api/v1/jobs/stream"] {
+            let e = c
+                .proxy(ctx(), "GET".into(), path.into(), None)
+                .await
+                .unwrap()
+                .unwrap_err();
+            assert_eq!(e.code, ErrorCode::BadRequest, "{path} was allowed");
+            assert!(e.message.contains("stream"), "got: {}", e.message);
+        }
+    }
+
+    // The events bridge fetches its backlog through the proxy, so the
+    // JSON tail must stay reachable — matching by prefix would have
+    // broken it.
+    #[test]
+    fn the_json_event_tail_is_not_a_stream() {
+        assert!(!is_streaming_path("/api/v1/events/recent"));
+        assert!(!is_streaming_path("/api/v1/events/recent?limit=100"));
+        assert!(is_streaming_path("/api/v1/events"));
+        // A query string does not smuggle a stream past the check.
+        assert!(is_streaming_path("/api/v1/events?since=5"));
     }
 
     #[tokio::test]

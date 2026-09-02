@@ -540,8 +540,23 @@
         "tags": [
           "events"
         ],
-        "summary": "Subscribe to the daemon's log-event broadcast and yield each as an\nSSE frame, preceded by a replay of the most recent events so a\nfreshly opened page shows context instead of an empty feed until\nsomething new happens.",
+        "summary": "Subscribe to the daemon's log-event broadcast and yield each as an\nSSE frame, preceded by a replay of the most recent events so a\nfreshly opened page shows context instead of an empty feed until\nsomething new happens. A reconnecting client that names its cursor\ngets only what it missed.",
         "operationId": "stream_events",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Resume after this event id. A client that already holds part of\nthe log passes its newest id so the replay is not re-delivered.",
+            "required": false,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "SSE stream of LogEvent JSON frames"

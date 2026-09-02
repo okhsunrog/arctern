@@ -13,13 +13,29 @@ import { createReconnectingEventSource } from '../composables/reconnectingEventS
 // longer get to shrink the buffer the events view depends on.
 const CAP = 5000
 
-export function eventsStreamPath(scope: string): string {
-  return scope ? `/api/v1/peers/${encodeURIComponent(scope)}/events` : '/api/v1/events'
+/**
+ * `since` resumes the replay after an event the client already holds.
+ *
+ * The browser sends `Last-Event-ID` only when it retries an EventSource
+ * on its own; we also reconnect deliberately — on tab wake and on
+ * `online` — by constructing a fresh one, and that carries no header. So
+ * the cursor travels in the URL, which covers both paths. Without it,
+ * every wake replayed the last 100 lines into a log that already had
+ * them.
+ */
+export function eventsStreamPath(scope: string, since?: number): string {
+  const base = scope ? `/api/v1/peers/${encodeURIComponent(scope)}/events` : '/api/v1/events'
+  return since ? `${base}?since=${since}` : base
 }
 
 interface Entry {
   subscribers: number
   connection: ReturnType<typeof createReconnectingEventSource>
+}
+
+/** Id of the newest event held, or undefined for an empty buffer. */
+function newestId(list: LogEvent[] | undefined): number | undefined {
+  return list && list.length > 0 ? list[list.length - 1]!.id : undefined
 }
 
 export const useEventsStream = defineStore('events-stream', () => {
@@ -36,7 +52,9 @@ export const useEventsStream = defineStore('events-stream', () => {
     const entry: Entry = {
       subscribers: 0,
       connection: createReconnectingEventSource({
-        url: () => eventsStreamPath(scope),
+        // Read at connect time, so a reconnect resumes where this
+        // buffer ends rather than replaying what it already shows.
+        url: () => eventsStreamPath(scope, newestId(buffers[scope])),
         subscribe(source) {
           source.addEventListener('message', (e) => {
             if (paused.value) return
@@ -48,6 +66,11 @@ export const useEventsStream = defineStore('events-stream', () => {
             }
             const list = buffers[scope]
             if (!list) return
+            // The server resumes from the cursor, but a peer stream
+            // bridges a separate backlog and a paused client's cursor
+            // goes stale, so drop anything not newer than the tail.
+            const newest = newestId(list)
+            if (newest !== undefined && parsed.id <= newest) return
             list.push(markRaw(parsed))
             if (list.length > CAP) list.splice(0, list.length - CAP)
           })

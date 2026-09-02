@@ -78,12 +78,34 @@ pub async fn since(
 /// The most recent `limit` events, oldest first. Used by the SSE
 /// handler to replay backlog before switching to the live broadcast.
 pub async fn recent(pool: &SqlitePool, limit: i64) -> Result<Vec<LogRow>, StateError> {
+    recent_since(pool, 0, limit).await
+}
+
+/// The NEWEST `limit` events after `since_id`, returned oldest first.
+/// `since_id = 0` means "no cursor" and gives the plain tail.
+///
+/// Contrast [`since`], which takes the OLDEST rows after the cursor.
+/// That is what a bridge catching up in order wants; this is what a log
+/// *view* wants — when a client missed more than `limit`, it should come
+/// back current, with the gap in the old end that the display cap would
+/// have dropped anyway, rather than current-minus-a-hole.
+///
+/// A reconnecting client passes the last id it holds so the backlog it
+/// already shows is not sent again — over the peer bridge that backlog
+/// crosses an SSH channel, so re-sending it is not free.
+pub async fn recent_since(
+    pool: &SqlitePool,
+    since_id: i64,
+    limit: i64,
+) -> Result<Vec<LogRow>, StateError> {
     let mut rows: Vec<(i64, i64, String, Option<String>, String)> = sqlx::query_as(
         "SELECT id, timestamp, level, job_name, message
            FROM log_events
+          WHERE id > ?
           ORDER BY id DESC
           LIMIT ?",
     )
+    .bind(since_id)
     .bind(limit)
     .fetch_all(pool)
     .await?;
@@ -298,6 +320,34 @@ mod tests {
         let rows = since(&pool, id1, 10).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].message, "second");
+    }
+
+    // A reconnecting client used to be re-sent the whole tail it already
+    // held, so every tab wake duplicated up to 100 lines in the log view.
+    #[tokio::test]
+    async fn recent_since_returns_only_what_the_client_missed() {
+        let pool = open_in_memory().await.unwrap();
+        let mut ids = Vec::new();
+        for i in 0..5 {
+            ids.push(
+                insert(&pool, 100 + i, "INFO", None, &format!("e{i}"))
+                    .await
+                    .unwrap(),
+            );
+        }
+
+        let missed = recent_since(&pool, ids[2], 100).await.unwrap();
+        assert_eq!(
+            missed.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![ids[3], ids[4]]
+        );
+
+        // Caught up: nothing to replay, and that is not an error.
+        assert!(recent_since(&pool, ids[4], 100).await.unwrap().is_empty());
+
+        // No cursor still means the full tail, oldest first.
+        let all = recent_since(&pool, 0, 100).await.unwrap();
+        assert_eq!(all.iter().map(|r| r.id).collect::<Vec<_>>(), ids);
     }
 
     #[tokio::test]

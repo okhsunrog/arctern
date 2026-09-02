@@ -99,7 +99,8 @@ export const releaseHold = <ThrowOnError extends boolean = false>(options: Optio
  * Subscribe to the daemon's log-event broadcast and yield each as an
  * SSE frame, preceded by a replay of the most recent events so a
  * freshly opened page shows context instead of an empty feed until
- * something new happens.
+ * something new happens. A reconnecting client that names its cursor
+ * gets only what it missed.
  */
 export const streamEvents = <ThrowOnError extends boolean = false>(options?: Options<StreamEventsData, ThrowOnError>): RequestResult<StreamEventsResponses, unknown, ThrowOnError> => (options?.client ?? client).get<StreamEventsResponses, unknown, ThrowOnError>({ url: '/api/v1/events', ...options });
 

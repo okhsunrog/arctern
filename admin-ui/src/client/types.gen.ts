@@ -801,7 +801,13 @@ export type ReleaseHoldResponse = ReleaseHoldResponses[keyof ReleaseHoldResponse
 export type StreamEventsData = {
     body?: never;
     path?: never;
-    query?: never;
+    query?: {
+        /**
+         * Resume after this event id. A client that already holds part of
+         * the log passes its newest id so the replay is not re-delivered.
+         */
+        since?: number | null;
+    };
     url: '/api/v1/events';
 };
 

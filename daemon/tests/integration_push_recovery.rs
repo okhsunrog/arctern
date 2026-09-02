@@ -240,6 +240,71 @@ async fn zfs_refuses_a_full_send_onto_a_receiver_that_has_snapshots() {
     receiver.destroy().await.ok();
 }
 
+/// A rejecting `zfs recv` exits and closes its stdin, so the sender's
+/// copy dies with EPIPE. The reason lives in the child's stderr, and it
+/// is worth confirming ZFS actually puts something usable there — the
+/// recv handler now reaps the child for that message instead of killing
+/// it and reporting "Broken pipe".
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rejecting_receiver_explains_itself_on_stderr() {
+    let runner = ssh_runner_from_env();
+    let r: &dyn CommandRunner = &runner;
+    let sender = LoopbackPool::create(ssh_runner_from_env())
+        .await
+        .expect("sender pool");
+    let receiver = LoopbackPool::create(ssh_runner_from_env())
+        .await
+        .expect("receiver pool");
+
+    let src = format!("{}/data", sender.name());
+    let dst_root = format!("{}/backups", receiver.name());
+    let dst = format!("{dst_root}/data");
+    let opts = CreateOptions::new()
+        .create_parents()
+        .property("mountpoint", "none");
+    zfskit::dataset::create(r, &src, &opts).await.expect("src");
+    zfskit::dataset::create(r, &dst_root, &opts)
+        .await
+        .expect("dst root");
+    zfskit::dataset::create(r, &dst, &opts).await.expect("dst");
+    zfskit::dataset::snapshot(r, &format!("{dst}@theirs"), &SnapshotOptions::new())
+        .await
+        .expect("receiver snapshot");
+
+    let s1 = format!("{src}@s1");
+    zfskit::dataset::snapshot(r, &s1, &SnapshotOptions::new())
+        .await
+        .expect("s1");
+
+    let mut send_child = zfs_send(r, &SendArgs::new(s1.clone()))
+        .await
+        .expect("spawn send");
+    let mut recv_child = zfs_recv(r, &RecvArgs::new(dst.clone()).resumable().unmounted())
+        .await
+        .expect("spawn recv");
+    let mut out = send_child.take_stdout().expect("send stdout");
+    let mut input = recv_child.take_stdin().expect("recv stdin");
+    let copy = tokio::io::copy(&mut out, &mut input).await;
+    let _ = input.shutdown().await;
+    drop(input);
+    let _ = send_child.cancel().await;
+
+    // Reaping is what surfaces the reason; killing here is what used to
+    // discard it.
+    let err = recv_child
+        .finish()
+        .await
+        .expect_err("the receiver must refuse this stream");
+    let message = err.to_string();
+    assert!(
+        message.len() > "Broken pipe".len() && !message.contains("Broken pipe"),
+        "stderr carried nothing better than the pipe error: {message:?} (copy: {copy:?})"
+    );
+
+    sender.destroy().await.ok();
+    receiver.destroy().await.ok();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_interrupted_receive_resumes_from_its_token() {
     let runner = ssh_runner_from_env();

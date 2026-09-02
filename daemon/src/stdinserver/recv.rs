@@ -246,9 +246,24 @@ where
     let copy_res = tokio::io::copy(reader, &mut child_stdin).await;
     let _ = child_stdin.shutdown().await;
     drop(child_stdin);
-    if let Err(e) = copy_res {
-        let _ = handle.cancel().await;
-        return Err((ErrorCode::Zfs, format!("stream copy: {e}")));
+    if let Err(copy_err) = copy_res {
+        // A receiver that refuses the stream — "destination has been
+        // modified", out of space, a bad property — exits and closes its
+        // stdin, so the copy fails with EPIPE. That is the symptom; the
+        // reason is in the child's stderr, which cancelling threw away,
+        // and the sender was told only "Broken pipe".
+        //
+        // Reaped rather than killed: its stdin is shut down and dropped,
+        // so it reaches EOF and exits. Waiting here is no more exposure
+        // than the success path below, which also waits without a bound
+        // — and `finish` consumes the handle, so a timeout could only
+        // drop the future and leave the process orphaned.
+        let reason = match handle.finish().await {
+            Err(e) => format!("zfs recv failed: {e}"),
+            // The pipe broke for a reason of its own; the child is fine.
+            Ok(()) => format!("stream copy: {copy_err}"),
+        };
+        return Err((ErrorCode::Zfs, reason));
     }
     handle
         .finish()

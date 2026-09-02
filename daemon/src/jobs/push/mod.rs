@@ -326,6 +326,11 @@ impl PushJob {
         let manual: BTreeSet<String> = std::mem::take(&mut *self.manual_requests.lock().unwrap());
         let mut selected = Vec::new();
         let now = OffsetDateTime::now_utc().unix_timestamp();
+        // A queued "send now" outranks pause, but only for the peer it
+        // names: the cycle it wakes used to sweep up every due auto
+        // target too, so one manual push to one peer quietly resumed a
+        // paused job's whole schedule.
+        let paused = self.paused.load(Ordering::Relaxed);
         for name in &self.config.targets {
             let link = self.link_for(name).await;
             if manual.contains(name) {
@@ -340,7 +345,7 @@ impl PushJob {
                 }
                 continue;
             }
-            if self.peer_mode(name) != PeerMode::Auto {
+            if paused || self.peer_mode(name) != PeerMode::Auto {
                 continue;
             }
             let last_success = self
@@ -361,10 +366,14 @@ impl PushJob {
             };
             match auto_link {
                 Some(l) => {
-                    let due = match (self.peer_auto_interval(name), last_success) {
-                        (None, _) => true,
-                        (Some(_), None) => true,
-                        (Some(iv), Some(ts)) => now - ts >= iv.as_secs() as i64,
+                    // `cadence` already falls back to the job's `interval`
+                    // and then to FALLBACK_POLL. Reading only
+                    // `auto_interval` here made a peer without one due on
+                    // every wake, so it replicated on the loop's retry
+                    // floor and the job's own `interval` never applied.
+                    let due = match last_success {
+                        None => true,
+                        Some(ts) => now - ts >= cadence,
                     };
                     if due {
                         selected.push((name.clone(), l, "auto"));
@@ -836,13 +845,18 @@ impl PushJob {
             if self.peer_mode(name) != PeerMode::Auto {
                 continue;
             }
-            let due_at = match (
-                self.peer_auto_interval(name),
-                outcomes.get(name).and_then(Self::peer_schedule_anchor),
-            ) {
-                (Some(iv), Some(ts)) => ts + iv.as_secs() as i64,
-                // No interval or no history: due immediately.
-                _ => now,
+            // Same cadence `select_targets` schedules on, or the sleep
+            // and the selection disagree: the loop would wake on the
+            // retry floor for a peer that is not actually due yet.
+            let cadence = self
+                .peer_auto_interval(name)
+                .or(self.config.interval)
+                .unwrap_or(FALLBACK_POLL)
+                .as_secs() as i64;
+            let due_at = match outcomes.get(name).and_then(Self::peer_schedule_anchor) {
+                Some(ts) => ts + cadence,
+                // No history: due immediately.
+                None => now,
             };
             earliest = Some(earliest.map_or(due_at, |e| e.min(due_at)));
         }
@@ -955,6 +969,99 @@ target = {{ root_fs = "backup/nova" }}
 
     fn test_job(targets: &[&str]) -> PushJob {
         PushJob::new(test_config(targets), None, &[], None).expect("job builds")
+    }
+
+    /// A job whose config carries an explicit `interval`.
+    fn test_job_with_interval(interval: &str) -> PushJob {
+        let cfg: PushJobConfig = toml::from_str(&format!(
+            r#"
+name = "push_test"
+targets = ["mira"]
+interval = "{interval}"
+filesystems = {{ "novafs/data<" = true }}
+target = {{ root_fs = "backup/nova" }}
+"#
+        ))
+        .expect("test config parses");
+        PushJob::new(cfg, None, &[], None).expect("job builds")
+    }
+
+    fn record_success(job: &PushJob, peer: &str, at: i64) {
+        let mut o = job.peer_outcomes.lock().unwrap();
+        let e = o.entry(peer.to_string()).or_default();
+        e.last_success = Some(at);
+        e.last_attempt = Some(at);
+        e.outcome = Some("ok".into());
+    }
+
+    // A peer with no `auto_interval` was due on every wake, so it
+    // replicated on the loop's retry floor and the job's own `interval`
+    // never applied: an operator asking for hourly syncs got them every
+    // five minutes.
+    #[tokio::test]
+    async fn a_peer_without_its_own_interval_follows_the_jobs_interval() {
+        let job = test_job_with_interval("1h");
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        record_success(&job, "mira", now - 60);
+
+        // The sleep must reach roughly the remaining hour, not the floor.
+        let nap = job.next_wake(StdDuration::from_secs(24 * 3600));
+        assert!(
+            nap > BLOCKED_RETRY,
+            "slept {nap:?}, which is the retry floor rather than the configured interval"
+        );
+        assert!(
+            nap <= StdDuration::from_secs(3600),
+            "slept too long: {nap:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_peer_that_has_never_synced_is_due_at_once() {
+        let job = test_job_with_interval("1h");
+        assert_eq!(
+            job.next_wake(StdDuration::from_secs(24 * 3600)),
+            BLOCKED_RETRY
+        );
+    }
+
+    // Pause means the schedule stops. A queued "send now" outranks it —
+    // but only for the peer it names; the cycle it wakes used to sweep up
+    // every due auto target as well.
+    //
+    // No PeerLink can be built without a real SSH session, so the auto
+    // branch is observed through its other side effect: an auto target
+    // whose last success is far past its cadence reports staleness. That
+    // report happens only if the branch was entered at all.
+    #[tokio::test]
+    async fn a_manual_push_does_not_resume_a_paused_jobs_schedule() {
+        let long_ago = OffsetDateTime::now_utc().unix_timestamp() - 10 * 86_400;
+
+        let running = test_job(&["mira", "elsewhere"]);
+        record_success(&running, "elsewhere", long_ago);
+        let mut errors = Vec::new();
+        running.select_targets(&mut errors).await;
+        assert!(
+            errors.iter().any(|e| e.to_string().contains("elsewhere")),
+            "a running job must still consider its auto targets: {errors:?}"
+        );
+
+        let paused = test_job(&["mira", "elsewhere"]);
+        record_success(&paused, "elsewhere", long_ago);
+        paused.pause();
+        paused.request_push("mira").expect("mira is a target");
+        let mut errors = Vec::new();
+        let selected = paused.select_targets(&mut errors).await;
+
+        let names: Vec<&str> = selected.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert!(
+            names.is_empty(),
+            "paused job selected {names:?} for a scheduled sync"
+        );
+        assert!(
+            !errors.iter().any(|e| e.to_string().contains("elsewhere")),
+            "paused job still evaluated its auto schedule: {errors:?}"
+        );
     }
 
     fn transfer(peer: &str, phase: &str) -> TransferInfo {

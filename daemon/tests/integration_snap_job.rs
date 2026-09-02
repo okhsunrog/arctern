@@ -62,31 +62,39 @@ regex = "^{prefix}.*"
 
     let (mut child, socket) = spawn_daemon_uds_with_config(None, Some(cfg_path.clone()));
 
-    // Let a few cycles elapse.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Wait for the snapshots rather than for the clock. A cycle is
+    // several `zfs` calls over SSH, so on a loaded machine two of them
+    // take well over the interval — a fixed three-second sleep made this
+    // fail whenever the host was busy, which says nothing about the job.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let mut matching: Vec<String> = Vec::new();
+    while std::time::Instant::now() < deadline {
+        let snaps = zfskit::dataset::list(
+            &runner,
+            &ListOptions {
+                recursive: false,
+                types: vec![DatasetType::Snapshot],
+                roots: vec![target.clone()],
+                ..ListOptions::default()
+            },
+        )
+        .await
+        .expect("list snapshots");
 
-    // List snapshots of the target dataset.
-    let snaps = zfskit::dataset::list(
-        &runner,
-        &ListOptions {
-            recursive: false,
-            types: vec![DatasetType::Snapshot],
-            roots: vec![target.clone()],
-            ..ListOptions::default()
-        },
-    )
-    .await
-    .expect("list snapshots");
-
-    let matching: Vec<&str> = snaps
-        .iter()
-        .map(|e| e.name.as_str())
-        .filter(|n| {
-            n.split_once('@')
-                .map(|(_, tag)| tag.starts_with(&prefix))
-                .unwrap_or(false)
-        })
-        .collect();
+        matching = snaps
+            .into_iter()
+            .map(|e| e.name)
+            .filter(|n| {
+                n.split_once('@')
+                    .map(|(_, tag)| tag.starts_with(&prefix))
+                    .unwrap_or(false)
+            })
+            .collect();
+        if matching.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 
     let _ = child.kill();
     let _ = child.wait();

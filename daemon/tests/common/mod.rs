@@ -355,6 +355,18 @@ fn spawn_daemon_full(
         if let Some(p) = &socket_path
             && quic.len() >= expected_quic
         {
+            // The daemon prints more after the handshake — the loopback
+            // address and the admin token path. Dropping the reader here
+            // closed the pipe under it, and `println!` panics on EPIPE,
+            // so on a machine slow enough for those lines to arrive after
+            // this function returned the daemon simply died at startup.
+            // The test then saw a job that never ran and blamed the job.
+            std::thread::spawn(move || {
+                let mut sink = String::new();
+                while reader.read_line(&mut sink).unwrap_or(0) > 0 {
+                    sink.clear();
+                }
+            });
             return (child, p.clone(), quic);
         }
     }

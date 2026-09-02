@@ -129,20 +129,27 @@ pub fn resolve_defaults(cfg: &mut Config) -> Result<(), String> {
         }
     }
 
-    // Build pruning keep-rules from `[defaults.pruning]` + `[defaults]
-    // .prefix`. Returns `None` (without erroring) when defaults aren't
-    // available — empty `keep` is a valid "do nothing" prune so we
-    // leave it alone rather than rejecting the config.
-    let build_default_pruning = || -> Option<PruningConfig> {
+    // Build pruning keep-rules from `[defaults.pruning]` against the
+    // prefix the job actually snapshots with. Returns `None` (without
+    // erroring) when defaults aren't available — empty `keep` is a valid
+    // "do nothing" prune so we leave it alone rather than rejecting the
+    // config.
+    //
+    // The prefix is a parameter, not `[defaults].prefix`, because the
+    // two differ exactly when a job sets its own. Building the rules
+    // from the defaults then aimed the grid at another job's snapshots
+    // while `protect_non_prefixed` classified this job's own as
+    // non-prefixed — protecting them from every rule, forever.
+    let build_default_pruning = |prefix: &str| -> Option<PruningConfig> {
         let pd = defaults_pruning.as_ref()?;
-        let prefix = defaults_prefix.clone()?;
+        let anchored = format!("^{}.*", regex::escape(prefix));
         let mut keep: Vec<KeepRule> = vec![KeepRule::Grid {
             grid: pd.grid.clone(),
-            regex: format!("^{}.*", regex::escape(&prefix)),
+            regex: anchored.clone(),
         }];
         if pd.protect_non_prefixed {
             keep.push(KeepRule::Regex {
-                regex: format!("^{}.*", regex::escape(&prefix)),
+                regex: anchored,
                 negate: true,
             });
         }
@@ -173,8 +180,10 @@ pub fn resolve_defaults(cfg: &mut Config) -> Result<(), String> {
                         )
                     })?;
                 }
+                // Resolved just above, so this is the prefix the job will
+                // actually create snapshots with.
                 if s.pruning.keep.is_empty()
-                    && let Some(pd) = build_default_pruning()
+                    && let Some(pd) = build_default_pruning(&s.snapshotting.prefix)
                 {
                     s.pruning = pd;
                 }
@@ -210,8 +219,12 @@ pub fn resolve_defaults(cfg: &mut Config) -> Result<(), String> {
                 // prefix or regex required" message.
             }
             JobConfig::Prune(p) => {
+                // A standalone prune job does not snapshot, so it has no
+                // prefix of its own; the defaults' prefix is what it is
+                // meant to clean up after.
                 if p.pruning.keep.is_empty()
-                    && let Some(pd) = build_default_pruning()
+                    && let Some(prefix) = defaults_prefix.as_deref()
+                    && let Some(pd) = build_default_pruning(prefix)
                 {
                     p.pruning = pd;
                 }
@@ -722,6 +735,79 @@ root_fs = "tank/backups"
 "#;
         let err = format!("{}", parse(s).unwrap_err());
         assert!(err.contains("duplicate identity"), "got: {err}");
+    }
+
+    // A snap job with its own prefix and no [jobs.pruning] used to get
+    // keep-rules built from [defaults].prefix. With protect_non_prefixed
+    // on, that aimed the grid at the DEFAULT prefix — another job's
+    // snapshots — while classifying this job's own as "non-prefixed" and
+    // so protecting them from every rule, forever.
+    #[test]
+    fn default_pruning_follows_the_jobs_own_prefix() {
+        let s = r#"
+[defaults]
+prefix = "arctern_"
+[defaults.snapshotting]
+interval = "15m"
+[defaults.pruning]
+grid = "24x1h"
+protect_non_prefixed = true
+
+[[jobs]]
+type = "snap"
+name = "myapp"
+[[jobs.filesystems]]
+path = "tank/myapp"
+[jobs.snapshotting]
+interval = "15m"
+prefix = "myapp_"
+"#;
+        let c = parse(s).expect("parses");
+        let job = match &c.jobs[0] {
+            JobConfig::Snap(s) => s,
+            other => panic!("expected a snap job, got {other:?}"),
+        };
+        for rule in &job.pruning.keep {
+            let regex = match rule {
+                KeepRule::Grid { regex, .. } | KeepRule::Regex { regex, .. } => regex,
+            };
+            assert!(
+                regex.contains("myapp_"),
+                "rule aimed at the wrong prefix: {regex}"
+            );
+            assert!(
+                !regex.contains("arctern_"),
+                "rule still aimed at the defaults prefix: {regex}"
+            );
+        }
+    }
+
+    // A prune job does not snapshot, so the defaults' prefix is what it
+    // is meant to clean up after.
+    #[test]
+    fn a_standalone_prune_job_still_uses_the_defaults_prefix() {
+        let s = r#"
+[defaults]
+prefix = "arctern_"
+[defaults.pruning]
+grid = "24x1h"
+
+[[jobs]]
+type = "prune"
+name = "p"
+interval = "1h"
+[[jobs.filesystems]]
+path = "tank"
+"#;
+        let c = parse(s).expect("parses");
+        let job = match &c.jobs[0] {
+            JobConfig::Prune(p) => p,
+            other => panic!("expected a prune job, got {other:?}"),
+        };
+        let KeepRule::Grid { regex, .. } = &job.pruning.keep[0] else {
+            panic!("expected a grid rule");
+        };
+        assert!(regex.contains("arctern_"), "got: {regex}");
     }
 
     #[test]

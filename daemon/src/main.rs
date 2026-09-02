@@ -38,18 +38,19 @@ mod state;
 mod stdinserver;
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(20);
-const SHUTDOWN_STAGE_SERVERS: u8 = 0;
-const SHUTDOWN_STAGE_JOBS: u8 = 1;
-const SHUTDOWN_STAGE_PEERS: u8 = 2;
-const SHUTDOWN_STAGE_ARC: u8 = 3;
-const SHUTDOWN_STAGE_RETENTION: u8 = 4;
-const SHUTDOWN_STAGE_SOCKET: u8 = 5;
-const SHUTDOWN_STAGE_COMPLETE: u8 = 6;
+/// Servers and jobs stop together — see `orderly_shutdown` — so they
+/// share one stage: while it is current, either could be what is holding
+/// things up, and the message says so.
+const SHUTDOWN_STAGE_SERVERS_AND_JOBS: u8 = 0;
+const SHUTDOWN_STAGE_PEERS: u8 = 1;
+const SHUTDOWN_STAGE_ARC: u8 = 2;
+const SHUTDOWN_STAGE_RETENTION: u8 = 3;
+const SHUTDOWN_STAGE_SOCKET: u8 = 4;
+const SHUTDOWN_STAGE_COMPLETE: u8 = 5;
 
 fn shutdown_stage_name(stage: u8) -> &'static str {
     match stage {
-        SHUTDOWN_STAGE_SERVERS => "HTTP and UNIX server drain",
-        SHUTDOWN_STAGE_JOBS => "job shutdown",
+        SHUTDOWN_STAGE_SERVERS_AND_JOBS => "server drain and job shutdown",
         SHUTDOWN_STAGE_PEERS => "peer reconnect shutdown",
         SHUTDOWN_STAGE_ARC => "ARC sweeper shutdown",
         SHUTDOWN_STAGE_RETENTION => "retention sweeper shutdown",
@@ -434,6 +435,7 @@ async fn run_daemon(
     let shutdown_token_tcp = shutdown_token.clone();
     let shutdown_deadline_token = shutdown_token.clone();
     let shutdown_after_server_token = shutdown_token.clone();
+    let shutdown_token_for_jobs = shutdown_token.clone();
     tokio::spawn(async move {
         tokio::select! {
             _ = sigterm.recv() => tracing::info!("SIGTERM"),
@@ -451,17 +453,30 @@ async fn run_daemon(
     let tcp_serve = axum::serve(loopback_listener, loopback_app.into_make_service())
         .with_graceful_shutdown(async move { shutdown_token_tcp.cancelled().await });
 
-    let shutdown_stage = Arc::new(AtomicU8::new(SHUTDOWN_STAGE_SERVERS));
+    let shutdown_stage = Arc::new(AtomicU8::new(SHUTDOWN_STAGE_SERVERS_AND_JOBS));
     let orderly_stage = shutdown_stage.clone();
     let timeout_cleanup_path = cleanup_path.clone();
     let orderly_shutdown = async move {
-        let result = tokio::try_join!(uds_serve.into_future(), tcp_serve.into_future()).map(|_| ());
-        // A listener can also terminate independently of SIGTERM/SIGINT.
-        // Start the same bounded cleanup deadline in that case.
-        shutdown_after_server_token.cancel();
-
-        orderly_stage.store(SHUTDOWN_STAGE_JOBS, Ordering::SeqCst);
-        manager.shutdown(Duration::from_secs(5)).await;
+        // Servers and jobs stop concurrently. A job needs no listener and
+        // the listener needs no job, but draining first meant one slow
+        // in-flight request spent the budget a job needed to record its
+        // terminal state — so a routine restart during, say, a large
+        // holds query left runs marked `interrupted` instead of what they
+        // actually were.
+        let servers = async {
+            let result =
+                tokio::try_join!(uds_serve.into_future(), tcp_serve.into_future()).map(|_| ());
+            // A listener can also terminate independently of
+            // SIGTERM/SIGINT. Start the same bounded cleanup deadline —
+            // and release the job half — in that case.
+            shutdown_after_server_token.cancel();
+            result
+        };
+        let jobs = async {
+            shutdown_token_for_jobs.cancelled().await;
+            manager.shutdown(Duration::from_secs(5)).await;
+        };
+        let (result, ()) = tokio::join!(servers, jobs);
 
         orderly_stage.store(SHUTDOWN_STAGE_PEERS, Ordering::SeqCst);
         peers_cancel.cancel();
@@ -513,7 +528,7 @@ mod shutdown_tests {
     #[tokio::test]
     async fn shutdown_completes_without_waiting_for_cancellation() {
         let cancellation = tokio_util::sync::CancellationToken::new();
-        let stage = Arc::new(AtomicU8::new(SHUTDOWN_STAGE_SERVERS));
+        let stage = Arc::new(AtomicU8::new(SHUTDOWN_STAGE_SERVERS_AND_JOBS));
         let socket_path = temp_socket_path();
 
         supervise_shutdown(

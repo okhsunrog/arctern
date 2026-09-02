@@ -227,9 +227,7 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
     use std::collections::BTreeSet;
     let mut peer_names: BTreeSet<&str> = BTreeSet::new();
     for (i, peer) in cfg.peers.iter().enumerate() {
-        if peer.name.is_empty() {
-            return Err(format!("peers[{i}].name: must not be empty"));
-        }
+        validate_identifier(&peer.name).map_err(|e| format!("peers[{i}].name: {e}"))?;
         if !peer_names.insert(peer.name.as_str()) {
             return Err(format!("peers[{i}]: duplicate name {:?}", peer.name));
         }
@@ -256,6 +254,7 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
     let mut seen_names: BTreeSet<&str> = BTreeSet::new();
     for (i, job) in cfg.jobs.iter().enumerate() {
         let name = job.name();
+        validate_identifier(name).map_err(|e| format!("jobs[{i}].name: {e}"))?;
         if !seen_names.insert(name) {
             return Err(format!("jobs[{i}]: duplicate name {name:?}"));
         }
@@ -267,6 +266,45 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
     }
     for (i, client) in cfg.allowed_clients.iter().enumerate() {
         validate_allowed_client(i, client)?;
+    }
+    Ok(())
+}
+
+/// Longest job or peer name. The replication cursor is
+/// `<dataset>#arctern_cursor_G_<16 hex>_J_<job>_P_<peer>` and ZFS caps a
+/// full name at 255 bytes, so the two identifiers have to leave room for
+/// the dataset. 64 each is far past anything an operator would type and
+/// still leaves the budget comfortable.
+const MAX_IDENTIFIER_LEN: usize = 64;
+
+/// Job and peer names are not just labels: they are interpolated into
+/// the step hold tag, into the cursor bookmark name, and into
+/// `SSH_ORIGINAL_COMMAND`, which the dispatcher splits on whitespace.
+///
+/// `_J_` and `_P_` are refused because those are the markers the cursor
+/// scheme parses on. `is_cursor_bookmark_leaf` matches a leaf by
+/// `ends_with("_J_<job>_P_<peer>")`, so a job named `x_J_y` replicating
+/// to `z` produces a cursor that a job named `y` would also claim — and
+/// destroy as a stale one of its own, silently costing incrementality
+/// and forcing a full send.
+fn validate_identifier(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("must not be empty".into());
+    }
+    if name.len() > MAX_IDENTIFIER_LEN {
+        return Err(format!(
+            "must be at most {MAX_IDENTIFIER_LEN} bytes, got {}",
+            name.len()
+        ));
+    }
+    zfs_names::validate_name_component(name)?;
+    for marker in ["_J_", "_P_"] {
+        if name.contains(marker) {
+            return Err(format!(
+                "must not contain {marker:?}: it separates the job and peer \
+                 in replication cursor bookmark names"
+            ));
+        }
     }
     Ok(())
 }
@@ -546,6 +584,59 @@ keep = []
         let err = parse(s).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("duplicate"));
+    }
+
+    fn snap_job_named(name: &str) -> String {
+        format!(
+            r#"
+[[jobs]]
+type = "snap"
+name = "{name}"
+[[jobs.filesystems]]
+path = "tank"
+[jobs.snapshotting]
+interval = "1s"
+prefix = "x_"
+[jobs.pruning]
+keep = []
+"#
+        )
+    }
+
+    #[test]
+    fn ordinary_job_names_are_accepted() {
+        for name in ["push_to_mira", "snapshot_arch0", "nas-remote", "a.b:c"] {
+            parse(&snap_job_named(name)).unwrap_or_else(|e| panic!("{name:?} rejected: {e}"));
+        }
+    }
+
+    // The name reaches SSH_ORIGINAL_COMMAND, which the dispatcher splits
+    // on whitespace, and becomes a bare positional in zfs argv.
+    #[test]
+    fn job_names_that_break_the_dispatcher_or_zfs_are_rejected() {
+        for name in ["two words", "-rf", "a/b", "a@b", "a#b", ""] {
+            assert!(
+                parse(&snap_job_named(name)).is_err(),
+                "{name:?} should be rejected"
+            );
+        }
+    }
+
+    // `is_cursor_bookmark_leaf` matches on `_J_<job>_P_<peer>`, so a job
+    // named `x_J_y` produces a cursor that a job named `y` also claims —
+    // and destroys as a stale one of its own, costing incrementality.
+    #[test]
+    fn the_cursor_scheme_markers_are_rejected_in_names() {
+        let err = format!("{}", parse(&snap_job_named("x_J_y")).unwrap_err());
+        assert!(err.contains("_J_"), "got: {err}");
+        assert!(parse(&snap_job_named("x_P_y")).is_err());
+    }
+
+    #[test]
+    fn over_long_names_are_rejected() {
+        let long = "a".repeat(MAX_IDENTIFIER_LEN + 1);
+        assert!(parse(&snap_job_named(&long)).is_err());
+        assert!(parse(&snap_job_named(&"a".repeat(MAX_IDENTIFIER_LEN))).is_ok());
     }
 
     #[test]

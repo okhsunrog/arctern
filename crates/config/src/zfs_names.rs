@@ -57,6 +57,13 @@ pub fn validate_snapshot_leaf(name: &str) -> Result<(), String> {
     validate_component(name)
 }
 
+/// Conservative name shape shared by ZFS components and by arctern's own
+/// identifiers (job and peer names), which end up inside hold tags,
+/// bookmark names and `SSH_ORIGINAL_COMMAND`.
+pub fn validate_name_component(component: &str) -> Result<(), String> {
+    validate_component(component)
+}
+
 fn validate_component(component: &str) -> Result<(), String> {
     if component.is_empty() {
         return Err("component must not be empty".into());

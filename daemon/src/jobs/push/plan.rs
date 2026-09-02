@@ -419,6 +419,36 @@ pub fn build_send_args(
 /// multi-target push job tracks each receiver's cursor independently:
 /// peer A can be a week behind peer B and still catch up cleanly from
 /// its own bookmark instead of triggering a full resend.
+/// Refuse a `Full` plan aimed at a receiver that already holds
+/// snapshots.
+///
+/// `pick_plan` degrades to `Full` when no sender snapshot shares a GUID
+/// with the receiver, and `apply_bookmark_fallback` rescues that when a
+/// bookmark still matches. When neither does, the two sides have
+/// genuinely diverged — and arctern never emits `zfs recv -F`, so the
+/// receive is refused rather than rolling the receiver back over data it
+/// may be the only copy of.
+///
+/// Sending anyway just failed: every cycle, forever, with whatever
+/// wording `zfs recv` chose, after paying for a step hold and an opened
+/// stream. Deciding it here costs nothing and says what to do about it.
+fn reject_unreceivable_full(
+    plan: SnapshotPlan,
+    target_dataset: &str,
+    receiver: &[SnapshotEntry],
+) -> Result<SnapshotPlan, String> {
+    if matches!(plan, SnapshotPlan::Full { .. }) && !receiver.is_empty() {
+        return Err(format!(
+            "{target_dataset} holds {} snapshot(s) but shares no snapshot or bookmark with the \
+             sender, so only a full send applies and a full send cannot be received over existing \
+             data. The two have diverged; reconcile by hand — destroy {target_dataset} to allow a \
+             fresh full send, or restore a common base on the sender.",
+            receiver.len()
+        ));
+    }
+    Ok(plan)
+}
+
 pub(super) async fn plan_one_filesystem(
     runner: &dyn CommandRunner,
     peer: &PeerLink,
@@ -468,6 +498,7 @@ pub(super) async fn plan_one_filesystem(
                 let plan = pick_plan_with_discard(&sender, &receiver, true);
                 let plan =
                     maybe_bookmark_fallback(runner, sender_dataset, plan, &sender, &receiver).await;
+                let plan = reject_unreceivable_full(plan, target_dataset, &receiver)?;
                 return Ok((plan, sender));
             }
         },
@@ -491,6 +522,7 @@ pub(super) async fn plan_one_filesystem(
         &bookmarks,
     );
     let plan = maybe_bookmark_fallback(runner, sender_dataset, plan, &sender, &receiver).await;
+    let plan = reject_unreceivable_full(plan, target_dataset, &receiver)?;
     Ok((plan, sender))
 }
 
@@ -574,6 +606,60 @@ mod tests {
                 discard_partial_recv: false,
             }
         );
+    }
+
+    // A full send over an existing receiver is refused by `zfs recv`,
+    // because arctern never emits `-F`. Emitting the plan anyway meant
+    // an unreadable ZFS error every cycle, forever, after paying for a
+    // step hold and an opened stream each time.
+    #[test]
+    fn a_full_plan_against_a_populated_receiver_is_refused_with_a_remedy() {
+        let plan = SnapshotPlan::Full {
+            to: r("b", 2),
+            discard_partial_recv: false,
+        };
+        let err = reject_unreceivable_full(plan, "backup/nova/data", &[s("x", 9)])
+            .expect_err("a full send cannot land on a populated receiver");
+        assert!(err.contains("backup/nova/data"), "got: {err}");
+        assert!(err.contains("diverged"), "got: {err}");
+        assert!(err.contains("destroy"), "no remedy offered: {err}");
+    }
+
+    #[test]
+    fn a_full_plan_against_an_empty_receiver_is_the_normal_first_sync() {
+        let plan = SnapshotPlan::Full {
+            to: r("b", 2),
+            discard_partial_recv: false,
+        };
+        assert_eq!(
+            reject_unreceivable_full(plan.clone(), "backup/nova/data", &[]).unwrap(),
+            plan
+        );
+    }
+
+    // Divergence is about the FULL plan specifically: the fallback runs
+    // first, and an incremental from a bookmark lands fine on a receiver
+    // that is not empty — that is the ordinary case between syncs.
+    #[test]
+    fn other_plans_pass_a_populated_receiver_untouched() {
+        for plan in [
+            SnapshotPlan::Nothing,
+            SnapshotPlan::Incremental {
+                from: r("a", 1),
+                to: r("b", 2),
+                discard_partial_recv: false,
+            },
+            SnapshotPlan::IncrementalFromBookmark {
+                from: r("cursor", 1),
+                to: r("b", 2),
+                discard_partial_recv: false,
+            },
+        ] {
+            assert_eq!(
+                reject_unreceivable_full(plan.clone(), "backup/nova/data", &[s("x", 9)]).unwrap(),
+                plan
+            );
+        }
     }
 
     #[test]

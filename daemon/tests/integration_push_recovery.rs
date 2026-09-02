@@ -171,6 +171,75 @@ async fn incremental_send_works_from_a_bookmark_after_its_snapshot_is_pruned() {
     receiver.destroy().await.ok();
 }
 
+/// The planner refuses a full send at a receiver that already holds
+/// snapshots, rather than emitting it and letting `zfs recv` fail every
+/// cycle. That refusal is only correct if ZFS really does refuse — this
+/// pins the assumption, so the planner is not declining something that
+/// would have worked.
+#[tokio::test(flavor = "multi_thread")]
+async fn zfs_refuses_a_full_send_onto_a_receiver_that_has_snapshots() {
+    let runner = ssh_runner_from_env();
+    let r: &dyn CommandRunner = &runner;
+    let sender = LoopbackPool::create(ssh_runner_from_env())
+        .await
+        .expect("sender pool");
+    let receiver = LoopbackPool::create(ssh_runner_from_env())
+        .await
+        .expect("receiver pool");
+
+    let src = format!("{}/data", sender.name());
+    let dst_root = format!("{}/backups", receiver.name());
+    let dst = format!("{dst_root}/data");
+    let opts = CreateOptions::new()
+        .create_parents()
+        .property("mountpoint", "none");
+    zfskit::dataset::create(r, &src, &opts).await.expect("src");
+    zfskit::dataset::create(r, &dst_root, &opts)
+        .await
+        .expect("dst root");
+
+    // Give the receiver a history of its own, sharing no GUID with the
+    // sender — two independently created datasets, as after a restore
+    // from elsewhere or a destroyed cursor.
+    zfskit::dataset::create(r, &dst, &opts).await.expect("dst");
+    zfskit::dataset::snapshot(r, &format!("{dst}@theirs"), &SnapshotOptions::new())
+        .await
+        .expect("receiver snapshot");
+
+    let s1 = format!("{src}@s1");
+    zfskit::dataset::snapshot(r, &s1, &SnapshotOptions::new())
+        .await
+        .expect("s1");
+
+    // No `-F`, matching what arctern emits.
+    let mut send_child = zfs_send(r, &SendArgs::new(s1.clone()))
+        .await
+        .expect("spawn send");
+    let mut recv_child = zfs_recv(r, &RecvArgs::new(dst.clone()).resumable().unmounted())
+        .await
+        .expect("spawn recv");
+    let mut out = send_child.take_stdout().expect("send stdout");
+    let mut input = recv_child.take_stdin().expect("recv stdin");
+    let _ = tokio::io::copy(&mut out, &mut input).await;
+    let _ = input.shutdown().await;
+    drop(input);
+    let _ = send_child.cancel().await;
+    let recv_result = recv_child.finish().await;
+
+    assert!(
+        recv_result.is_err(),
+        "zfs recv accepted a full stream onto a populated dataset — the planner's refusal would \
+         be blocking something that works"
+    );
+    assert!(
+        snapshot_guid(r, &format!("{dst}@s1")).await.is_none(),
+        "nothing from the refused stream may land"
+    );
+
+    sender.destroy().await.ok();
+    receiver.destroy().await.ok();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_interrupted_receive_resumes_from_its_token() {
     let runner = ssh_runner_from_env();

@@ -387,6 +387,9 @@ mod tests {
             "localhost:7878",
             "localhost",
             "[::1]:7878",
+            // The whole 127/8 block is loopback; a daemon bound there is
+            // addressed by exactly that name.
+            "127.0.0.2:7878",
         ] {
             let app = build_loopback_router(test_state().await);
             let resp = app

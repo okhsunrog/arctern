@@ -479,7 +479,14 @@ pub async fn enforce_loopback_host(request: Request, next: Next) -> Response {
         } else {
             host.rsplit_once(':').map(|(h, _)| h).unwrap_or(&host)
         };
-        if !matches!(name, "127.0.0.1" | "localhost" | "::1") {
+        // Any loopback address, not just 127.0.0.1: `--http-address
+        // 127.0.0.2:7878` is a legitimate way to run a second daemon or
+        // dodge a port clash, and the browser then sends that as Host.
+        let is_loopback = name == "localhost"
+            || name
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback());
+        if !is_loopback {
             let body = ApiErrorBody {
                 error: "bad_host".into(),
                 message: format!("host {host:?} is not a loopback name"),

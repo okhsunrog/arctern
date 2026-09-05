@@ -26,7 +26,12 @@ interval = "15m"
 
 [defaults.pruning]
 # Grid used by snap jobs that don't set their own pruning.
-# Format: <count>x<interval> | ... (oldest to youngest, left to right).
+# Format: <count>x<interval> | ... — buckets run from the newest snapshot
+# leftwards into the past, so the first term is the finest-grained one.
+# Each bucket keeps its OLDEST snapshot (zrepl semantics): the survivor
+# ages into the next bucket instead of being displaced by a newer one.
+# Because of that, the first bucket must not be longer than the snapshot
+# interval unless it is `keep=all` — the loader rejects that shape.
 grid = "4x15m | 24x1h | 14x1d"
 # `protect_non_prefixed = true` (the default) auto-appends a
 # `{ type: regex, regex: "^<prefix>.*", negate: true }` rule so

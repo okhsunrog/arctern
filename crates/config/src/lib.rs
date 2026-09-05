@@ -560,6 +560,27 @@ fn validate_snap(idx: usize, s: &SnapJobConfig) -> Result<(), String> {
                 "jobs[{idx}].pruning.keep[{ki}].regex: {pat:?}: {e}"
             ));
         }
+        // The grid keeps the OLDEST snapshot of a bucket (zrepl semantics).
+        // When the first bucket is longer than the snapshot interval and
+        // not `keep=all`, every new snapshot lands in a bucket that already
+        // holds an older one and is destroyed on the spot: the job would
+        // create a snapshot every cycle and never retain the newest state.
+        // zrepl's documented idiom is a leading `1x<interval>(keep=all)`.
+        if let KeepRule::Grid { grid, .. } = k
+            && let Some(first) = grid.0.first()
+            && first.keep_count != KeepCount::All
+            && first.length > s.snapshotting().interval
+        {
+            return Err(format!(
+                "jobs[{idx}].pruning.keep[{ki}].grid: the first bucket ({}) is longer than \
+                 the snapshot interval ({}) and is not keep=all, so every new snapshot would be \
+                 destroyed as soon as it is taken; start the grid with \
+                 `1x{}(keep=all)` or a bucket no longer than the interval",
+                humantime::format_duration(first.length),
+                humantime::format_duration(s.snapshotting().interval),
+                humantime::format_duration(first.length),
+            ));
+        }
     }
     Ok(())
 }
@@ -715,6 +736,40 @@ keep = [{keep}]
         assert!(parse(&prune_job(FS, KEEP, "0s")).is_err());
     }
 
+    fn snap_job_with_grid(interval: &str, grid: &str) -> String {
+        format!(
+            r#"
+[[jobs]]
+type = "snap"
+name = "x"
+[[jobs.filesystems]]
+path = "tank"
+[jobs.snapshotting]
+interval = "{interval}"
+prefix = "x_"
+[jobs.pruning]
+keep = [{{ type = "grid", grid = "{grid}", regex = "^x_" }}]
+"#
+        )
+    }
+
+    // The grid keeps the oldest snapshot per bucket, so a first bucket
+    // longer than the snapshot interval destroys every new snapshot the
+    // moment it is taken. zrepl's idiom is a leading keep=all bucket.
+    #[test]
+    fn a_first_bucket_longer_than_the_interval_needs_keep_all() {
+        let err = format!(
+            "{}",
+            parse(&snap_job_with_grid("15m", "24x1h | 14x1d")).unwrap_err()
+        );
+        assert!(err.contains("keep=all"), "got: {err}");
+        assert!(err.contains("1h"), "got: {err}");
+
+        parse(&snap_job_with_grid("15m", "1x1h(keep=all) | 24x1h")).expect("keep=all lead");
+        parse(&snap_job_with_grid("15m", "4x15m | 24x1h")).expect("bucket equals interval");
+        parse(&snap_job_with_grid("4h", "4x15m | 24x1h")).expect("bucket shorter than interval");
+    }
+
     // The dispatcher takes the first identity that matches, so the later
     // entry — which an operator added to change that client's grants —
     // never applies.
@@ -750,7 +805,7 @@ prefix = "arctern_"
 [defaults.snapshotting]
 interval = "15m"
 [defaults.pruning]
-grid = "24x1h"
+grid = "1x1h(keep=all) | 24x1h"
 protect_non_prefixed = true
 
 [[jobs]]

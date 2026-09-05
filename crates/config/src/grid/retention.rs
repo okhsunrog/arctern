@@ -1,9 +1,17 @@
 //! Direct port of zrepl's retention-grid algorithm. Bucket entries by
 //! interval-from-`now` (where `now` is the youngest matching entry's
 //! `creation`), then within each bucket retain at most `keep_count`
-//! youngest entries. Entries older than the oldest bucket are removed.
+//! OLDEST entries. Entries older than the oldest bucket are removed.
 //! Entries dated *after* `now` (clock-skew defence) are unconditionally
 //! kept.
+//!
+//! Oldest, not youngest, is what makes the grid a grid: the survivor of a
+//! bucket ages out of it into the next one, where it becomes that
+//! bucket's oldest and survives again. Keeping the youngest instead means
+//! every bucket's survivor is displaced the moment a newer snapshot ages
+//! into it, so nothing ever reaches the second bucket and a
+//! `4x15m | 24x1h | 14x1d` grid over 15-minute snapshots retained five
+//! snapshots spanning one hour instead of ~42 spanning two weeks.
 //!
 //! See `zrepl/internal/pruning/retentiongrid/retentiongrid.go`. We
 //! return *indices* into the caller's slice so the caller does not have
@@ -87,8 +95,9 @@ impl GridSpec {
             destroy.push(idx);
         }
 
-        // Apply per-bucket keep_count: keep youngest `keep_count`,
-        // destroy the rest.
+        // Apply per-bucket keep_count: keep the oldest `keep_count`,
+        // destroy the younger rest (zrepl's
+        // `RemoveYoungerSnapsExceedingKeepCount`).
         for b in buckets.iter_mut() {
             match b.keep_count {
                 KeepCount::All => {
@@ -102,8 +111,9 @@ impl GridSpec {
                     if b.indices.len() <= n {
                         keep.extend(b.indices.iter().copied());
                     } else {
-                        keep.extend(b.indices[..n].iter().copied());
-                        destroy.extend(b.indices[n..].iter().copied());
+                        let excess = b.indices.len() - n;
+                        destroy.extend(b.indices[..excess].iter().copied());
+                        keep.extend(b.indices[excess..].iter().copied());
                     }
                 }
             }
@@ -138,22 +148,114 @@ mod tests {
         assert!(k.is_empty() && d.is_empty());
     }
 
+    fn names<'a>(entries: &'a [SnapshotEntry], idx: &[usize]) -> Vec<&'a str> {
+        idx.iter().map(|i| entries[*i].name.as_str()).collect()
+    }
+
+    // zrepl keeps the OLDEST `keep` snapshots of a bucket and destroys the
+    // newer ones first. The previous version of this test asserted the
+    // opposite, and with it the grid retained one hour of history.
     #[test]
-    fn keeps_one_per_bucket_by_default() {
+    fn keeps_the_oldest_per_bucket_by_default() {
         // 3 buckets of 1 hour each. Now = 3600 (youngest).
-        // Buckets: (2700,3600] | (-900,2700] | (-4500,-900]
+        // Buckets: (0,3600] | (-3600,0] | (-7200,-3600]
         let g = GridSpec::parse("3x1h").unwrap();
         let entries = vec![
             entry("s_now", 3600),
-            entry("s_youngest_extra", 3500),
-            entry("s_old", -10000), // older than oldest bucket (younger_than = -7200)
+            entry("s_older_in_same_bucket", 3500),
+            entry("s_old", -10000), // older than oldest bucket
         ];
         let (keep, destroy) = g.fit(&entries);
-        let names_keep: Vec<&str> = keep.iter().map(|i| entries[*i].name.as_str()).collect();
-        let names_destroy: Vec<&str> = destroy.iter().map(|i| entries[*i].name.as_str()).collect();
-        assert!(names_keep.contains(&"s_now"));
-        assert!(names_destroy.contains(&"s_youngest_extra"));
-        assert!(names_destroy.contains(&"s_old"));
+        assert_eq!(names(&entries, &keep), vec!["s_older_in_same_bucket"]);
+        assert_eq!(names(&entries, &destroy), vec!["s_now", "s_old"]);
+    }
+
+    // The worked example from zrepl's docs (configuration/prune.rst,
+    // "Policy grid"): `1x1h(keep=all) | 2x2h | 1x3h` over snapshots @a
+    // (newest) .. @D (almost 9h older). Expected survivors: a b c | i | p | z.
+    #[test]
+    fn matches_the_worked_example_from_zrepl_docs() {
+        let g = GridSpec::parse("1x1h(keep=all) | 2x2h | 1x3h").unwrap();
+        // Bucket edges from `now`: 1h, 3h, 5h, 8h. Place the letters at
+        // the ages the diagram shows, in minutes before @a.
+        let placement: [(&str, i64); 30] = [
+            ("a", 0),
+            ("b", 20),
+            ("c", 40),
+            ("d", 70),
+            ("e", 90),
+            ("f", 110),
+            ("g", 130),
+            ("h", 150),
+            ("i", 170),
+            ("j", 190),
+            ("k", 210),
+            ("l", 230),
+            ("m", 250),
+            ("n", 270),
+            ("o", 280),
+            ("p", 295),
+            ("q", 310),
+            ("r", 330),
+            ("s", 350),
+            ("t", 370),
+            ("u", 390),
+            ("v", 410),
+            ("w", 430),
+            ("x", 450),
+            ("y", 465),
+            ("z", 475),
+            ("A", 490),
+            ("B", 505),
+            ("C", 520),
+            ("D", 535),
+        ];
+        let now = 9 * 3600;
+        let entries: Vec<SnapshotEntry> = placement
+            .iter()
+            .map(|(n, minutes_ago)| entry(n, now - minutes_ago * 60))
+            .collect();
+        let (keep, _destroy) = g.fit(&entries);
+        assert_eq!(names(&entries, &keep), vec!["a", "b", "c", "i", "p", "z"]);
+    }
+
+    // Prune runs after every snapshot in production, so the grid has to be
+    // judged over time, not on one static set. This replays 20 days of a
+    // 15-minute snap job through the example config's grid and expects the
+    // grid's shape to actually materialise: four quarter-hours, one per
+    // hour for a day, one per day for two weeks.
+    #[test]
+    fn a_snap_job_replayed_over_time_fills_every_bucket() {
+        let g = GridSpec::parse("4x15m | 24x1h | 14x1d").unwrap();
+        let step = 15 * 60;
+        let mut snaps: Vec<SnapshotEntry> = Vec::new();
+        let mut t = 0i64;
+        while t <= 20 * 86_400 {
+            snaps.push(entry(&format!("s{t}"), t));
+            let (_keep, destroy) = g.fit(&snaps);
+            let doomed: std::collections::BTreeSet<usize> = destroy.into_iter().collect();
+            snaps = snaps
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| !doomed.contains(i))
+                .map(|(_, e)| e)
+                .collect();
+            t += step;
+        }
+        let now = snaps.iter().map(|e| e.creation).max().unwrap();
+        let mut ages_h: Vec<i64> = snaps
+            .iter()
+            .map(|e| (now - e.creation).whole_minutes() / 60)
+            .collect();
+        ages_h.sort_unstable();
+        // 4 in the first hour, then hourly through a day, then daily.
+        assert_eq!(snaps.len(), 4 + 24 + 14, "ages (h): {ages_h:?}");
+        assert_eq!(*ages_h.last().unwrap(), 15 * 24, "ages (h): {ages_h:?}");
+        assert_eq!(
+            &ages_h[..8],
+            &[0, 0, 0, 0, 1, 2, 3, 4],
+            "ages (h): {ages_h:?}"
+        );
     }
 
     #[test]
@@ -173,13 +275,16 @@ mod tests {
         assert!(dn.contains(&"d"));
     }
 
+    // `now` is the youngest entry, so no entry can be "in the future": the
+    // newest snapshot is simply the young end of the first bucket, and
+    // with keep=1 it is the one that goes.
     #[test]
-    fn future_entries_unconditionally_kept() {
+    fn the_newest_snapshot_is_not_special() {
         let g = GridSpec::parse("1x1h").unwrap();
-        let entries = vec![entry("present", 3600), entry("future", 4000)];
-        let (keep, _destroy) = g.fit(&entries);
-        let kn: Vec<&str> = keep.iter().map(|i| entries[*i].name.as_str()).collect();
-        assert!(kn.contains(&"future"));
+        let entries = vec![entry("older", 3600), entry("newest", 4000)];
+        let (keep, destroy) = g.fit(&entries);
+        assert_eq!(names(&entries, &keep), vec!["older"]);
+        assert_eq!(names(&entries, &destroy), vec!["newest"]);
     }
 
     #[test]

@@ -341,6 +341,12 @@ fn validate_allowed_client(idx: usize, client: &AllowedClient) -> Result<(), Str
     if client.jobs.is_empty() {
         return Err(format!("allowed_clients[{idx}].jobs: must not be empty"));
     }
+    // A job name from here ends up in the receiver's last-received hold
+    // tag (`arctern_last_J_<job>`), so it has to be a valid ZFS tag
+    // component just like the sender's own job names.
+    for (ji, job) in client.jobs.iter().enumerate() {
+        validate_identifier(job).map_err(|e| format!("allowed_clients[{idx}].jobs[{ji}]: {e}"))?;
+    }
     if client.operations.is_empty() {
         return Err(format!(
             "allowed_clients[{idx}].operations: must not be empty"
@@ -768,6 +774,20 @@ keep = [{{ type = "grid", grid = "{grid}", regex = "^x_" }}]
         parse(&snap_job_with_grid("15m", "1x1h(keep=all) | 24x1h")).expect("keep=all lead");
         parse(&snap_job_with_grid("15m", "4x15m | 24x1h")).expect("bucket equals interval");
         parse(&snap_job_with_grid("4h", "4x15m | 24x1h")).expect("bucket shorter than interval");
+    }
+
+    // The receiver builds its last-received hold tag from these names.
+    #[test]
+    fn allowed_client_job_names_must_be_valid_tag_components() {
+        let s = r#"
+[[allowed_clients]]
+identity = "laptop"
+jobs = ["push to mira"]
+operations = ["recv"]
+root_fs = "tank/backups"
+"#;
+        let err = format!("{}", parse(s).unwrap_err());
+        assert!(err.contains("allowed_clients[0].jobs[0]"), "got: {err}");
     }
 
     // The dispatcher takes the first identity that matches, so the later

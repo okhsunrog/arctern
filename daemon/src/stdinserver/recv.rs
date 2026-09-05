@@ -180,6 +180,77 @@ fn recv_args(target: &str, acl: &AllowedClient) -> RecvArgs {
     args
 }
 
+/// Ancestors of `target` that the receive is allowed to create, shallowest
+/// first: everything strictly below `root_fs` (the operator creates that
+/// one) up to and including the direct parent. Without a `root_fs` the
+/// pool takes that role, since it always exists.
+fn creatable_ancestors(target: &str, root_fs: Option<&str>) -> Vec<String> {
+    let Some((parent, _)) = target.rsplit_once('/') else {
+        return Vec::new();
+    };
+    let stop = root_fs.unwrap_or_else(|| target.split('/').next().unwrap_or(target));
+    let mut out = Vec::new();
+    let mut prefix = String::new();
+    for component in parent.split('/') {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(component);
+        if prefix.len() > stop.len() && prefix.starts_with(stop) {
+            out.push(prefix.clone());
+        }
+    }
+    out
+}
+
+/// Create the missing ancestors of the receive target, each with
+/// `mountpoint=none` and `canmount=off`. The leaf itself is created by
+/// `zfs recv`.
+///
+/// Not `zfs create -p -o ...`: `-p` applies the `-o` properties to the
+/// named dataset only, and `canmount` is not inherited, so every ancestor
+/// `-p` created in between came up `canmount=on` under whatever
+/// mountpoint it inherited from the receive root — and mounted on the
+/// next `zfs mount -a`. Mount policy belongs to the receiving host; a
+/// placeholder for a backup tree has no business appearing in its
+/// filesystem namespace.
+async fn ensure_receive_ancestors(
+    runner: &dyn CommandRunner,
+    root_fs: Option<&str>,
+    target: &str,
+) -> Result<(), (ErrorCode, String)> {
+    let candidates = creatable_ancestors(target, root_fs);
+    // Datasets nest, so the first missing ancestor means every deeper one
+    // is missing too: one probe per receive on the common path.
+    let mut first_missing = candidates.len();
+    for (i, name) in candidates.iter().enumerate() {
+        let opts = ListOptions {
+            recursive: false,
+            types: vec![DatasetType::Filesystem, DatasetType::Volume],
+            roots: vec![name.clone()],
+            properties: vec!["name".into()],
+            ..ListOptions::default()
+        };
+        match zfskit::dataset::list(runner, &opts).await {
+            Ok(_) => {}
+            Err(zfskit::ZfsError::DatasetNotFound { .. }) => {
+                first_missing = i;
+                break;
+            }
+            Err(e) => return Err((ErrorCode::Zfs, format!("probe ancestor {name}: {e}"))),
+        }
+    }
+    for name in &candidates[first_missing..] {
+        let opts = zfskit::dataset::CreateOptions::new()
+            .property("mountpoint", "none")
+            .property("canmount", "off");
+        zfskit::dataset::create(runner, name, &opts)
+            .await
+            .map_err(|e| (ErrorCode::Zfs, format!("create ancestor {name}: {e}")))?;
+    }
+    Ok(())
+}
+
 async fn drive<R>(
     runner: &Arc<dyn CommandRunner>,
     acl: &AllowedClient,
@@ -219,22 +290,12 @@ where
             ));
         }
     }
-    // Ensure the receive parent exists; the leaf dataset is created by
-    // `zfs recv` itself.
-    if let Some((parent, _)) = header.target_dataset.rsplit_once('/') {
-        let opts = zfskit::dataset::CreateOptions::new()
-            .create_parents()
-            .property("mountpoint", "none");
-        match zfskit::dataset::create(runner.as_ref(), parent, &opts).await {
-            Ok(()) => {}
-            Err(e) => {
-                let stderr = format!("{e}");
-                if !stderr.contains("already exists") {
-                    return Err((ErrorCode::Zfs, format!("ensure parent {parent}: {e}")));
-                }
-            }
-        }
-    }
+    ensure_receive_ancestors(
+        runner.as_ref(),
+        acl.root_fs.as_deref(),
+        &header.target_dataset,
+    )
+    .await?;
     let args = recv_args(&header.target_dataset, acl);
     let mut handle = zfs_recv(runner.as_ref(), &args)
         .await
@@ -374,6 +435,126 @@ fn enforce_root_fs(acl: &AllowedClient, dataset: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     use arctern_transport::{SendFlagsWire, SendHeader, SendKind, SnapshotRef};
+    use std::sync::Mutex;
+    use zfskit::runner::Cmd;
+
+    #[test]
+    fn creatable_ancestors_stop_at_the_root_fs() {
+        assert_eq!(
+            creatable_ancestors("tank/backups/nova/data/home", Some("tank/backups")),
+            vec!["tank/backups/nova", "tank/backups/nova/data"]
+        );
+        // Direct child of the root: nothing to create.
+        assert!(creatable_ancestors("tank/backups/nova", Some("tank/backups")).is_empty());
+        // No root_fs: the pool is the floor.
+        assert_eq!(
+            creatable_ancestors("tank/a/b", None),
+            vec!["tank/a".to_string()]
+        );
+        assert!(creatable_ancestors("tank", None).is_empty());
+    }
+
+    /// Answers existence probes from a fixed set and records every
+    /// `zfs create` argv.
+    struct AncestorRunner {
+        existing: Vec<&'static str>,
+        created: Mutex<Vec<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CommandRunner for AncestorRunner {
+        async fn run(&self, cmd: Cmd) -> Result<std::process::Output, std::io::Error> {
+            use std::os::unix::process::ExitStatusExt;
+            let args: Vec<String> = cmd
+                .args_list()
+                .iter()
+                .map(|a| a.to_string_lossy().into())
+                .collect();
+            let output = |code: i32, stdout: &str, stderr: &str| std::process::Output {
+                status: std::process::ExitStatus::from_raw(code << 8),
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: stderr.as_bytes().to_vec(),
+            };
+            match args.first().map(String::as_str) {
+                Some("list") => {
+                    let name = args.last().expect("list names a dataset");
+                    if self.existing.contains(&name.as_str()) {
+                        Ok(output(
+                            0,
+                            &format!(
+                                r#"{{"output_version":{{"command":"zfs list","vers_major":0,"vers_minor":1}},"datasets":{{"{name}":{{"name":"{name}","type":"FILESYSTEM","pool":"tank","createtxg":"1","properties":{{}}}}}}}}"#
+                            ),
+                            "",
+                        ))
+                    } else {
+                        Ok(output(
+                            1,
+                            "",
+                            &format!("cannot open '{name}': dataset does not exist"),
+                        ))
+                    }
+                }
+                Some("create") => {
+                    self.created.lock().unwrap().push(args);
+                    Ok(output(0, "", ""))
+                }
+                other => panic!("unexpected zfs subcommand {other:?}"),
+            }
+        }
+    }
+
+    // `zfs create -p -o mountpoint=none <parent>` applied the property to
+    // the parent alone; the ancestors `-p` filled in between came up
+    // `canmount=on` under the receive root's mountpoint and mounted on
+    // the next `zfs mount -a`. Every created ancestor now gets both.
+    #[tokio::test]
+    async fn missing_ancestors_are_created_one_by_one_unmounted() {
+        let r = AncestorRunner {
+            existing: vec!["tank/backups", "tank/backups/nova"],
+            created: Mutex::new(Vec::new()),
+        };
+        ensure_receive_ancestors(&r, Some("tank/backups"), "tank/backups/nova/data/x/home")
+            .await
+            .expect("ancestors created");
+        let created = r.created.lock().unwrap().clone();
+        assert_eq!(
+            created,
+            vec![
+                vec![
+                    "create",
+                    "-o",
+                    "mountpoint=none",
+                    "-o",
+                    "canmount=off",
+                    "tank/backups/nova/data",
+                ],
+                vec![
+                    "create",
+                    "-o",
+                    "mountpoint=none",
+                    "-o",
+                    "canmount=off",
+                    "tank/backups/nova/data/x",
+                ],
+            ]
+        );
+        assert!(
+            created.iter().all(|argv| !argv.contains(&"-p".to_string())),
+            "-p would leave intermediate datasets mountable"
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_ancestors_are_left_alone() {
+        let r = AncestorRunner {
+            existing: vec!["tank/backups", "tank/backups/nova"],
+            created: Mutex::new(Vec::new()),
+        };
+        ensure_receive_ancestors(&r, Some("tank/backups"), "tank/backups/nova/home")
+            .await
+            .expect("nothing to create");
+        assert!(r.created.lock().unwrap().is_empty());
+    }
 
     fn header(target_dataset: &str, from_snap: Option<&str>, to_snap: &str) -> RecvHeader {
         RecvHeader {

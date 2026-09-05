@@ -227,10 +227,13 @@ operations = [
 root_fs = "backup/mylaptop"      # recv is confined to this subtree
 ```
 
-Then pre-create the receive root so the first stream has a parent:
+Then pre-create the receive root so the first stream has a parent.
+`mountpoint=none` matters: received datasets and the placeholders
+arctern creates between the root and them inherit their mountpoint from
+here, and a backup tree has no business appearing under `/backup`:
 
 ```sh
-sudo zfs create -p -o canmount=off backup/mylaptop
+sudo zfs create -p -o mountpoint=none -o canmount=off backup/mylaptop
 sudo arctern configcheck /etc/arctern/arctern.toml
 ```
 
@@ -304,8 +307,12 @@ subtree:
 
 ```sh
 sudo useradd --system --create-home arctern-recv
-sudo zfs allow -u arctern-recv create,mount,receive,hold,release,destroy backup/mylaptop
+sudo zfs allow -u arctern-recv create,mount,receive,hold,release,destroy,mountpoint,canmount backup/mylaptop
 ```
+
+`mountpoint` and `canmount` are needed because the receive creates any
+missing ancestors of its target with both set (`mountpoint=none`,
+`canmount=off`) so they never mount.
 
 The forced-command line then goes to
 `/home/arctern-recv/.ssh/authorized_keys`, and the sender's Host alias

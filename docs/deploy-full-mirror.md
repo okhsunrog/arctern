@@ -120,8 +120,8 @@ When `fingerprint` is set, the dispatcher compares it to
 Server-side, before the first push lands:
 
 ```bash
-sudo zfs create -p -o canmount=off okdata/backups/arctern_trial
-sudo zfs create    -o canmount=off okdata/backups/arctern_trial/laptop
+sudo zfs create -p -o mountpoint=none -o canmount=off okdata/backups/arctern_trial
+sudo zfs create    -o mountpoint=none -o canmount=off okdata/backups/arctern_trial/laptop
 ```
 
 Encryption note: on OpenZFS ≥ 2.4.1, raw-encrypted recv beneath an

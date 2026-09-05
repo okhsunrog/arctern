@@ -417,8 +417,8 @@ root_fs = {receiver_root:?}
     eprintln!("openssh test: creating ZFS source/receiver datasets");
     let zfs_setup = format!(
         "set -e; \
-         zfs create -p {receiver_root}; \
-         zfs allow -u {remote_user} create,mount,receive {receiver_root}; \
+         zfs create -p -o mountpoint=none -o canmount=off {receiver_root}; \
+         zfs allow -u {remote_user} create,mount,receive,mountpoint,canmount {receiver_root}; \
          zfs create {source_dataset}; \
          mkdir -p {source_mount}; \
          zfs set mountpoint={source_mount} {source_dataset}; \
@@ -575,6 +575,45 @@ root_fs = {receiver_root:?}
         source_guid2, target_guid2,
         "incremental recv snapshot GUID mismatch"
     );
+
+    // A target several levels below root_fs: the receive creates the
+    // ancestors in between, and every one of them must be unmountable.
+    // `zfs create -p -o mountpoint=none` used to leave them `canmount=on`
+    // under the root's mountpoint, one `zfs mount -a` away from appearing
+    // in the receiver's filesystem namespace.
+    eprintln!("openssh test: receiving into a target three levels below root_fs");
+    let deep_target = format!("{receiver_root}/deep/er/copy");
+    let deep_response = recv_over_forced_command(
+        &session,
+        recv_header(deep_target.clone(), SendKind::Full, None, "snap1"),
+        &send_stream,
+    )
+    .await;
+    match deep_response {
+        Response::Ok => {}
+        other => panic!("unexpected deep recv response: {other:?}"),
+    }
+    zfs_snapshot_exists(&target, &format!("{deep_target}@snap1"));
+    let ancestors = run_remote_command_capture(
+        &target,
+        &[
+            "zfs".to_string(),
+            "list".to_string(),
+            "-H".to_string(),
+            "-o".to_string(),
+            "name,mountpoint,canmount,mounted".to_string(),
+            format!("{receiver_root}/deep"),
+            format!("{receiver_root}/deep/er"),
+        ],
+    );
+    for line in ancestors.lines() {
+        let cols: Vec<&str> = line.split('\t').collect();
+        assert_eq!(
+            &cols[1..],
+            &["none", "off", "no"],
+            "created ancestor is mountable: {line:?}"
+        );
+    }
 
     // A refused stream larger than the channel's in-flight buffers: the
     // sender's copy dies with EPIPE, and the receiver's Response must

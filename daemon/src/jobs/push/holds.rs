@@ -25,9 +25,10 @@ pub(super) fn is_cursor_bookmark_leaf(leaf: &str, job_name: &str, peer: &str) ->
     leaf.starts_with("arctern_cursor_G_") && leaf.ends_with(&format!("_J_{job_name}_P_{peer}"))
 }
 
-/// Plan one filesystem cycle against the receiver. Pure planner glue
-/// over zfskit + the control channel. Returns the plan plus the
-/// filtered sender snapshot list (the executor's hold sweep reuses it).
+/// Create the new GUID-named cursor bookmark, then destroy stale cursors
+/// for the same (job, peer). Returns whether the new cursor exists: a
+/// failed sweep of the old ones is only untidiness, a failed create
+/// means nothing on the sender records what the receiver now has.
 pub(super) async fn advance_cursor(
     runner: &dyn CommandRunner,
     sender_dataset: &str,
@@ -35,12 +36,12 @@ pub(super) async fn advance_cursor(
     peer_name: &str,
     to_snap: &str,
     to_guid: u64,
-) {
+) -> bool {
     let cursor = cursor_bookmark_name(sender_dataset, job_name, peer_name, to_guid);
     if let Err(e) = zfskit::bookmark::create(runner, to_snap, &cursor).await {
         warn!(snapshot = %to_snap, bookmark = %cursor, error = %e, "create cursor bookmark");
         // Keep the old cursor rather than risk destroying the only one.
-        return;
+        return false;
     }
     let opts = ListOptions {
         recursive: false,
@@ -52,7 +53,7 @@ pub(super) async fn advance_cursor(
         Ok(v) => v,
         Err(e) => {
             warn!(dataset = %sender_dataset, error = %e, "list bookmarks for cursor sweep");
-            return;
+            return true;
         }
     };
     for b in &bookmarks {
@@ -65,6 +66,46 @@ pub(super) async fn advance_cursor(
         {
             warn!(bookmark = %b.name, error = %e, "destroy stale cursor bookmark");
         }
+    }
+    true
+}
+
+/// After a successful send: advance the cursor, then release the step
+/// holds. The order is the point. The `to` hold is what keeps prune off
+/// the snapshot the receiver now has; the cursor bookmark takes over that
+/// role. If the bookmark could not be created (pool full, feature
+/// missing), releasing the hold anyway left nothing protecting
+/// incrementality: prune destroyed `to`, the stale cursor pointed below
+/// the receiver's head, and every later incremental was refused.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn commit_step(
+    runner: &dyn CommandRunner,
+    sender_dataset: &str,
+    job_name: &str,
+    peer_name: &str,
+    sender_snaps: &[SnapshotEntry],
+    to_snap: &str,
+    to_guid: u64,
+    tag: &str,
+) {
+    if advance_cursor(
+        runner,
+        sender_dataset,
+        job_name,
+        peer_name,
+        to_snap,
+        to_guid,
+    )
+    .await
+    {
+        release_all_step_holds(runner, sender_dataset, sender_snaps, to_snap, tag).await;
+    } else {
+        warn!(
+            snapshot = %to_snap,
+            tag = %tag,
+            "cursor bookmark not created; keeping the step hold on the sent snapshot until a later cycle records it"
+        );
+        sweep_stale_step_holds(runner, sender_dataset, sender_snaps, &[to_snap], tag).await;
     }
 }
 
@@ -168,6 +209,8 @@ mod tests {
     struct HoldsRunner {
         held: Vec<(String, String)>,
         released: Mutex<Vec<String>>,
+        /// Make `zfs bookmark` fail the way a full pool does.
+        bookmark_fails: bool,
     }
 
     impl HoldsRunner {
@@ -178,7 +221,12 @@ mod tests {
                     .map(|(s, t)| ((*s).to_string(), (*t).to_string()))
                     .collect(),
                 released: Mutex::new(Vec::new()),
+                bookmark_fails: false,
             }
+        }
+        fn with_failing_bookmark(mut self) -> Self {
+            self.bookmark_fails = true;
+            self
         }
         fn released(&self) -> Vec<String> {
             let mut v = self.released.lock().unwrap().clone();
@@ -193,6 +241,15 @@ mod tests {
             status: std::process::ExitStatus::from_raw(0),
             stdout: stdout.into_bytes(),
             stderr: Vec::new(),
+        }
+    }
+
+    fn failed(stderr: &str) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
         }
     }
 
@@ -219,6 +276,9 @@ mod tests {
                     self.released.lock().unwrap().push(args[2].clone());
                     Ok(ok(String::new()))
                 }
+                Some("bookmark") if self.bookmark_fails => Ok(failed(
+                    "cannot create bookmark 'tank/data#cursor': out of space",
+                )),
                 other => panic!("unexpected zfs subcommand {other:?}"),
             }
         }
@@ -297,6 +357,29 @@ mod tests {
         let r = HoldsRunner::new(&[("tank/data@s1", TAG), ("tank/data@s2", TAG)]);
         release_all_step_holds(&r, "tank/data", &snaps(&["s1"]), "tank/data@s2", TAG).await;
         assert_eq!(r.released(), vec!["tank/data@s1", "tank/data@s2"]);
+    }
+
+    // The step hold on `to` is released because the cursor bookmark takes
+    // over protecting incrementality. When the bookmark cannot be created
+    // there is no cursor to take over, and releasing anyway let prune
+    // destroy the one snapshot the receiver now shares with the sender.
+    #[tokio::test]
+    async fn a_failed_cursor_bookmark_keeps_the_hold_on_the_sent_snapshot() {
+        let r = HoldsRunner::new(&[("tank/data@old", TAG), ("tank/data@to", TAG)])
+            .with_failing_bookmark();
+        commit_step(
+            &r,
+            "tank/data",
+            "push",
+            "mira",
+            &snaps(&["old", "to"]),
+            "tank/data@to",
+            0x2a,
+            TAG,
+        )
+        .await;
+        // Stale holds from earlier cycles still go; `to` stays pinned.
+        assert_eq!(r.released(), vec!["tank/data@old"]);
     }
 
     #[test]

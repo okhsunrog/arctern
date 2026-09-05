@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use zfskit::runner::CommandRunner;
 use zfskit::send::send as zfs_send;
 
-use super::holds::{advance_cursor, release_all_step_holds, step_hold_tag, sweep_stale_step_holds};
+use super::holds::{commit_step, step_hold_tag, sweep_stale_step_holds};
 use super::limiter::RateLimiter;
 use super::plan::{SnapshotPlan, build_send_args, build_send_header};
 use crate::peer::PeerLink;
@@ -347,15 +347,21 @@ pub(super) async fn run_one_filesystem(
 
     if let Some((snap, guid)) = &to_hold_target {
         set_transfer_phase(transfers, transfer_key, "committing");
-        advance_cursor(runner, sender_dataset, job_name, peer_name, snap, *guid).await;
-        release_all_step_holds(runner, sender_dataset, sender_snaps, snap, &tag).await;
+        commit_step(
+            runner,
+            sender_dataset,
+            job_name,
+            peer_name,
+            sender_snaps,
+            snap,
+            *guid,
+            &tag,
+        )
+        .await;
     }
     Ok(())
 }
 
-/// Create the new GUID-named cursor bookmark, then destroy stale
-/// cursors for the same (job, peer). Failures degrade to warnings —
-/// the send already succeeded and the receiver has the data.
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -38,7 +38,7 @@ const base = (scope: Scope) => baseUrlFor(scope || null)
 // the cold-start path and the fallback while the stream is down.
 export const jobsQuery = defineQueryOptions((scope: Scope) => ({
   key: ['jobs', scope],
-  query: () => listJobs({ baseUrl: base(scope) }).then(unwrap),
+  query: ({ signal }) => listJobs({ baseUrl: base(scope), signal }).then(unwrap),
   // The stream keeps this fresh; polling on top of it would be waste.
   staleTime: 60_000,
 }))

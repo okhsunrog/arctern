@@ -122,6 +122,7 @@ const tree = computed<DsNode[]>(() => {
   return roots
 })
 
+const rowSelection = ref<Record<string, boolean>>({})
 const selectedNode = ref<DsNode>()
 watch(selectedNode, (n) => {
   if (n?.value) dataset.value = n.value
@@ -158,7 +159,6 @@ const snapshots = computed<SnapshotRow[]>(() =>
 )
 const snapsError = computed(() => snapshotsResult.error.value?.message ?? null)
 const snapsLoading = computed(() => snapshotsResult.isLoading.value)
-const rowSelection = ref<Record<string, boolean>>({})
 
 // Every hold on the dataset in ONE request. Asking per snapshot turned a
 // 15s refresh of a dataset with hundreds of snapshots into hundreds of
@@ -168,6 +168,8 @@ const rowSelection = ref<Record<string, boolean>>({})
 const holdsResult = useQuery(() =>
   datasetHoldsQuery({ scope: props.scope, dataset: dataset.value }),
 )
+const holdsError = computed(() => holdsResult.error.value?.message ?? null)
+const holdsKnown = computed(() => !!holdsResult.data.value && !holdsResult.error.value)
 const holds = computed<Record<string, SnapshotHold[]>>(() => holdsResult.data.value ?? {})
 function holdsFor(tag: string): SnapshotHold[] {
   return holds.value[tag] ?? []
@@ -429,6 +431,7 @@ const columns = computed<TableColumn<SnapshotRow>[]>(() => [
     header: 'Holds',
     enableSorting: false,
     cell: ({ row }) => {
+      if (!holdsKnown.value) return holdsError.value ? 'Unavailable' : 'Loading…'
       const hs = holdsFor(row.original.tag)
       if (hs.length === 0) return ''
       return h(
@@ -551,6 +554,12 @@ const columns = computed<TableColumn<SnapshotRow>[]>(() => [
         />
         <template v-else>
           <UAlert v-if="snapsError" color="error" :title="snapsError" icon="i-lucide-circle-x" />
+          <UAlert
+            v-if="holdsError"
+            color="warning"
+            title="Snapshot holds unavailable"
+            :description="holdsError"
+          />
           <div class="flex items-center gap-x-3 gap-y-1 flex-wrap">
             <span class="font-mono text-sm font-medium truncate">{{ dataset }}</span>
             <span class="text-xs text-muted">
@@ -678,8 +687,11 @@ const columns = computed<TableColumn<SnapshotRow>[]>(() => [
 
           <div>
             <div class="microlabel mb-2">holds</div>
-            <div v-if="detailHolds.length === 0" class="text-muted text-xs">
-              No holds — destroy-eligible.
+            <p v-if="!holdsKnown" role="status" class="text-muted text-xs">
+              {{ holdsError ? `Holds unavailable: ${holdsError}` : 'Loading holds…' }}
+            </p>
+            <div v-else-if="detailHolds.length === 0" class="text-muted text-xs">
+              No holds reported. Other ZFS constraints may still prevent deletion.
             </div>
             <div v-else class="space-y-1">
               <div

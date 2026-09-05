@@ -53,96 +53,82 @@ export function useJobs(scope: MaybeRefOrGetter<string> = '') {
   /** True while the stream is connected — drives the "live" chrome. */
   const live = computed(() => stream.status[toValue(scope)] === 'live')
 
-  function jobNamed(name: string): JobStatus | undefined {
-    return jobs.value.find((j) => j.name === name)
+  interface ActionTarget {
+    scope: string
+    name: string
+    peer?: string
+    job?: JobStatus
   }
 
-  const baseUrl = () => baseUrlFor(toValue(scope) || null)
-
-  // In-flight actions live in a shared store, so an action triggered from
-  // the command palette greys out the matching button on the card behind
-  // it. A mutation's own `variables` ref would not do: it holds only the
-  // LAST call, so two quick clicks on different jobs would clear the
-  // first button while its request is still running — exactly the
-  // double-submit the busy state exists to prevent.
   const actions = useJobActions()
-  const busy = (key: string) => actions.inFlight.has(key)
+  const target = (name: string, peer?: string): ActionTarget => ({
+    scope: toValue(scope),
+    name,
+    peer,
+    job: jobs.value.find((j) => j.name === name),
+  })
+  const baseUrl = (v: ActionTarget) => baseUrlFor(v.scope || null)
+  const actionKey = (action: Parameters<typeof jobActionKey>[0], v: ActionTarget) =>
+    jobActionKey(action, v.scope, v.name, v.peer)
+  const busy = (action: Parameters<typeof jobActionKey>[0], name: string, peer?: string) =>
+    actions.inFlight.has(actionKey(action, target(name, peer)))
 
-  // Key builders are shared by the mutation hooks and the `isX` helpers,
-  // so the two cannot drift, and each is typed against its mutation's
-  // variables rather than compared as opaque JSON.
-  const wakeKey = (name: string) => jobActionKey('wake', toValue(scope), name)
-  const cancelKey = (name: string) => jobActionKey('cancel', toValue(scope), name)
-  const pauseKey = (name: string) => jobActionKey('pause', toValue(scope), name)
-  const resumeKey = (name: string) => jobActionKey('resume', toValue(scope), name)
-  const pushKey = (v: { name: string; peer: string }) =>
-    jobActionKey('push', toValue(scope), v.name, v.peer)
-
-  /**
-   * Mark the action in flight for its key, and release it when it ends.
-   *
-   * Deliberately does NOT refetch. The daemon re-renders its status every
-   * 250ms and streams a frame on any change, so a mutation's effect
-   * arrives on its own — while an invalidation raced it: the HTTP
-   * response carries the daemon's state from when the request was made,
-   * so landing after a newer stream frame overwrote it with older data
-   * and the card flickered backwards until the next frame.
-   */
-  function tracking<TVars>(key: (vars: TVars) => string) {
+  // Pin the host in the mutation variables: the shell survives scope changes.
+  function tracking(action: Parameters<typeof jobActionKey>[0]) {
     return {
-      onMutate: (vars: TVars) => {
-        actions.inFlight.add(key(vars))
+      onMutate: (v: ActionTarget) => {
+        actions.inFlight.add(actionKey(action, v))
       },
-      onSettled: (_data: unknown, _error: unknown, vars: TVars) => {
-        actions.inFlight.delete(key(vars))
+      onSettled: (_data: unknown, _error: unknown, v: ActionTarget) => {
+        actions.inFlight.delete(actionKey(action, v))
       },
     }
   }
 
   const wakeMutation = useMutation({
-    mutation: (name: string) => wakeup({ path: { name }, baseUrl: baseUrl() }).then(unwrap),
-    onSuccess: (_data, name) => toaster.report(wakeOutcome(jobNamed(name), name)),
-    onError: (e, name) => toaster.failure(`Waking ${name} failed`, e),
-    ...tracking(wakeKey),
+    mutation: (v: ActionTarget) =>
+      wakeup({ path: { name: v.name }, baseUrl: baseUrl(v) }).then(unwrap),
+    onSuccess: (_data, v) => toaster.report(wakeOutcome(v.job, v.name)),
+    onError: (e, v) => toaster.failure(`Waking ${v.name} failed`, e),
+    ...tracking('wake'),
   })
-
   const cancelMutation = useMutation({
-    mutation: (name: string) => cancelJob({ path: { name }, baseUrl: baseUrl() }).then(unwrap),
-    onSuccess: (_data, name) =>
+    mutation: (v: ActionTarget) =>
+      cancelJob({ path: { name: v.name }, baseUrl: baseUrl(v) }).then(unwrap),
+    onSuccess: (_data, v) =>
       toaster.report({
-        title: `Stopping ${name}`,
+        title: `Stopping ${v.name}`,
         description: 'Waiting for the receiver to release the dataset safely.',
         tone: 'success',
       }),
-    onError: (e, name) => toaster.failure(`Stopping ${name} failed`, e),
-    ...tracking(cancelKey),
+    onError: (e, v) => toaster.failure(`Stopping ${v.name} failed`, e),
+    ...tracking('cancel'),
   })
-
   const pauseMutation = useMutation({
-    mutation: (name: string) => pauseJob({ path: { name }, baseUrl: baseUrl() }).then(unwrap),
-    onSuccess: (_data, name) =>
+    mutation: (v: ActionTarget) =>
+      pauseJob({ path: { name: v.name }, baseUrl: baseUrl(v) }).then(unwrap),
+    onSuccess: (_data, v) =>
       toaster.report({
-        title: `Paused ${name}`,
+        title: `Paused ${v.name}`,
         description: 'The partial transfer is kept; resume continues from it.',
         tone: 'success',
       }),
-    onError: (e, name) => toaster.failure(`Pausing ${name} failed`, e),
-    ...tracking(pauseKey),
+    onError: (e, v) => toaster.failure(`Pausing ${v.name} failed`, e),
+    ...tracking('pause'),
   })
-
   const resumeMutation = useMutation({
-    mutation: (name: string) => resumeJob({ path: { name }, baseUrl: baseUrl() }).then(unwrap),
-    onSuccess: (_data, name) => toaster.report({ title: `Resumed ${name}`, tone: 'success' }),
-    onError: (e, name) => toaster.failure(`Resuming ${name} failed`, e),
-    ...tracking(resumeKey),
+    mutation: (v: ActionTarget) =>
+      resumeJob({ path: { name: v.name }, baseUrl: baseUrl(v) }).then(unwrap),
+    onSuccess: (_data, v) => toaster.report({ title: `Resumed ${v.name}`, tone: 'success' }),
+    onError: (e, v) => toaster.failure(`Resuming ${v.name} failed`, e),
+    ...tracking('resume'),
   })
-
   const pushMutation = useMutation({
-    mutation: ({ name, peer }: { name: string; peer: string }) =>
-      pushToPeer({ path: { name, peer }, baseUrl: baseUrl() }).then(unwrap),
-    onSuccess: (_data, { name, peer }) => toaster.report(pushOutcome(jobNamed(name), name, peer)),
-    onError: (e, { name, peer }) => toaster.failure(`Push from ${name} to ${peer} failed`, e),
-    ...tracking(pushKey),
+    mutation: (v: ActionTarget & { peer: string }) =>
+      pushToPeer({ path: { name: v.name, peer: v.peer }, baseUrl: baseUrl(v) }).then(unwrap),
+    onSuccess: (_data, v) => toaster.report(pushOutcome(v.job, v.name, v.peer)),
+    onError: (e, v) => toaster.failure(`Push from ${v.name} to ${v.peer} failed`, e),
+    ...tracking('push'),
   })
 
   return {
@@ -151,15 +137,25 @@ export function useJobs(scope: MaybeRefOrGetter<string> = '') {
     warning,
     loading,
     live,
-    wake: (name: string) => wakeMutation.mutate(name),
-    cancel: (name: string) => cancelMutation.mutate(name),
-    pause: (name: string) => pauseMutation.mutate(name),
-    resume: (name: string) => resumeMutation.mutate(name),
-    pushTo: (name: string, peer: string) => pushMutation.mutate({ name, peer }),
-    isWaking: (name: string) => busy(wakeKey(name)),
-    isCancelling: (name: string) => busy(cancelKey(name)),
-    isPausing: (name: string) => busy(pauseKey(name)),
-    isResuming: (name: string) => busy(resumeKey(name)),
-    isPushing: (name: string, peer: string) => busy(pushKey({ name, peer })),
+    wake: (name: string) => {
+      if (!busy('wake', name)) wakeMutation.mutate(target(name))
+    },
+    cancel: (name: string) => {
+      if (!busy('cancel', name)) cancelMutation.mutate(target(name))
+    },
+    pause: (name: string) => {
+      if (!busy('pause', name)) pauseMutation.mutate(target(name))
+    },
+    resume: (name: string) => {
+      if (!busy('resume', name)) resumeMutation.mutate(target(name))
+    },
+    pushTo: (name: string, peer: string) => {
+      if (!busy('push', name, peer)) pushMutation.mutate({ ...target(name, peer), peer })
+    },
+    isWaking: (name: string) => busy('wake', name),
+    isCancelling: (name: string) => busy('cancel', name),
+    isPausing: (name: string) => busy('pause', name),
+    isResuming: (name: string) => busy('resume', name),
+    isPushing: (name: string, peer: string) => busy('push', name, peer),
   }
 }

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vite-plus/test'
-import { createApp, effectScope, nextTick } from 'vue'
+import { createApp, effectScope, nextTick, ref } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
 import { PiniaColada } from '@pinia/colada'
 
@@ -21,7 +21,7 @@ function pending() {
 vi.mock('../client', () => ({
   // The query behind useJobs; the stream normally fills this cache entry.
   listJobs: () => Promise.resolve({ data: [], error: undefined, response: new Response() }),
-  wakeup: () => pending(),
+  wakeup: vi.fn(() => pending()),
   cancel: () => pending(),
   pause: () => pending(),
   resume: () => pending(),
@@ -127,5 +127,21 @@ describe('useJobs in-flight tracking', () => {
 
     expect(jobs.isPushing('push_to_mira', 'mira')).toBe(true)
     expect(jobs.isPushing('push_to_mira', 'nova')).toBe(false)
+  })
+})
+
+it('pins action scope through navigation and releases the original busy key', async () => {
+  const { wakeup } = await import('../client')
+  const scope = ref('')
+  const jobs = run(() => useJobs(scope))
+  jobs.wake('backup')
+  scope.value = 'mira'
+  await nextTick()
+  expect(wakeup).toHaveBeenLastCalledWith({ path: { name: 'backup' }, baseUrl: '' })
+  expect(jobs.isWaking('backup')).toBe(false)
+  deferred[0]!.resolve()
+  await vi.waitFor(() => {
+    scope.value = ''
+    expect(jobs.isWaking('backup')).toBe(false)
   })
 })

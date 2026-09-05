@@ -4,6 +4,7 @@ import { RouterView, useRouter } from 'vue-router'
 import { useColorMode } from '@vueuse/core'
 import type { NavigationMenuItem } from '@nuxt/ui'
 import TernMark from './components/TernMark.vue'
+import { useToaster } from './composables/useToaster'
 import { useAuth } from './composables/useAuth'
 import { useHost } from './composables/useHost'
 import { useJobs } from './composables/useJobs'
@@ -13,7 +14,12 @@ import { usePools } from './composables/usePools'
 import { useSystemInfo } from './composables/useSystemInfo'
 
 const router = useRouter()
-const { logout } = useAuth()
+const { logout, error: authError } = useAuth()
+const toaster = useToaster()
+async function signOut() {
+  if (!(await logout()))
+    toaster.failure('Sign out failed; the session may still be active', authError.value)
+}
 const { host, prefix, scope } = useHost()
 // Three-state theme: auto follows the browser/OS preference live;
 // explicit light/dark stick. emitAuto keeps 'auto' visible to us
@@ -230,7 +236,7 @@ function toggleMode() {
               variant="ghost"
               size="sm"
               aria-label="Sign out"
-              @click="logout"
+              @click="signOut"
             />
           </UTooltip>
           <UDashboardSidebarCollapse />

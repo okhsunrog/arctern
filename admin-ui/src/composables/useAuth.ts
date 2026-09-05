@@ -49,10 +49,15 @@ export async function login(token: string): Promise<boolean> {
 }
 
 export async function logout() {
+  error.value = null
   try {
-    await fetch('/api/v1/auth/logout', { method: 'POST' })
-  } finally {
+    const response = await fetch('/api/v1/auth/logout', { method: 'POST' })
+    if (!response.ok) throw new Error(await responseMessage(response))
     status.value = 'anonymous'
+    return true
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+    return false
   }
 }
 

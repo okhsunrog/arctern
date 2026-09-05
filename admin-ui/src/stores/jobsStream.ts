@@ -47,7 +47,9 @@ export const useJobsStream = defineStore('jobs-stream', () => {
           // Writing with a bare `setQueryData` would leave the entry
           // detached and immediately stale, so the auto-refetch plugin
           // would start issuing HTTP fetches on top of a healthy stream.
-          queryCache.setEntryState(queryCache.ensure(jobsQuery(scope)), {
+          const entry = queryCache.ensure(jobsQuery(scope))
+          queryCache.cancel(entry)
+          queryCache.setEntryState(entry, {
             data: parsed,
             error: null,
             status: 'success',

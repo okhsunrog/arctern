@@ -131,3 +131,29 @@ describe('useJobsStream', () => {
     expect(stream.status['']).toBeUndefined()
   })
 })
+
+it('keeps a newer SSE snapshot when an older HTTP request completes', async () => {
+  harness()
+  const cache = useQueryCache()
+  const entry = cache.ensure(jobsQuery(''))
+  let resolve!: (jobs: JobStatus[]) => void
+  let signal!: AbortSignal
+  const request = cache.fetch(entry, {
+    ...entry.options!,
+    query: (context) => {
+      signal = context.signal
+      return new Promise<JobStatus[]>((done) => {
+        resolve = done
+      })
+    },
+  })
+  const stream = useJobsStream()
+  const release = stream.subscribe('')
+  const completed = { ...JOB, running: false }
+  FakeEventSource.instances[0]!.push([completed])
+  expect(signal.aborted).toBe(true)
+  resolve([JOB])
+  await request
+  expect(cache.getQueryData(jobsQuery('').key)).toEqual([completed])
+  release()
+})

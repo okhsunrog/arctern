@@ -226,6 +226,35 @@ via `zpool status -P` (physical paths) so the UI can show
 External tool dependency; gate the feature on smartctl being
 installed. Not a small piece of work.
 
+### 19. Alerting — only if someone asks
+
+Not planned for the single-operator case: the console already shows
+target staleness, failed runs and pool health, and the operator opens
+it anyway to trigger a manual push. Recorded here so the design is
+not re-derived when a user requests it.
+
+Two channels, because the sender is a laptop that may simply be off:
+
+- **Dead-man ping.** On every successful push cycle to a peer, GET a
+  configured URL (healthchecks.io or a self-hosted equivalent on the
+  receiver). A missing ping past the grace period is the alert. Ten
+  lines next to the `push_syncs` record; covers a powered-off laptop,
+  a dead daemon, an expired key.
+- **Edge-triggered notifications.** A `[notify]` section with one
+  webhook URL (ntfy-shaped: plain-text POST plus a Title header). Fire
+  on state transitions only, never per cycle: a push target entering
+  Error after two or three consecutive failures (one failure is the
+  laptop leaving the LAN mid-send, which resume handles), the existing
+  `AutoTargetStale` threshold, a snap/prune run error, pool health not
+  ONLINE or scrub errors, and on the receiver a dataset with no
+  `recv_transfers` row for longer than its expected cadence. Keep the
+  "already notified" state in SQLite so a restart does not re-send.
+
+Not a Prometheus `/metrics` endpoint: the daemon sits on loopback
+behind a cookie, and a home lab without Prometheus gains nothing. If
+metrics are ever wanted, write a `.prom` file for node_exporter's
+textfile collector once a minute instead.
+
 ---
 
 ## Architectural decisions waiting for code

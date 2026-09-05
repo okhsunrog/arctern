@@ -273,4 +273,4 @@ Things arctern deliberately won't do, so feature creep stays bounded:
   operator owns. Read-only display in the UI is fine; a structured
   editor would re-implement TOML semantics badly.
 - **Wrapping non-OpenZFS implementations** (TrueNAS-specific tooling,
-  Btrfs comparisons, etc.). arctern is OpenZFS ≥ 2.2 on Linux.
+  Btrfs comparisons, etc.). arctern is OpenZFS ≥ 2.3 on Linux.

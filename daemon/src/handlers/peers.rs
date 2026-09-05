@@ -167,7 +167,11 @@ pub async fn stream_peer_jobs(
     use std::time::Duration;
 
     let link = require_link(&state, &peer).await?;
-    let interval = tokio::time::interval(Duration::from_millis(500));
+    // Every tick is an RPC over the peer's SSH control channel, for as
+    // long as a browser tab looks at that host. Once a second is plenty
+    // for a status panel and half the traffic of the local 250ms/500ms
+    // cadence, which matters on a metered WireGuard route.
+    let interval = tokio::time::interval(Duration::from_millis(1000));
     let stream = futures_util::stream::unfold(
         (interval, link, None::<String>),
         |(mut interval, link, previous)| async move {

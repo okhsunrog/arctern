@@ -54,10 +54,6 @@ pub struct SystemInfo {
 /// definition.
 pub const JOB_KIND_SNAP: &str = "snap";
 
-/// String constant for the `sink` job kind. See `JOB_KIND_SNAP` for the
-/// rationale (string field on the wire so adding kinds is non-breaking).
-pub const JOB_KIND_SINK: &str = "sink";
-
 /// String constant for the `push` job kind. See `JOB_KIND_SNAP` for the
 /// rationale.
 pub const JOB_KIND_PUSH: &str = "push";

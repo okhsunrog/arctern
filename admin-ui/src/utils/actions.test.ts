@@ -40,11 +40,6 @@ describe('wakeOutcome', () => {
     expect(wakeOutcome(job({ kind: 'snap', targets: [] }), 'snap_nova').tone).toBe('success')
   })
 
-  it('does not claim success for a sink job, which has no cycle', () => {
-    const out = wakeOutcome(job({ kind: 'sink', targets: [] }), 'sink')
-    expect(out.tone).toBe('warning')
-  })
-
   // The original complaint: a manual-only active route means the woken
   // cycle selects nothing, yet the console reported "Woke up <job>".
   it('warns when the active route bars scheduled replication', () => {

@@ -13,7 +13,8 @@ Terminology used throughout:
   Needs only `sshd` and the `arctern` binary; running the daemon there
   is optional.
 
-Both need OpenZFS ≥ 2.2 (`zfs`/`zpool` on `PATH`) and OpenSSH.
+Both need OpenZFS ≥ 2.3 (`zfs`/`zpool` on `PATH`; the pool views read
+`zpool status -j`, which arrived in 2.3) and OpenSSH.
 
 ## 1. Install the binary (both hosts)
 

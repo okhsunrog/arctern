@@ -21,13 +21,6 @@ export interface ActionOutcome {
  */
 export function wakeOutcome(job: JobStatus | undefined, name: string): ActionOutcome {
   if (!job) return { title: `Woke up ${name}`, tone: 'success' }
-  if (job.kind === 'sink') {
-    return {
-      title: `${name} has no cycle to wake`,
-      description: 'Sink jobs are event-driven — they react to incoming transfers.',
-      tone: 'warning',
-    }
-  }
   if (job.kind !== 'push') return { title: `Woke up ${name}`, tone: 'success' }
   if (job.running) {
     return {

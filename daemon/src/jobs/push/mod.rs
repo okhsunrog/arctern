@@ -113,6 +113,21 @@ fn classify_peer_attempt(
     }
 }
 
+/// Group dataset paths by depth, shallowest first, keeping the input
+/// order within a level. Every ancestor of a path sits in an earlier
+/// level, so running the levels in sequence replicates parents before
+/// children whatever the concurrency within a level.
+fn depth_levels(paths: &[String]) -> Vec<Vec<&str>> {
+    let mut levels: std::collections::BTreeMap<usize, Vec<&str>> = Default::default();
+    for p in paths {
+        levels
+            .entry(p.matches('/').count())
+            .or_default()
+            .push(p.as_str());
+    }
+    levels.into_values().collect()
+}
+
 /// Safety-net poll when nothing is due and no signal arrives.
 pub const KIND: &str = arctern_api::JOB_KIND_PUSH;
 
@@ -498,34 +513,43 @@ impl PushJob {
         // its own recv channel. The futures run on this task (no
         // spawn), so borrowing &self is fine; the shared RateLimiter
         // keeps the aggregate under bandwidth_limit.
+        //
+        // One depth level at a time. A receive creates its target's parent
+        // when that is missing, so a child that starts before its parent
+        // leaves a placeholder where the parent's own full stream has to
+        // land — and `zfs recv` refuses a full stream over an existing
+        // dataset, every cycle. Ancestors therefore finish before any
+        // descendant starts; within a level nothing depends on anything.
         let errs = tokio::sync::Mutex::new(Vec::new());
         let cycle_bytes = std::sync::atomic::AtomicU64::new(0);
         self.queued_filesystems
             .store(sender_paths.len(), Ordering::Relaxed);
-        futures_util::StreamExt::for_each_concurrent(
-            futures_util::stream::iter(sender_paths.iter()),
-            self.parallel,
-            |sender_path| {
-                let errs = &errs;
-                let cycle_bytes = &cycle_bytes;
-                async move {
-                    // Claimed here rather than on completion: what makes
-                    // cancelling worthwhile is work not yet STARTED.
-                    self.queued_filesystems.fetch_sub(1, Ordering::Relaxed);
-                    if cancel.is_cancelled() {
-                        return;
+        for level in depth_levels(&sender_paths) {
+            futures_util::StreamExt::for_each_concurrent(
+                futures_util::stream::iter(level),
+                self.parallel,
+                |sender_path| {
+                    let errs = &errs;
+                    let cycle_bytes = &cycle_bytes;
+                    async move {
+                        // Claimed here rather than on completion: what makes
+                        // cancelling worthwhile is work not yet STARTED.
+                        self.queued_filesystems.fetch_sub(1, Ordering::Relaxed);
+                        if cancel.is_cancelled() {
+                            return;
+                        }
+                        let (bytes, err) = self
+                            .replicate_one(ctx, cancel, peer_name, peer, sender_path)
+                            .await;
+                        cycle_bytes.fetch_add(bytes, Ordering::Relaxed);
+                        if let Some(e) = err {
+                            errs.lock().await.push(e);
+                        }
                     }
-                    let (bytes, err) = self
-                        .replicate_one(ctx, cancel, peer_name, peer, sender_path)
-                        .await;
-                    cycle_bytes.fetch_add(bytes, Ordering::Relaxed);
-                    if let Some(e) = err {
-                        errs.lock().await.push(e);
-                    }
-                }
-            },
-        )
-        .await;
+                },
+            )
+            .await;
+        }
         self.queued_filesystems.store(0, Ordering::Relaxed);
         errors.extend(errs.into_inner());
         cycle_bytes.into_inner()
@@ -1203,6 +1227,35 @@ target = {{ root_fs = "backup/nova" }}
             .insert("b".into(), transfer("mira", "waiting_receiver"));
         assert!(job.status().cancellable);
         assert!(job.cancel_current());
+    }
+
+    // With `parallel >= 2` a child could start before its parent and create
+    // the parent as a placeholder, after which the parent's full stream
+    // was refused forever. Depth levels run in sequence, so that cannot
+    // happen; order within a level is the listing order.
+    #[test]
+    fn filesystems_are_scheduled_parents_first() {
+        let paths: Vec<String> = [
+            "tank/a/b/c",
+            "tank/a",
+            "tank/z",
+            "tank",
+            "tank/a/b",
+            "tank/z/y",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            depth_levels(&paths),
+            vec![
+                vec!["tank"],
+                vec!["tank/a", "tank/z"],
+                vec!["tank/a/b", "tank/z/y"],
+                vec!["tank/a/b/c"],
+            ]
+        );
+        assert!(depth_levels(&[]).is_empty());
     }
 
     #[test]

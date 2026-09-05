@@ -37,6 +37,13 @@ impl WireError {
 pub struct GuidsReply {
     pub guids: Vec<u64>,
     pub receive_resume_token: Option<String>,
+    /// Whether the target dataset exists at all. An empty `guids` used to
+    /// mean "first replication" — but a dataset that exists without
+    /// snapshots (a placeholder created for a child's receive) looks the
+    /// same and cannot take a full stream. Defaults to false so a reply
+    /// from a receiver that predates the field keeps its old meaning.
+    #[serde(default)]
+    pub exists: bool,
 }
 
 /// Reply to `proxy`: the local daemon's HTTP status + raw body.
@@ -95,4 +102,28 @@ where
         .new_codec();
     let framed = tokio_util::codec::Framed::new(io, codec);
     tarpc::serde_transport::new(framed, tarpc::tokio_serde::formats::Json::default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A receiver running a binary from before `exists` was added sends
+    // replies without it. Those must keep meaning what they meant: an
+    // empty list is a first replication.
+    #[test]
+    fn a_guids_reply_without_the_exists_field_still_parses() {
+        let old: GuidsReply =
+            serde_json::from_str(r#"{"guids":[],"receive_resume_token":null}"#).unwrap();
+        assert!(!old.exists);
+        assert!(old.guids.is_empty());
+
+        let new = GuidsReply {
+            guids: vec![1],
+            receive_resume_token: None,
+            exists: true,
+        };
+        let back: GuidsReply = serde_json::from_str(&serde_json::to_string(&new).unwrap()).unwrap();
+        assert_eq!(back, new);
+    }
 }

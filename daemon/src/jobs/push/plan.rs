@@ -432,18 +432,35 @@ pub fn build_send_args(
 /// Sending anyway just failed: every cycle, forever, with whatever
 /// wording `zfs recv` chose, after paying for a step hold and an opened
 /// stream. Deciding it here costs nothing and says what to do about it.
+///
+/// A target that exists WITHOUT snapshots is refused for the same reason
+/// with a different remedy: nothing diverged, but `zfs recv` will not lay
+/// a full stream over an existing dataset either. This is what a child's
+/// receive leaves behind when it creates its parent as a placeholder
+/// before the parent's own first sync ran.
 fn reject_unreceivable_full(
     plan: SnapshotPlan,
     target_dataset: &str,
     receiver: &[SnapshotEntry],
+    target_exists: bool,
 ) -> Result<SnapshotPlan, String> {
-    if matches!(plan, SnapshotPlan::Full { .. }) && !receiver.is_empty() {
+    if !matches!(plan, SnapshotPlan::Full { .. }) {
+        return Ok(plan);
+    }
+    if !receiver.is_empty() {
         return Err(format!(
             "{target_dataset} holds {} snapshot(s) but shares no snapshot or bookmark with the \
              sender, so only a full send applies and a full send cannot be received over existing \
              data. The two have diverged; reconcile by hand — destroy {target_dataset} to allow a \
              fresh full send, or restore a common base on the sender.",
             receiver.len()
+        ));
+    }
+    if target_exists {
+        return Err(format!(
+            "{target_dataset} exists but has no snapshots, and a full send cannot be received \
+             over an existing dataset. It is most likely a placeholder created for a child's \
+             receive; destroy it (it holds nothing) and the next cycle will send it in full."
         ));
     }
     Ok(plan)
@@ -474,7 +491,7 @@ pub(super) async fn plan_one_filesystem(
         .list_receiver_guids(target_dataset.to_string(), None)
         .await
         .map_err(|e| format!("list_receiver_guids: {e}"))?;
-    let (guids, token) = (reply.guids, reply.receive_resume_token);
+    let (guids, token, target_exists) = (reply.guids, reply.receive_resume_token, reply.exists);
     // The planner intersects on GUID only (see pick_plan); the receiver's
     // snapshot names and createtxg are unused, so carry each GUID in an
     // otherwise-empty SnapshotEntry to keep the pure planner signature.
@@ -498,7 +515,8 @@ pub(super) async fn plan_one_filesystem(
                 let plan = pick_plan_with_discard(&sender, &receiver, true);
                 let plan =
                     maybe_bookmark_fallback(runner, sender_dataset, plan, &sender, &receiver).await;
-                let plan = reject_unreceivable_full(plan, target_dataset, &receiver)?;
+                let plan =
+                    reject_unreceivable_full(plan, target_dataset, &receiver, target_exists)?;
                 return Ok((plan, sender));
             }
         },
@@ -522,7 +540,7 @@ pub(super) async fn plan_one_filesystem(
         &bookmarks,
     );
     let plan = maybe_bookmark_fallback(runner, sender_dataset, plan, &sender, &receiver).await;
-    let plan = reject_unreceivable_full(plan, target_dataset, &receiver)?;
+    let plan = reject_unreceivable_full(plan, target_dataset, &receiver, target_exists)?;
     Ok((plan, sender))
 }
 
@@ -618,7 +636,7 @@ mod tests {
             to: r("b", 2),
             discard_partial_recv: false,
         };
-        let err = reject_unreceivable_full(plan, "backup/nova/data", &[s("x", 9)])
+        let err = reject_unreceivable_full(plan, "backup/nova/data", &[s("x", 9)], true)
             .expect_err("a full send cannot land on a populated receiver");
         assert!(err.contains("backup/nova/data"), "got: {err}");
         assert!(err.contains("diverged"), "got: {err}");
@@ -632,9 +650,26 @@ mod tests {
             discard_partial_recv: false,
         };
         assert_eq!(
-            reject_unreceivable_full(plan.clone(), "backup/nova/data", &[]).unwrap(),
+            reject_unreceivable_full(plan.clone(), "backup/nova/data", &[], false).unwrap(),
             plan
         );
+    }
+
+    // A child received first creates its parent as a placeholder; the
+    // parent's own first sync then finds a dataset with no snapshots,
+    // which `zfs recv` refuses for a full stream — every cycle, with a
+    // ZFS error that never named the placeholder as the cause.
+    #[test]
+    fn a_full_plan_against_an_existing_empty_dataset_names_the_placeholder() {
+        let plan = SnapshotPlan::Full {
+            to: r("b", 2),
+            discard_partial_recv: false,
+        };
+        let err = reject_unreceivable_full(plan, "backup/nova/data", &[], true)
+            .expect_err("a full send cannot land on an existing dataset");
+        assert!(err.contains("placeholder"), "got: {err}");
+        assert!(err.contains("destroy"), "no remedy offered: {err}");
+        assert!(!err.contains("diverged"), "nothing diverged here: {err}");
     }
 
     // Divergence is about the FULL plan specifically: the fallback runs
@@ -656,7 +691,8 @@ mod tests {
             },
         ] {
             assert_eq!(
-                reject_unreceivable_full(plan.clone(), "backup/nova/data", &[s("x", 9)]).unwrap(),
+                reject_unreceivable_full(plan.clone(), "backup/nova/data", &[s("x", 9)], true)
+                    .unwrap(),
                 plan
             );
         }

@@ -79,7 +79,7 @@ impl ArcternControl for ControlServer {
         prefix_regex: Option<String>,
     ) -> Result<GuidsReply, WireError> {
         enforce_control_acl(&self.acl, "control:list_snapshots", true)?;
-        let (snapshots, receive_resume_token) = collect_receiver_snapshots(
+        let (snapshots, receive_resume_token, exists) = collect_receiver_snapshots(
             self.runner.as_ref(),
             &self.acl,
             &dataset,
@@ -89,6 +89,7 @@ impl ArcternControl for ControlServer {
         Ok(GuidsReply {
             guids: snapshots.into_iter().map(|s| s.guid).collect(),
             receive_resume_token,
+            exists,
         })
     }
 
@@ -190,13 +191,14 @@ fn enforce_root_fs<'a>(acl: &'a AllowedClient, dataset: &'a str) -> Result<(), W
 /// Shared core for the snapshot-inventory requests. Validates the
 /// dataset, enforces `root_fs`, lists matching snapshots and reads the
 /// receive resume token. A missing dataset (first replication) is the
-/// non-error empty case.
+/// non-error empty case, reported with `exists = false` so the planner
+/// can tell it from a dataset that exists with no snapshots.
 async fn collect_receiver_snapshots(
     runner: &dyn CommandRunner,
     acl: &AllowedClient,
     dataset: &str,
     prefix_regex: Option<&str>,
-) -> Result<(Vec<SnapshotEntry>, Option<String>), WireError> {
+) -> Result<(Vec<SnapshotEntry>, Option<String>, bool), WireError> {
     validate_dataset_name(dataset).map_err(|e| {
         WireError::new(
             ErrorCode::BadRequest,
@@ -220,7 +222,7 @@ async fn collect_receiver_snapshots(
     let entries = match zfskit::dataset::list(runner, &opts).await {
         Ok(v) => v,
         // First-replication shape: receiver dataset doesn't exist yet.
-        Err(ZfsError::DatasetNotFound { .. }) => return Ok((vec![], None)),
+        Err(ZfsError::DatasetNotFound { .. }) => return Ok((vec![], None, false)),
         Err(e) => {
             return Err(WireError::new(
                 zfs_error_code(&e),
@@ -257,7 +259,7 @@ async fn collect_receiver_snapshots(
             None
         }
     };
-    Ok((snapshots, receive_resume_token))
+    Ok((snapshots, receive_resume_token, true))
 }
 
 fn zfs_error_code(e: &ZfsError) -> ErrorCode {

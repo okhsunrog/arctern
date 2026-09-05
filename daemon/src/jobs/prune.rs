@@ -15,7 +15,7 @@ use std::time::Duration as StdDuration;
 
 use arctern_config::{PruneJobConfig, filter::resolve_all};
 use time::OffsetDateTime;
-use tokio::time::sleep;
+use tokio::time::sleep_until;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info_span, warn};
 use zfskit::dataset::ListOptions;
@@ -46,11 +46,19 @@ impl PruneJob {
         self.config.interval
     }
 
-    fn record_cycle(&self, last_error: Option<String>, interval: StdDuration) {
+    fn record_cycle(
+        &self,
+        last_error: Option<String>,
+        started: OffsetDateTime,
+        interval: StdDuration,
+    ) {
         let mut s = self.status.lock().unwrap();
         let now = OffsetDateTime::now_utc();
         s.last_run = Some(now);
-        s.next_run = Some(now + time::Duration::try_from(interval).unwrap_or(time::Duration::ZERO));
+        // Anchored to the cycle's start so the cadence does not drift by
+        // the cycle's own duration.
+        s.next_run =
+            Some(started + time::Duration::try_from(interval).unwrap_or(time::Duration::ZERO));
         s.last_error = last_error;
         s.running = false;
     }
@@ -79,14 +87,18 @@ impl Job for PruneJob {
         Box::pin(
             async move {
                 let interval = self.interval();
-                run_and_record(&self, &ctx, &job_name, interval).await;
+                // First deadline is now (startup-immediate); afterwards
+                // each cycle is due `interval` after the previous START.
+                let mut due = tokio::time::Instant::now();
                 loop {
                     tokio::select! {
                         _ = cancel.cancelled() => break,
-                        _ = sleep(interval) => {}
+                        _ = sleep_until(due) => {}
                         _ = self.wakeup.notified() => {}
                     }
+                    let started = tokio::time::Instant::now();
                     run_and_record(&self, &ctx, &job_name, interval).await;
+                    due = started + interval;
                 }
             }
             .instrument(span),
@@ -96,7 +108,8 @@ impl Job for PruneJob {
 
 async fn run_and_record(job: &PruneJob, ctx: &JobContext, job_name: &str, interval: StdDuration) {
     job.status.lock().unwrap().running = true;
-    let started_at = OffsetDateTime::now_utc().unix_timestamp();
+    let started = OffsetDateTime::now_utc();
+    let started_at = started.unix_timestamp();
     let run_id = if let Some(pool) = ctx.state.as_ref() {
         crate::state::job_runs::record_start(pool, job_name, started_at)
             .await
@@ -121,7 +134,7 @@ async fn run_and_record(job: &PruneJob, ctx: &JobContext, job_name: &str, interv
         )
         .await;
     }
-    job.record_cycle(outcome.err(), interval);
+    job.record_cycle(outcome.err(), started, interval);
 }
 
 impl PruneJob {

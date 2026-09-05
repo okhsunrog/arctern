@@ -21,7 +21,7 @@ use std::time::Duration as StdDuration;
 use arctern_config::{SnapJobConfig, filter::resolve_all};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use tokio::time::sleep;
+use tokio::time::sleep_until;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info_span, warn};
 use zfskit::dataset::{ListOptions, SnapshotOptions};
@@ -56,11 +56,20 @@ impl SnapJob {
         &self.config.snapshotting().prefix
     }
 
-    fn record_cycle(&self, last_error: Option<String>, interval: StdDuration) {
+    fn record_cycle(
+        &self,
+        last_error: Option<String>,
+        started: OffsetDateTime,
+        interval: StdDuration,
+    ) {
         let mut s = self.status.lock().unwrap();
         let now = OffsetDateTime::now_utc();
         s.last_run = Some(now);
-        s.next_run = Some(now + time::Duration::try_from(interval).unwrap_or(time::Duration::ZERO));
+        // The next cycle fires `interval` after this one STARTED, not
+        // after it finished: a snapshot every 15 minutes means every 15
+        // minutes, not 15 minutes plus however long snapshot+prune took.
+        s.next_run =
+            Some(started + time::Duration::try_from(interval).unwrap_or(time::Duration::ZERO));
         s.last_error = last_error;
         s.running = false;
     }
@@ -89,16 +98,20 @@ impl Job for SnapJob {
         Box::pin(
             async move {
                 let interval = self.interval();
-                // Startup-immediate: run a cycle now instead of waiting a
-                // full `interval` after a restart.
-                run_and_record(&self, &ctx, &job_name, interval).await;
+                // Startup-immediate: the first deadline is now, so a
+                // restart does not skip its window. After that each cycle
+                // is due `interval` after the previous one began, so the
+                // cadence does not drift by the cycle's own duration.
+                let mut due = tokio::time::Instant::now();
                 loop {
                     tokio::select! {
                         _ = cancel.cancelled() => break,
-                        _ = sleep(interval) => {}
+                        _ = sleep_until(due) => {}
                         _ = self.wakeup.notified() => {}
                     }
+                    let started = tokio::time::Instant::now();
                     run_and_record(&self, &ctx, &job_name, interval).await;
+                    due = started + interval;
                 }
             }
             .instrument(span),
@@ -108,7 +121,8 @@ impl Job for SnapJob {
 
 async fn run_and_record(job: &SnapJob, ctx: &JobContext, job_name: &str, interval: StdDuration) {
     job.status.lock().unwrap().running = true;
-    let started_at = OffsetDateTime::now_utc().unix_timestamp();
+    let started = OffsetDateTime::now_utc();
+    let started_at = started.unix_timestamp();
     let run_id = if let Some(pool) = ctx.state.as_ref() {
         crate::state::job_runs::record_start(pool, job_name, started_at)
             .await
@@ -133,7 +147,7 @@ async fn run_and_record(job: &SnapJob, ctx: &JobContext, job_name: &str, interva
         )
         .await;
     }
-    job.record_cycle(outcome.err(), interval);
+    job.record_cycle(outcome.err(), started, interval);
 }
 
 impl SnapJob {

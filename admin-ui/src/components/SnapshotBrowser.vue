@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, h, ref, resolveComponent, watch } from 'vue'
 import { useMutation, useQuery, useQueryCache } from '@pinia/colada'
-import type { TableColumn, TreeItem } from '@nuxt/ui'
+import type { TableColumn } from '@nuxt/ui'
 import {
   createHold,
   createSnapshot,
@@ -18,6 +18,7 @@ import { apiErrorCode, unwrap } from '../utils/errors'
 import CreateSnapshotModal from './CreateSnapshotModal.vue'
 import DestroySnapshotModal from './DestroySnapshotModal.vue'
 import BulkDestroySnapshotModal from './BulkDestroySnapshotModal.vue'
+import DatasetTree from './DatasetTree.vue'
 
 // Host scoping happens at the transport level: a peer exposes the SAME
 // endpoints as the local host, so the browser is the same component
@@ -59,90 +60,14 @@ const dsError = computed(() => datasetsResult.error.value?.message ?? null)
 const dsLoading = computed(() => datasetsResult.isLoading.value)
 const refreshDatasets = () => void datasetsResult.refetch()
 
-const treeFilter = ref('')
-/** 'name' | 'size' — size ordering answers "what eats my space". */
-const treeSort = ref<'name' | 'size'>('name')
-
-const usedByName = computed(() => {
-  const m = new Map<string, number>()
-  for (const d of datasets.value) {
-    const n = Number(d.properties?.used ?? '')
-    if (Number.isFinite(n)) m.set(d.name, n)
-  }
-  return m
-})
-
-interface DsNode extends TreeItem {
-  label: string
-  value: string
-  used: number | null
-  children?: DsNode[]
-}
-
-const tree = computed<DsNode[]>(() => {
-  const fs = datasets.value
-    .filter((d) => d.dataset_type === 'filesystem' || d.dataset_type === 'volume')
-    .slice()
-    .sort((a, b) => a.name.localeCompare(b.name))
-  const q = treeFilter.value.trim().toLowerCase()
-  const matching = q ? fs.filter((d) => d.name.toLowerCase().includes(q)) : fs
-  const byPath = new Map<string, DsNode>()
-  const roots: DsNode[] = []
-  for (const d of matching) {
-    const parts = d.name.split('/')
-    const node: DsNode = {
-      label: parts[parts.length - 1] ?? d.name,
-      value: d.name,
-      used: usedByName.value.get(d.name) ?? null,
-      icon: d.dataset_type === 'volume' ? 'i-lucide-box' : 'i-lucide-database',
-      defaultExpanded: parts.length <= 2 || q.length > 0,
-      children: undefined,
-    }
-    byPath.set(d.name, node)
-    const parentPath = parts.slice(0, -1).join('/')
-    const parent = byPath.get(parentPath)
-    if (parent) {
-      parent.children = parent.children ?? []
-      parent.children.push(node)
-    } else {
-      // Promoted root (pool root or filtered-out parent): keep the full
-      // path as label and open it — a collapsed sole root is a dead end.
-      node.label = d.name
-      node.defaultExpanded = true
-      roots.push(node)
-    }
-  }
-  if (treeSort.value === 'size') {
-    const bySize = (a: DsNode, b: DsNode) => (b.used ?? -1) - (a.used ?? -1)
-    const sortRec = (nodes: DsNode[]) => {
-      nodes.sort(bySize)
-      for (const n of nodes) if (n.children) sortRec(n.children)
-    }
-    sortRec(roots)
-  }
-  return roots
-})
-
 const rowSelection = ref<Record<string, boolean>>({})
-const selectedNode = ref<DsNode>()
-watch(selectedNode, (n) => {
-  if (n?.value) dataset.value = n.value
+watch(dataset, () => {
+  rowSelection.value = {}
 })
-// Parent-driven selection (deep link) before the tree loads.
-watch(
-  dataset,
-  (d) => {
-    if (d && selectedNode.value?.value !== d) {
-      selectedNode.value = { label: d, value: d, used: null }
-    }
-    rowSelection.value = {}
-  },
-  { immediate: true },
-)
 
 const selectedSummary = computed(() => datasets.value.find((d) => d.name === dataset.value))
 const selectedUsedBySnapshots = computed(() => {
-  const n = Number(selectedSummary.value?.properties?.usedbysnapshots ?? '')
+  const n = Number(selectedSummary.value?.properties?.usedbysnapshots ?? NaN)
   return Number.isFinite(n) ? n : null
 })
 
@@ -485,67 +410,12 @@ const columns = computed<TableColumn<SnapshotRow>[]>(() => [
   <div>
     <UAlert v-if="dsError" color="error" :title="dsError" icon="i-lucide-circle-x" class="mb-4" />
     <div class="grid grid-cols-1 lg:grid-cols-[minmax(17rem,22rem)_1fr] gap-4">
-      <!-- Dataset tree -->
-      <div class="rounded-md border border-default bg-default p-2 self-start">
-        <div class="flex gap-1 mb-2">
-          <UInput
-            v-model="treeFilter"
-            icon="i-lucide-search"
-            placeholder="Filter datasets…"
-            size="sm"
-            class="flex-1 font-mono"
-          />
-          <UTooltip :text="treeSort === 'name' ? 'Sort by size' : 'Sort by name'">
-            <UButton
-              size="sm"
-              color="neutral"
-              :variant="treeSort === 'size' ? 'soft' : 'ghost'"
-              :icon="
-                treeSort === 'size' ? 'i-lucide-arrow-down-wide-narrow' : 'i-lucide-arrow-down-a-z'
-              "
-              :aria-label="treeSort === 'name' ? 'Sort by size' : 'Sort by name'"
-              @click="treeSort = treeSort === 'name' ? 'size' : 'name'"
-            />
-          </UTooltip>
-        </div>
-        <div v-if="dsLoading && tree.length === 0" class="text-muted text-sm p-2">Loading…</div>
-        <UTree
-          v-else
-          v-model="selectedNode"
-          :items="tree"
-          :get-key="(i: DsNode) => i.value"
-          size="sm"
-          class="font-mono"
-        >
-          <!-- Overriding the trailing slot replaces the built-in expand
-               chevron, so render both: size, then a manual chevron that
-               follows the expanded state. -->
-          <template #item-trailing="{ item, expanded }">
-            <span class="ms-auto flex items-center gap-1 ps-2 shrink-0">
-              <span v-if="(item as DsNode).used != null" class="text-[11px] text-muted">
-                {{ formatBytes((item as DsNode).used) }}
-              </span>
-              <UIcon
-                v-if="(item as DsNode).children?.length"
-                name="i-lucide-chevron-right"
-                class="size-4 text-dimmed transition-transform"
-                :class="expanded ? 'rotate-90' : ''"
-              />
-            </span>
-          </template>
-        </UTree>
-        <UButton
-          size="xs"
-          variant="ghost"
-          color="neutral"
-          icon="i-lucide-refresh-cw"
-          class="mt-2"
-          :loading="dsLoading"
-          @click="refreshDatasets"
-        >
-          Refresh
-        </UButton>
-      </div>
+      <DatasetTree
+        v-model="dataset"
+        :datasets="datasets"
+        :loading="dsLoading"
+        @refresh="refreshDatasets"
+      />
 
       <!-- Snapshot table -->
       <div class="space-y-3 min-w-0">

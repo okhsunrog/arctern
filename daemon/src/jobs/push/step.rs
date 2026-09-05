@@ -93,9 +93,12 @@ impl StepCtx<'_> {
     /// Drive one I/O future to completion, racing the cancel token.
     /// When it has not completed after `STALL_AFTER` the transfer's
     /// phase switches to `stalled` (and back to `sending` once it
-    /// does), so the console can say which side is slow. The future is
-    /// polled to completion, never dropped mid-way: `write_all` is not
-    /// cancellation-safe, and dropping a pending read loses bytes.
+    /// does), so the console can say which side is slow. The stall timer
+    /// never interrupts the future: `write_all` is not cancellation-safe
+    /// and dropping a pending read loses bytes. Only the cancel token
+    /// does, and that is safe because the stream is abandoned on cancel:
+    /// the local send is killed and the remote `recv -s` keeps a
+    /// resumable partial at whatever byte the pipe stopped.
     async fn io_with_stall<T>(
         &self,
         transfer_key: &str,

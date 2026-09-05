@@ -374,26 +374,36 @@ impl PushJob {
         )
     }
 
-    /// Seed the per-peer outcome cache from SQLite once per process.
+    /// Seed the per-peer outcome cache from SQLite once per process. A
+    /// failed query leaves the flag clear so the next cycle retries:
+    /// marking it loaded on failure made every auto target look like it
+    /// had never synced until the daemon restarted.
     async fn ensure_outcomes_loaded(&self, ctx: &JobContext) {
-        if self.outcomes_loaded.swap(true, Ordering::Relaxed) {
+        if self.outcomes_loaded.load(Ordering::Relaxed) {
             return;
         }
         let Some(pool) = ctx.state.as_ref() else {
+            self.outcomes_loaded.store(true, Ordering::Relaxed);
             return;
         };
-        if let Ok(rows) = crate::state::push_syncs::for_job(pool, &self.config.name).await {
-            let mut o = self.peer_outcomes.lock().unwrap();
-            for r in rows {
-                o.insert(
-                    r.peer,
-                    PeerOutcome {
-                        last_success: r.last_success_at,
-                        last_attempt: Some(r.finished_at),
-                        outcome: r.status,
-                        message: r.error,
-                    },
-                );
+        match crate::state::push_syncs::for_job(pool, &self.config.name).await {
+            Ok(rows) => {
+                let mut o = self.peer_outcomes.lock().unwrap();
+                for r in rows {
+                    o.insert(
+                        r.peer,
+                        PeerOutcome {
+                            last_success: r.last_success_at,
+                            last_attempt: Some(r.finished_at),
+                            outcome: r.status,
+                            message: r.error,
+                        },
+                    );
+                }
+                self.outcomes_loaded.store(true, Ordering::Relaxed);
+            }
+            Err(e) => {
+                warn!(error = %e, "push: loading peer sync history failed; will retry next cycle");
             }
         }
     }

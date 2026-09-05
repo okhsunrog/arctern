@@ -268,8 +268,10 @@ async fn handle_proxy(
     // `control:proxy_read` read a third host's config under our identity
     // — and with `control:proxy_admin`, mutate it. `/api/v1/peers` alone
     // is refused for the same reason: it enumerates our peers, their ssh
-    // targets and their fingerprints.
-    if path == "/api/v1/peers" || path.starts_with("/api/v1/peers/") {
+    // targets and their fingerprints. Matched without the query string:
+    // `/api/v1/peers?x` is the same endpoint to the daemon's router.
+    let route = path.split('?').next().unwrap_or(path);
+    if route == "/api/v1/peers" || route.starts_with("/api/v1/peers/") {
         return Err(WireError::new(
             ErrorCode::Unauthorized,
             "proxy does not forward peer routes: the grant covers this host only".to_string(),
@@ -561,6 +563,9 @@ mod tests {
         let c = client(Arc::new(RecordingRunner::new()), acl(None));
         for path in [
             "/api/v1/peers",
+            // The daemon's router ignores the query string, so the
+            // guard has to as well.
+            "/api/v1/peers?x=1",
             "/api/v1/peers/elsewhere/proxy/api/v1/config",
             "/api/v1/peers/elsewhere/jobs/stream",
         ] {

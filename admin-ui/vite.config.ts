@@ -1,6 +1,7 @@
 import { fileURLToPath, URL } from 'node:url'
 
 import { defineConfig, lazyPlugins } from 'vite-plus'
+import { offlineIcons } from './build/offlineIcons'
 
 export default defineConfig({
   staged: {
@@ -69,7 +70,7 @@ export default defineConfig({
     ignorePatterns: ['**/src/client/**', '**/openapi.json'],
   },
   build: {
-    chunkSizeWarningLimit: 5000,
+    chunkSizeWarningLimit: 600,
     rolldownOptions: {
       onLog(level, log, handler) {
         if (log.code === 'INVALID_ANNOTATION' && log.id?.includes('@vueuse/core/dist/index.js')) {
@@ -90,6 +91,7 @@ export default defineConfig({
       import('@nuxt/ui/vite'),
     ])
     return [
+      offlineIcons(),
       vue(),
       vueDevTools(),
       ui({

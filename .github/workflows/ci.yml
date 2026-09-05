@@ -50,6 +50,10 @@ jobs:
       - run: cargo check --workspace --all-targets --features integration
         working-directory: arctern
 
+      - name: Check OpenAPI schema
+        run: cargo run -q -p arctern-daemon -- openapi | diff -u admin-ui/openapi.json -
+        working-directory: arctern
+
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
@@ -66,6 +70,9 @@ jobs:
         working-directory: admin-ui
         env:
           VITE_GIT_HOOKS: "0"
+      - name: Check generated client
+        run: vp exec openapi-ts && git diff --exit-code -- src/client
+        working-directory: admin-ui
       - run: vp check
         working-directory: admin-ui
       - run: vp test

@@ -1,15 +1,12 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import DashboardView from '../views/DashboardView.vue'
-import JobsView from '../views/JobsView.vue'
-import JobDetailView from '../views/JobDetailView.vue'
 
 // Every view is host-scoped: bare paths are the local daemon, the same
 // paths under /h/:host render the SAME components against a peer via
 // the generic proxy. One console, N hosts.
 const scoped = [
-  { path: 'dashboard', name: 'dashboard', component: DashboardView },
-  { path: 'jobs', name: 'jobs', component: JobsView },
-  { path: 'jobs/:name', name: 'job-detail', component: JobDetailView },
+  { path: 'dashboard', name: 'dashboard', component: () => import('../views/DashboardView.vue') },
+  { path: 'jobs', name: 'jobs', component: () => import('../views/JobsView.vue') },
+  { path: 'jobs/:name', name: 'job-detail', component: () => import('../views/JobDetailView.vue') },
   {
     path: 'snapshots',
     name: 'snapshots',

@@ -15,8 +15,7 @@ import { isRetryable } from './utils/errors'
 import router from './router'
 
 // The console must work fully offline (loopback-only daemon): register
-// the icon set locally, otherwise @iconify/vue fetches every icon from
-// api.iconify.design at runtime. 85K gzipped for the whole collection.
+// the icon set locally. Production keeps only referenced icons and Nuxt UI defaults.
 addCollection(lucide)
 
 client.interceptors.response.use((response) => {

@@ -12,10 +12,7 @@ import JobActions from '../components/JobActions.vue'
 import TransferPanel from '../components/TransferPanel.vue'
 import type { JobRun } from '../client'
 
-// chart.js is ~200kB and this view is a static router import, so a plain
-// import dragged the whole charting stack into the entry chunk — loaded
-// on every page including the login screen. The charts only render once
-// runs exist, so they load then too.
+// Load charts only after there is run history to display.
 const RunsCharts = defineAsyncComponent(() => import('../components/RunsCharts.vue'))
 
 const route = useRoute()

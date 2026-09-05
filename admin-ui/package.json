@@ -6,19 +6,19 @@
   "scripts": {
     "prepare": "vp config --no-agent --hooks-dir .vite-hooks",
     "dev": "vp dev",
-    "build": "vp exec vue-tsc --build && vp build",
+    "build": "vp exec vue-tsc --build && vp build && vp run check-bundle",
     "preview": "vp preview",
-    "openapi-ts": "openapi-ts"
+    "openapi-ts": "openapi-ts",
+    "check-bundle": "node scripts/check-bundle.mjs"
   },
   "dependencies": {
     "@fontsource-variable/ibm-plex-sans": "^5.2.8",
     "@fontsource/jetbrains-mono": "^5.2.8",
-    "@hey-api/client-fetch": "^0.13.1",
+    "@iconify/vue": "^5.0.1",
     "@nuxt/ui": "^4.9.0",
     "@pinia/colada": "^1.4.3",
     "@pinia/colada-plugin-auto-refetch": "^0.2.6",
     "@pinia/colada-plugin-retry": "^1.0.2",
-    "@vue/devtools-api": "^8.2.1",
     "@vueuse/core": "^14.4.0",
     "chart.js": "^4.5.1",
     "pinia": "^4.0.3",

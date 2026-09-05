@@ -31,6 +31,7 @@ fmt-check:
 # Full pre-push gate: Rust checks plus the complete Vite+ frontend workflow.
 ci: fmt-check lint test
     cd admin-ui && vp install && vp check && vp test && vp run build
+    just openapi-check
 
 # ─── Admin UI ──────────────────────────────────────────
 
@@ -48,6 +49,11 @@ build: build-ui
 openapi:
     cargo run -q -p arctern-daemon -- openapi > admin-ui/openapi.json
     cd admin-ui && vp exec openapi-ts
+
+# Verify the committed schema and generated frontend client.
+openapi-check:
+    cargo run -q -p arctern-daemon -- openapi | diff -u admin-ui/openapi.json -
+    cd admin-ui && vp exec openapi-ts && git diff --exit-code -- src/client
 
 # Vite dev server with hot reload. Proxies /api/v1 and /api-docs to
 # the daemon's loopback bind on 127.0.0.1:7878 (start the daemon

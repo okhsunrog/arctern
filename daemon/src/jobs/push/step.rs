@@ -56,6 +56,11 @@ impl From<std::io::Error> for StepError {
     }
 }
 
+/// How long to wait for a receiver's terminal Response after the bulk
+/// copy failed. A refusing `zfs recv` has already exited by the time the
+/// sender sees EPIPE, so the frame is normally there at once.
+const RECV_REASON_TIMEOUT: StdDuration = StdDuration::from_secs(30);
+
 /// What stays the same for every filesystem in one cycle.
 ///
 /// `run_one_filesystem` took fourteen parameters and `execute_one_plan`
@@ -231,7 +236,18 @@ async fn execute_one_plan(
             let _ = channel.finish().await;
             return Err(StepError::Cancelled);
         }
-        return Err(StepError::Failed(format!("stream copy: {error}")));
+        // A receiver that refuses the stream exits, and the copy dies with
+        // EPIPE once the channel's buffers are full. The reason it refused
+        // is in the Response frame it wrote before exiting — dropping the
+        // channel here threw that away and reported "Broken pipe" for any
+        // stream too large to fit in the buffers, which is every real one.
+        // Bounded: if the remote is still alive the pipe broke for some
+        // other reason and there may never be a frame to read.
+        let reason = tokio::time::timeout(RECV_REASON_TIMEOUT, channel.finish()).await;
+        return Err(StepError::Failed(match reason {
+            Ok(Ok(Response::Error { message, .. })) => format!("receiver: {message}"),
+            _ => format!("stream copy: {error}"),
+        }));
     }
     set_transfer_phase(transfers, transfer_key, "finalizing");
     close_stream_writer(channel_stdin).await;

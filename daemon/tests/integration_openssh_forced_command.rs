@@ -234,11 +234,15 @@ async fn recv_over_forced_command(
     write_header(&mut recv_stdin, &header)
         .await
         .expect("write recv header");
-    recv_stdin
-        .write_all(stream)
-        .await
-        .expect("write zfs stream to recv channel");
-    recv_stdin.shutdown().await.expect("shutdown recv stdin");
+    // A receiver that refuses the stream exits early and the write dies
+    // with EPIPE once the channel's buffers fill. That is not a test
+    // failure: the Response frame explaining the refusal is still on
+    // stdout, and reading it past a broken pipe is exactly what the
+    // sender relies on.
+    if let Err(e) = recv_stdin.write_all(stream).await {
+        eprintln!("openssh test: stream write ended early ({e}); reading the response anyway");
+    }
+    let _ = recv_stdin.shutdown().await;
     drop(recv_stdin);
 
     let recv_response_frame =
@@ -418,7 +422,8 @@ root_fs = {receiver_root:?}
          zfs create {source_dataset}; \
          mkdir -p {source_mount}; \
          zfs set mountpoint={source_mount} {source_dataset}; \
-         printf '%s\n' {payload1} > {source_mount}/payload.txt; \
+         m=$(findmnt -n -o TARGET -S {source_dataset}); test -n \"$m\"; \
+         printf '%s\n' {payload1} > \"$m/payload.txt\"; sync; \
          zfs snapshot {source_snapshot}",
         receiver_root = shell_quote(&receiver_root),
         remote_user = shell_quote(&remote_user),
@@ -532,11 +537,17 @@ root_fs = {receiver_root:?}
     eprintln!("openssh test: receiving incremental zfs stream");
     let source_snap2 = format!("{source_dataset}@snap2");
     let target_snap2 = format!("{target_dataset}@snap2");
+    // Through findmnt, not `source_mount`: the pool sits under an altroot,
+    // so the dataset is mounted at `<altroot>/<mountpoint>` and a write to
+    // the bare path would land on the VM's root filesystem — leaving snap2
+    // identical to snap1, which the refusal scenario below relies on not
+    // being the case.
     run_remote_shell(&format!(
-        "set -e; printf '%s\n' {} >> {}; zfs snapshot {}",
-        shell_quote(&format!("payload two {suffix}")),
-        shell_quote(&format!("{source_mount}/payload.txt")),
-        shell_quote(&source_snap2),
+        "set -e; m=$(findmnt -n -o TARGET -S {src}); test -n \"$m\"; \
+         printf '%s\n' {payload} >> \"$m/payload.txt\"; sync; zfs snapshot {snap2}",
+        src = shell_quote(&source_dataset),
+        payload = shell_quote(&format!("payload two {suffix}")),
+        snap2 = shell_quote(&source_snap2),
     ));
     let incremental_stream = zfs_send_stream(
         &target,
@@ -564,6 +575,60 @@ root_fs = {receiver_root:?}
         source_guid2, target_guid2,
         "incremental recv snapshot GUID mismatch"
     );
+
+    // A refused stream larger than the channel's in-flight buffers: the
+    // sender's copy dies with EPIPE, and the receiver's Response must
+    // still carry zfs's reason rather than nothing at all. 8 MiB of
+    // urandom does not compress, so it cannot fit in the buffers.
+    eprintln!("openssh test: checking a refused large stream still explains itself");
+    let source_snap3 = format!("{source_dataset}@snap3");
+    // The pool is imported under an altroot, so the dataset is mounted at
+    // `<altroot>/<mountpoint>`; ask the kernel where rather than writing
+    // into a directory of the same name on the VM's root filesystem.
+    run_remote_shell(&format!(
+        "set -e; m=$(findmnt -n -o TARGET -S {src}); test -n \"$m\"; \
+         dd if=/dev/urandom of=\"$m/blob\" bs=1M count=8 status=none; sync; \
+         zfs snapshot {snap3}",
+        src = shell_quote(&source_dataset),
+        snap3 = shell_quote(&source_snap3),
+    ));
+    // Base the stream on snap1 while the target's head is snap2: the
+    // production shape of a refusal ("destination has been modified since
+    // most recent snapshot"). An extra empty snapshot on the target would
+    // not do — zfs only refuses when data changed since the base.
+    let refused_stream = zfs_send_stream(
+        &target,
+        &["-i".to_string(), source_snap1.clone(), source_snap3.clone()],
+    );
+    assert!(
+        refused_stream.len() > 4 << 20,
+        "stream must exceed the channel buffers, got {} bytes",
+        refused_stream.len()
+    );
+    let refused = recv_over_forced_command(
+        &session,
+        recv_header(
+            target_dataset.clone(),
+            SendKind::Incremental,
+            Some("snap1"),
+            "snap3",
+        ),
+        &refused_stream,
+    )
+    .await;
+    match refused {
+        Response::Error { message, .. } => {
+            assert!(
+                !message.contains("Broken pipe"),
+                "receiver reported the symptom, not the reason: {message:?}"
+            );
+            assert!(
+                message.contains("snapshot") || message.contains("destination"),
+                "receiver's reason does not read like a zfs refusal: {message:?}"
+            );
+        }
+        other => panic!("diverged target must refuse the incremental, got {other:?}"),
+    }
 
     eprintln!("openssh test: checking recv target outside root_fs is rejected");
     let outside_root_response = recv_over_forced_command(

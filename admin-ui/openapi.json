@@ -1623,6 +1623,10 @@
             "type": "boolean",
             "description": "True while a cancel request would actually abort something. False\nonce every in-flight transfer has passed the point where cancel is\na no-op (finalizing/committing) — the decision belongs to the job,\nnot to each UI surface that draws a stop button."
           },
+          "dry_run": {
+            "type": "boolean",
+            "description": "Push jobs configured with `dry_run = true`: every cycle plans and\nlogs but sends nothing, so the job can never be \"synced\". Runs and\ntarget outcomes carry the status `dry_run` instead of `ok`."
+          },
           "transfers": {
             "type": "array",
             "items": {

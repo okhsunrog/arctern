@@ -83,6 +83,9 @@ pub struct JobStatusInner {
     /// True while `cancel_current` would abort real work. Kinds without
     /// a cancellable cycle leave this false.
     pub cancellable: bool,
+    /// Push jobs in plan-only mode: cycles log what they would send and
+    /// send nothing, so their clean runs are `dry_run`, never `ok`.
+    pub dry_run: bool,
     /// In-flight transfer progress (push jobs only), one entry per
     /// parallel send slot.
     pub transfers: Vec<arctern_api::TransferInfo>,

@@ -35,6 +35,10 @@ export function jobStatus(j: JobStatus): StatusView {
   if (j.paused) return view('neutral', 'i-lucide-circle-pause', 'paused')
   if (j.running) return view('info', 'i-lucide-loader', 'running', true)
   if (jobFailureMessage(j)) return view('error', 'i-lucide-circle-x', 'error')
+  // Plan-only: the job runs, logs what it would send, and sends nothing.
+  // It cannot be "ok" in the sense the other jobs mean, and it used to
+  // say exactly that.
+  if (j.dry_run) return view('neutral', 'i-lucide-flask-conical', 'dry run')
   const targets = j.targets ?? []
   // Push jobs: per-target history survives daemon restarts (SQLite),
   // while last_run is in-memory — a freshly restarted daemon must not
@@ -80,6 +84,8 @@ export function runStatus(status: string): StatusView {
       return view('info', 'i-lucide-loader', 'running', true)
     case 'cancelled':
       return view('neutral', 'i-lucide-circle-slash', 'cancelled')
+    case 'dry_run':
+      return view('neutral', 'i-lucide-flask-conical', 'dry run')
     default:
       return view('neutral', 'i-lucide-circle-help', status)
   }

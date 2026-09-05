@@ -47,6 +47,7 @@ pub(crate) fn status_snapshot(state: &AppState) -> Vec<JobStatus> {
             running: s.running,
             paused: s.paused,
             cancellable: s.cancellable,
+            dry_run: s.dry_run,
             transfers: s.transfers,
             targets: s.targets,
         })

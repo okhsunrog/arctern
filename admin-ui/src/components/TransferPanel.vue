@@ -76,6 +76,10 @@ function targetLine(tg: TargetStatus): string {
     const previous = tg.last_success ? ` · last sync ${formatAge(tg.last_success)}` : ''
     return `Cancelled by operator ${formatAge(tg.last_attempt)}${previous}`
   }
+  if (targetOutcome(tg) === 'dry_run') {
+    const previous = tg.last_success ? ` · last real sync ${formatAge(tg.last_success)}` : ''
+    return `Dry run ${formatAge(tg.last_attempt)}, nothing was sent${previous}`
+  }
   const synced = tg.last_success ? `synced ${formatAge(tg.last_success)}` : 'never synced'
   if (tg.manual_queued) return `${synced} · manual push queued`
   if (tg.mode !== 'auto') return synced

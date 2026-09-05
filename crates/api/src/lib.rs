@@ -88,6 +88,11 @@ pub struct JobStatus {
     /// not to each UI surface that draws a stop button.
     #[serde(default)]
     pub cancellable: bool,
+    /// Push jobs configured with `dry_run = true`: every cycle plans and
+    /// logs but sends nothing, so the job can never be "synced". Runs and
+    /// target outcomes carry the status `dry_run` instead of `ok`.
+    #[serde(default)]
+    pub dry_run: bool,
     /// In-flight transfers, one per parallel send slot. UI derives
     /// speed from `bytes_sent` deltas between live snapshots.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

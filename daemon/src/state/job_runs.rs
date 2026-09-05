@@ -15,6 +15,10 @@ pub const STATUS_ERROR: &str = "error";
 pub const STATUS_RUNNING: &str = "running";
 #[allow(dead_code)]
 pub const STATUS_CANCELLED: &str = "cancelled";
+/// A push cycle in `dry_run` mode that completed without errors. Kept
+/// apart from `ok` because `ok` is what `push_syncs` treats as a real
+/// sync (`last_success_at`), and a dry run has replicated nothing.
+pub const STATUS_DRY_RUN: &str = "dry_run";
 /// A `running` row that outlived the process that wrote it: the daemon
 /// was hard-killed or hit its shutdown deadline before `record_finish`
 /// ran. Reconciled at startup so history never shows a perpetual

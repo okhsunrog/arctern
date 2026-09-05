@@ -84,11 +84,21 @@ type PeerOutcomes = HashMap<String, PeerOutcome>;
 /// failure is how a routine `systemctl restart` used to paint the job
 /// red. `cancelled` covers the case where the token fired between steps,
 /// so no step got to report it.
-fn classify_peer_attempt(cancelled: bool, errors: &[StepError]) -> (&'static str, Option<String>) {
+///
+/// A dry run that went through cleanly is `dry_run`, not `ok`: `ok` is
+/// what `push_syncs` turns into `last_success_at`, which drives the auto
+/// schedule and the "synced 2h ago" the console shows. A job in plan-only
+/// mode has replicated nothing, and used to report exactly that as a
+/// healthy sync.
+fn classify_peer_attempt(
+    cancelled: bool,
+    dry_run: bool,
+    errors: &[StepError],
+) -> (&'static str, Option<String>) {
     if cancelled || errors.iter().any(|e| matches!(e, StepError::Cancelled)) {
         ("cancelled", None)
     } else if errors.is_empty() {
-        ("ok", None)
+        (if dry_run { "dry_run" } else { "ok" }, None)
     } else {
         (
             "error",
@@ -423,7 +433,8 @@ impl PushJob {
                 .await;
             total_bytes += bytes;
             let finished = OffsetDateTime::now_utc().unix_timestamp();
-            let (status, message) = classify_peer_attempt(cancel.is_cancelled(), &peer_errors);
+            let (status, message) =
+                classify_peer_attempt(cancel.is_cancelled(), self.config.dry_run, &peer_errors);
             if let Some(pool) = ctx.state.as_ref() {
                 let _ = crate::state::push_syncs::record(
                     pool,
@@ -679,6 +690,7 @@ impl Job for PushJob {
     fn status(&self) -> JobStatusInner {
         let mut s = self.status.lock().unwrap().clone();
         s.paused = self.paused.load(Ordering::Relaxed);
+        s.dry_run = self.config.dry_run;
         s.transfers = {
             let g = self.transfers.lock().unwrap();
             let mut v: Vec<TransferInfo> = g.values().cloned().collect();
@@ -939,6 +951,7 @@ impl PushJob {
         // the very same event as cancelled.
         let rendered;
         let (status, err_msg) = match &outcome {
+            Ok(()) if self.config.dry_run => (crate::state::job_runs::STATUS_DRY_RUN, None),
             Ok(()) => (crate::state::job_runs::STATUS_OK, None),
             Err(StepError::Cancelled) => (crate::state::job_runs::STATUS_CANCELLED, None),
             Err(e) => {
@@ -1195,7 +1208,7 @@ target = {{ root_fs = "backup/nova" }}
     #[test]
     fn cancellation_is_not_a_peer_error() {
         assert_eq!(
-            classify_peer_attempt(true, &[StepError::Cancelled]),
+            classify_peer_attempt(true, false, &[StepError::Cancelled]),
             ("cancelled", None)
         );
     }
@@ -1205,9 +1218,43 @@ target = {{ root_fs = "backup/nova" }}
     #[test]
     fn a_cancelled_step_outranks_a_token_that_already_cleared() {
         assert_eq!(
-            classify_peer_attempt(false, &[StepError::Cancelled]),
+            classify_peer_attempt(false, false, &[StepError::Cancelled]),
             ("cancelled", None)
         );
+    }
+
+    // `ok` becomes `last_success_at`, which schedules the next auto sync
+    // and paints the target "synced". A plan-only cycle sent nothing and
+    // must not earn either.
+    #[test]
+    fn a_clean_dry_run_is_not_a_sync() {
+        assert_eq!(classify_peer_attempt(false, true, &[]), ("dry_run", None));
+        // Errors and cancellation still win over the dry-run label.
+        assert_eq!(
+            classify_peer_attempt(false, true, &[StepError::Cancelled]),
+            ("cancelled", None)
+        );
+        assert_eq!(
+            classify_peer_attempt(false, true, &[StepError::Failed("plan: boom".into())]).0,
+            "error"
+        );
+    }
+
+    #[test]
+    fn a_dry_run_job_says_so_in_its_status() {
+        let cfg: PushJobConfig = toml::from_str(
+            r#"
+name = "push_test"
+targets = ["mira"]
+dry_run = true
+filesystems = { "novafs/data" = true }
+target = { root_fs = "backup/nova" }
+"#,
+        )
+        .expect("test config parses");
+        let job = PushJob::new(cfg, None, &[], None).expect("job builds");
+        assert!(job.status().dry_run);
+        assert!(!test_job(&["mira"]).status().dry_run);
     }
 
     // The sentinel this replaced was a bare "cancelled" string, so any
@@ -1216,6 +1263,7 @@ target = {{ root_fs = "backup/nova" }}
     #[test]
     fn a_failure_mentioning_cancellation_is_still_a_failure() {
         let (status, message) = classify_peer_attempt(
+            false,
             false,
             &[StepError::Failed(
                 "execute tank/a: receiver: cancelled".into(),
@@ -1232,6 +1280,7 @@ target = {{ root_fs = "backup/nova" }}
     fn several_failures_are_reported_together() {
         let (status, message) = classify_peer_attempt(
             false,
+            false,
             &[
                 StepError::Failed("plan tank/a: boom".into()),
                 StepError::Failed("plan tank/b: bang".into()),
@@ -1246,6 +1295,6 @@ target = {{ root_fs = "backup/nova" }}
 
     #[test]
     fn a_clean_peer_attempt_is_ok() {
-        assert_eq!(classify_peer_attempt(false, &[]), ("ok", None));
+        assert_eq!(classify_peer_attempt(false, false, &[]), ("ok", None));
     }
 }

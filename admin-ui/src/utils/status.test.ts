@@ -26,6 +26,30 @@ describe('job status outcomes', () => {
     expect(runStatus('cancelled').color).toBe('neutral')
   })
 
+  it('never calls a dry-run job ok', () => {
+    // A plan-only job used to show "ok" and "synced" after every cycle
+    // while having replicated nothing.
+    const job = pushJob({
+      dry_run: true,
+      last_run: '2026-09-05T10:00:00Z',
+      targets: [
+        {
+          peer: 'mira',
+          mode: 'auto',
+          connected: true,
+          last_attempt: 200,
+          last_outcome: 'dry_run',
+        },
+      ],
+    })
+
+    expect(jobStatus(job).label).toBe('dry run')
+    expect(jobStatus(job).color).toBe('neutral')
+    expect(runStatus('dry_run').label).toBe('dry run')
+    // Errors still outrank the dry-run label.
+    expect(jobStatus(pushJob({ dry_run: true, last_error: 'plan: boom' })).color).toBe('error')
+  })
+
   it('counts a target failure even when the job-level error is empty', () => {
     const job = pushJob({
       targets: [

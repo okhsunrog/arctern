@@ -98,6 +98,9 @@ SSH):
   `prune` (receiver-side retention).
 - **Grid retention** (`4x15m | 24x1h | 14x1d`) with the zrepl idiom of
   protecting non-prefixed (manual) snapshots by default.
+- **Full history or just the head:** `replicate = "all"` (default) mirrors
+  every filtered snapshot to the receiver like zrepl does; `"latest"` sends
+  one snapshot per push for the smallest delta on a metered link.
 - **Robust replication:** GUID-based common-snapshot detection, resume tokens
   (`recv -s`), `discard_partial_recv`, bookmark fallback when the common
   snapshot aged out (zrepl's `#zrepl_CURSOR_*` bookmarks qualify — that is the

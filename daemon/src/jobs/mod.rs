@@ -208,6 +208,12 @@ pub(crate) async fn prune_dataset(
             Err(zfskit::ZfsError::SnapshotHeld { .. }) => {
                 tracing::warn!(snapshot = %target, "snapshot is held; skipping");
             }
+            // A `zfs send -I` in flight keeps its intermediate snapshots
+            // busy without a hold. Like a hold, that is a reason to skip
+            // this one and keep pruning, not to abandon the dataset.
+            Err(zfskit::ZfsError::Busy { .. }) => {
+                tracing::warn!(snapshot = %target, "snapshot is busy (a send is using it); skipping");
+            }
             Err(e) => {
                 return Err(format!("destroy {target}: {e}"));
             }

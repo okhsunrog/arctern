@@ -305,6 +305,7 @@ pub(super) async fn run_one_filesystem(
     let to_hold_target: Option<(String, u64)> = match plan {
         SnapshotPlan::Full { to, .. }
         | SnapshotPlan::Incremental { to, .. }
+        | SnapshotPlan::IncrementalAll { to, .. }
         | SnapshotPlan::IncrementalFromBookmark { to, .. } => {
             Some((format!("{sender_dataset}@{}", to.name), to.guid))
         }
@@ -316,9 +317,13 @@ pub(super) async fn run_one_filesystem(
     // step (zrepl holds both ends): losing it mid-send or between a
     // failed step and its retry breaks incrementality / resumability.
     // Bookmark bases can't be held — snapshot prune can't destroy a
-    // bookmark, so they're safe without one.
+    // bookmark, so they're safe without one. The intermediate snapshots
+    // of a `-I` stream need no hold either: `zfs send` keeps them busy
+    // for as long as it runs, and prune treats busy as skip.
     let from_hold_target: Option<String> = match plan {
-        SnapshotPlan::Incremental { from, .. } => Some(format!("{sender_dataset}@{}", from.name)),
+        SnapshotPlan::Incremental { from, .. } | SnapshotPlan::IncrementalAll { from, .. } => {
+            Some(format!("{sender_dataset}@{}", from.name))
+        }
         _ => None,
     };
     let tag = step_hold_tag(job_name, peer_name);

@@ -555,8 +555,19 @@ impl PushJob {
         cycle_bytes.into_inner()
     }
 
-    /// Plan + execute one filesystem against one peer. Returns bytes
-    /// actually sent and at most one error message.
+    /// Replicate one filesystem to one peer until the receiver holds the
+    /// sender's head or a step fails. Returns bytes actually sent and at
+    /// most one error message.
+    ///
+    /// A step moves the receiver by one plan: a resume finishes only the
+    /// snapshot the token names, a full send lands one snapshot, and in
+    /// `all` mode a `-I` stream stops at the head that existed when it
+    /// was planned. Each of those used to be the whole cycle, so after a
+    /// resume or a long first sync the receiver sat at an old snapshot
+    /// until the next scheduled cycle — up to `auto_interval` later. The
+    /// loop re-plans after every successful step instead. Bounded so a
+    /// snap job racing ahead of the push cannot keep the cycle alive
+    /// forever.
     async fn replicate_one(
         &self,
         ctx: &JobContext,
@@ -565,21 +576,63 @@ impl PushJob {
         peer: &Arc<PeerLink>,
         sender_path: &str,
     ) -> (u64, Option<StepError>) {
+        const MAX_STEPS_PER_CYCLE: usize = 16;
+        let mut total = 0u64;
+        for step in 1.. {
+            let (bytes, outcome) = self
+                .replicate_step(ctx, cancel, peer_name, peer, sender_path)
+                .await;
+            total += bytes;
+            match outcome {
+                StepOutcome::Done => return (total, None),
+                StepOutcome::Failed(e) => return (total, Some(e)),
+                StepOutcome::Advanced => {}
+            }
+            if self.config.dry_run || cancel.is_cancelled() {
+                return (total, None);
+            }
+            if step >= MAX_STEPS_PER_CYCLE {
+                warn!(
+                    sender = %sender_path,
+                    steps = step,
+                    "push: still behind the sender's head after the per-cycle step limit; continuing next cycle"
+                );
+                return (total, None);
+            }
+        }
+        unreachable!("the step loop returns from inside");
+    }
+
+    /// Plan + execute one step for one filesystem against one peer.
+    async fn replicate_step(
+        &self,
+        ctx: &JobContext,
+        cancel: &CancellationToken,
+        peer_name: &str,
+        peer: &Arc<PeerLink>,
+        sender_path: &str,
+    ) -> (u64, StepOutcome) {
         let runner = ctx.zfs.command_runner();
         // FR-005: literal concat — target = root_fs/sender_path.
         let target = format!("{}/{}", self.config.target.root_fs, sender_path);
         tracing::info!(sender = %sender_path, target = %target, "push: planning");
-        let (plan, sender_snaps) =
-            match plan_one_filesystem(runner, peer.as_ref(), sender_path, &target, &self.filter)
-                .await
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    let msg = format!("plan {sender_path}: {e}");
-                    warn!(error = %msg);
-                    return (0, Some(StepError::Failed(msg)));
-                }
-            };
+        let (plan, sender_snaps) = match plan_one_filesystem(
+            runner,
+            peer.as_ref(),
+            sender_path,
+            &target,
+            &self.filter,
+            self.config.replicate,
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                let msg = format!("plan {sender_path}: {e}");
+                warn!(error = %msg);
+                return (0, StepOutcome::Failed(StepError::Failed(msg)));
+            }
+        };
         // If the planner picked discard, send the explicit RPC before
         // opening the recv channel — it's idempotent and makes the recv
         // channel's first action a fresh, clean recv.
@@ -589,6 +642,9 @@ impl PushJob {
                 discard_partial_recv: true,
                 ..
             } | SnapshotPlan::Incremental {
+                discard_partial_recv: true,
+                ..
+            } | SnapshotPlan::IncrementalAll {
                 discard_partial_recv: true,
                 ..
             } | SnapshotPlan::IncrementalFromBookmark {
@@ -602,13 +658,13 @@ impl PushJob {
             } else if let Err(e) = peer.discard_partial_recv(target.clone()).await {
                 let msg = format!("discard partial receive {target}: {e}");
                 warn!(target = %target, error = %e, "discard_partial_recv RPC failed; refusing to open recv stream");
-                return (0, Some(StepError::Failed(msg)));
+                return (0, StepOutcome::Failed(StepError::Failed(msg)));
             }
         }
         match &plan {
             SnapshotPlan::Nothing => {
                 tracing::info!(sender = %sender_path, "push: nothing to do");
-                return (0, None);
+                return (0, StepOutcome::Done);
             }
             SnapshotPlan::Full { to, .. } => {
                 tracing::info!(sender = %sender_path, to = %to.name, "push: full send");
@@ -617,6 +673,12 @@ impl PushJob {
                 tracing::info!(
                     sender = %sender_path, from = %from.name, to = %to.name,
                     "push: incremental send"
+                );
+            }
+            SnapshotPlan::IncrementalAll { from, to, .. } => {
+                tracing::info!(
+                    sender = %sender_path, from = %from.name, to = %to.name,
+                    "push: incremental send with every snapshot in between"
                 );
             }
             SnapshotPlan::IncrementalFromBookmark { from, to, .. } => {
@@ -636,15 +698,15 @@ impl PushJob {
         }
         if self.config.dry_run {
             tracing::info!(sender = %sender_path, target = %target, "push: dry-run skipping execution");
-            return (0, None);
+            return (0, StepOutcome::Advanced);
         }
         // Publish transfer info for the UI. Total is a dry-run
         // estimate; resume streams have no cheap estimate.
         let kind = match &plan {
             SnapshotPlan::Full { .. } => "full",
-            SnapshotPlan::Incremental { .. } | SnapshotPlan::IncrementalFromBookmark { .. } => {
-                "incremental"
-            }
+            SnapshotPlan::Incremental { .. }
+            | SnapshotPlan::IncrementalAll { .. }
+            | SnapshotPlan::IncrementalFromBookmark { .. } => "incremental",
             SnapshotPlan::Resume { .. } => "resume",
             SnapshotPlan::Nothing => unreachable!("filtered above"),
         };
@@ -688,20 +750,29 @@ impl PushJob {
             .map(|t| t.bytes_sent)
             .unwrap_or(0);
         match res {
-            Ok(()) => (bytes, None),
+            Ok(()) => (bytes, StepOutcome::Advanced),
             Err(StepError::Cancelled) => {
                 tracing::info!(sender = %sender_path, "push: transfer cancelled");
-                (bytes, Some(StepError::Cancelled))
+                (bytes, StepOutcome::Failed(StepError::Cancelled))
             }
             Err(e) => {
                 // Context is added to the message, never around the
                 // variant — wrapping used to erase the cancelled case.
                 let msg = format!("execute {sender_path}: {e}");
                 warn!(error = %msg);
-                (bytes, Some(StepError::Failed(msg)))
+                (bytes, StepOutcome::Failed(StepError::Failed(msg)))
             }
         }
     }
+}
+
+/// What one replication step did to the receiver.
+enum StepOutcome {
+    /// Receiver already holds the sender's head: nothing was sent.
+    Done,
+    /// A stream landed; the receiver may still be behind, re-plan.
+    Advanced,
+    Failed(StepError),
 }
 
 impl Job for PushJob {

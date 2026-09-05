@@ -22,8 +22,8 @@ pub use prune::{PruneError, evaluate as evaluate_keep_rules};
 pub use schema::{
     AllowedClient, Config, Defaults, FilesystemFilter, JobConfig, KeepRule, PeerConfig, PeerMode,
     PruneJobConfig, PruningConfig, PruningDefaults, PushJobConfig, PushTarget, RecvConfig,
-    RouteConfig, SendFlagsConfig, SnapJobConfig, SnapshotFilterConfig, SnapshottingConfig,
-    SnapshottingDefaults,
+    ReplicateMode, RouteConfig, SendFlagsConfig, SnapJobConfig, SnapshotFilterConfig,
+    SnapshottingConfig, SnapshottingDefaults,
 };
 
 #[derive(Debug, Error)]

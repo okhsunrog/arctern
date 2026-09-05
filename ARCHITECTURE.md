@@ -184,19 +184,33 @@ For a push job replicating one target peer:
    (maintained by the reconnect task; see below). No link → the target is
    blocked, retried on the next connectivity signal.
 2. Filesystems replicate through a bounded-concurrency pipeline (`parallel =
-   N`, default 1). For each filesystem:
+   N`, default 1), one depth level at a time so a parent always lands before
+   its children (a child's receive creates missing ancestors as unmountable
+   placeholders, and a full stream cannot land on an existing dataset). For
+   each filesystem, steps repeat until the receiver holds the sender's head
+   (bounded per cycle), because a resume finishes only the snapshot its
+   token names and a first full send lands only one snapshot:
    - `list_receiver_guids(target, None)` over the control channel — receiver
-     GUIDs plus the `receive_resume_token`. Deliberately unfiltered: the
-     common base may carry a foreign prefix (zrepl history, a travelled
-     manual snapshot).
+     GUIDs plus the `receive_resume_token` and whether the target exists.
+     Deliberately unfiltered: the common base may carry a foreign prefix
+     (zrepl history, a travelled manual snapshot).
    - List local sender snapshots (filtered) and bookmarks via zfskit.
    - Compute the plan via `pick_plan_with_token`: resume, full, incremental
      from snapshot, or incremental from bookmark (the no-common-snapshot
-     fallback).
+     fallback). The job's `replicate` mode decides how much history moves:
+     `all` (default, zrepl's behaviour) sends `zfs send -I` so every filtered
+     snapshot between the common base and the head reaches the receiver, and
+     a first sync starts from the oldest snapshot; `latest` sends `-i`
+     straight to the head, one snapshot per push, the smallest delta. A
+     bookmark cannot be the base of `-I`, so a cursor-based step in `all`
+     mode goes to the first snapshot past the bookmark and the next step
+     continues with `-I`.
    - If the plan wants `discard_partial_recv`, call the RPC first — it's
      idempotent and makes the recv channel's first action a clean recv.
    - Place step holds (the `to` snapshot, plus the `from` snapshot for
-     incrementals) BEFORE the send.
+     incrementals) BEFORE the send. Intermediate snapshots of a `-I` stream
+     need none: `zfs send` keeps them busy, and prune skips busy snapshots
+     like held ones.
    - Open a fresh recv channel, write `RecvHeader`, spawn `zfs send` locally,
      and copy its stdout into the channel — through the job-wide token bucket
      when `bandwidth_limit` is set, publishing progress into the job's
@@ -204,7 +218,9 @@ For a push job replicating one target peer:
    - Half-close stdin, read the single response frame.
    - On Ok: advance the cursor — create the new GUID-named cursor bookmark,
      destroy stale same-(job, peer) cursors, then sweep the step-hold tag from
-     the dataset's filtered snapshots.
+     the dataset's filtered snapshots. If the cursor bookmark could not be
+     created, the hold on `to` stays (it is the only thing still protecting
+     incrementality) and only stale holds are swept.
    - On Error: log, leave step holds in place (so a retry can find the
      snapshot), record the error.
 3. After all filesystems, record the per-peer outcome (`push_syncs`) and the

@@ -326,6 +326,25 @@ pub enum KeepRule {
     },
 }
 
+/// What a push job replicates of the sender's filtered snapshot history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplicateMode {
+    /// Every filtered snapshot, as zrepl does: the receiver mirrors the
+    /// sender's history (one `zfs send -I` per cycle carries all the
+    /// snapshots between the common base and the head), so a
+    /// receiver-side prune job has something to thin and restores from
+    /// the receiver can pick any point the sender still had at push
+    /// time. Costs the data written and deleted between snapshots.
+    #[default]
+    All,
+    /// Only the newest filtered snapshot per cycle (`zfs send -i`
+    /// straight to the head). The receiver holds one snapshot per push;
+    /// the transfer is the smallest possible delta. Right for a metered
+    /// link where the receiver is a disaster copy, not a history.
+    Latest,
+}
+
 /// Push job — active sender. Each cycle, lists local matching snapshots
 /// per filesystem, asks the peer over its SSH control channel what it
 /// has, intersects by GUID, and pipes a full / incremental / resume
@@ -374,6 +393,9 @@ pub struct PushJobConfig {
     /// cursor bookmarks. Intended for first-run verification.
     #[serde(default)]
     pub dry_run: bool,
+    /// Which of the sender's filtered snapshots reach the receiver.
+    #[serde(default)]
+    pub replicate: ReplicateMode,
     /// Both fields `None` after parsing means "build from
     /// `[defaults].prefix`"; resolved at load time. (Non-Option for
     /// the same TOML-subtable-vs-Option reason as `snapshotting`.)

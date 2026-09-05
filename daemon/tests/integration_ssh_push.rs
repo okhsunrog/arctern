@@ -182,3 +182,69 @@ async fn ssh_push_full_then_incremental_with_hold_and_cursor() {
     sender_pool.destroy().await.ok();
     receiver_pool.destroy().await.ok();
 }
+
+/// `replicate = "all"` sends `zfs send -I base head`. The receiver must
+/// end up with every snapshot in between, GUIDs intact, and holding the
+/// base and head on the sender must be enough — the intermediates are
+/// kept busy by the send itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn incremental_all_lands_every_intermediate_snapshot() {
+    let runner = ssh_runner_from_env();
+    let r: &dyn CommandRunner = &runner;
+    let sender_pool = LoopbackPool::create(ssh_runner_from_env())
+        .await
+        .expect("create sender pool");
+    let receiver_pool = LoopbackPool::create(ssh_runner_from_env())
+        .await
+        .expect("create receiver pool");
+
+    let src = format!("{}/data", sender_pool.name());
+    let dst_root = format!("{}/backups", receiver_pool.name());
+    let dst = format!("{dst_root}/data");
+    let opts = CreateOptions::new()
+        .create_parents()
+        .property("mountpoint", "none");
+    zfskit::dataset::create(r, &src, &opts).await.expect("src");
+    zfskit::dataset::create(r, &dst_root, &opts)
+        .await
+        .expect("dst root");
+
+    let names = ["a", "b", "c", "d"];
+    for n in names {
+        zfskit::dataset::snapshot(r, &format!("{src}@{n}"), &SnapshotOptions::new())
+            .await
+            .expect("snapshot");
+    }
+    // First sync in `all` mode: full of the OLDEST, then -I to the head.
+    pipe_send_to_recv(
+        r,
+        SendArgs::new(format!("{src}@a")),
+        RecvArgs::new(dst.clone()).resumable().unmounted(),
+    )
+    .await;
+    zfskit::hold::hold(r, &format!("{src}@a"), STEP_HOLD_TAG)
+        .await
+        .expect("hold base");
+    zfskit::hold::hold(r, &format!("{src}@d"), STEP_HOLD_TAG)
+        .await
+        .expect("hold head");
+    pipe_send_to_recv(
+        r,
+        SendArgs::new(format!("{src}@d")).incremental_all(format!("{src}@a")),
+        RecvArgs::new(dst.clone()).resumable().unmounted(),
+    )
+    .await;
+
+    for n in names {
+        let ours = snapshot_guid(r, &format!("{src}@{n}"))
+            .await
+            .expect("sender guid");
+        let theirs = snapshot_guid(r, &format!("{dst}@{n}"))
+            .await
+            .unwrap_or_else(|| panic!("receiver is missing @{n}"));
+        assert_eq!(ours, theirs, "GUID mismatch on @{n}");
+    }
+
+    sender_pool.destroy().await.ok();
+    receiver_pool.destroy().await.ok();
+}

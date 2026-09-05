@@ -67,6 +67,18 @@ zrepl cursor/step bookmarks on nova (`#zrepl_CURSOR*`) were destroyed
 at cutover. zrepl itself is still installed on both hosts; purge the
 packages once a few weeks of arctern operation look clean.
 
+## How much history the receiver gets
+
+zrepl replicates every filtered snapshot. arctern does the same by
+default (`replicate = "all"` on the push job, one `zfs send -I` per
+cycle), so `received_prune` on mira has the sender's 15-minute history
+to thin and a restore from the NAS can pick any point the laptop still
+had at push time. Until 0.3.0 arctern sent only the newest snapshot per
+push; that behaviour is still available as `replicate = "latest"` and is
+the right choice when the WireGuard route is metered — the daily delta
+is smaller than the sum of the quarter-hourly ones because data written
+and deleted between snapshots never travels.
+
 ## Rollback
 
 `systemctl disable --now arctern && systemctl enable --now zrepl` on

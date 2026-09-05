@@ -32,6 +32,28 @@ fmt-check:
 ci: fmt-check lint test
     cd admin-ui && vp install && vp check && vp test && vp run build
     just openapi-check
+    just sqlx-check
+
+# ─── SQLite queries ────────────────────────────────────
+
+# `sqlx::query!` checks every SQL statement against a schema at compile
+# time. The checked results live in `.sqlx/` so a plain `cargo build`
+# needs no database; re-run this after changing a query or a migration.
+# Needs `cargo install sqlx-cli --no-default-features --features sqlite,rustls`.
+SQLX_DEV_DB := "target/sqlx-dev.db"
+
+sqlx-prepare:
+    rm -f {{SQLX_DEV_DB}}
+    DATABASE_URL=sqlite://{{justfile_directory()}}/{{SQLX_DEV_DB}} sqlx database create
+    DATABASE_URL=sqlite://{{justfile_directory()}}/{{SQLX_DEV_DB}} sqlx migrate run --source daemon/migrations
+    DATABASE_URL=sqlite://{{justfile_directory()}}/{{SQLX_DEV_DB}} cargo sqlx prepare --workspace
+
+# Verify `.sqlx/` matches the queries in the tree (what CI runs).
+sqlx-check:
+    rm -f {{SQLX_DEV_DB}}
+    DATABASE_URL=sqlite://{{justfile_directory()}}/{{SQLX_DEV_DB}} sqlx database create
+    DATABASE_URL=sqlite://{{justfile_directory()}}/{{SQLX_DEV_DB}} sqlx migrate run --source daemon/migrations
+    DATABASE_URL=sqlite://{{justfile_directory()}}/{{SQLX_DEV_DB}} cargo sqlx prepare --check --workspace
 
 # ─── Admin UI ──────────────────────────────────────────
 

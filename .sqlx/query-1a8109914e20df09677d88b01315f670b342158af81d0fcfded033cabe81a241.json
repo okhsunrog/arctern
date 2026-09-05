@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM recv_transfers WHERE completed_at < ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "1a8109914e20df09677d88b01315f670b342158af81d0fcfded033cabe81a241"
+}

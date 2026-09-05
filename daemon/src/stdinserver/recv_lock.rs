@@ -7,10 +7,10 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
+use rustix::fs::{FlockOperation, OFlags};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, thiserror::Error)]
@@ -49,30 +49,21 @@ impl RecvLocks {
             .write(true)
             .create(true)
             .mode(0o600)
-            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .custom_flags((OFlags::CLOEXEC | OFlags::NOFOLLOW).bits() as i32)
             .open(path)
             .map_err(|source| RecvLockError::Io {
                 dataset: dataset.to_string(),
                 source,
             })?;
-
-        // SAFETY: `file` owns a valid descriptor for this call and remains
-        // alive in `RecvLock` for the entire critical section.
-        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if result == 0 {
-            Ok(RecvLock { _file: file })
-        } else {
-            let source = io::Error::last_os_error();
-            if source.kind() == io::ErrorKind::WouldBlock {
-                Err(RecvLockError::Busy {
-                    dataset: dataset.to_string(),
-                })
-            } else {
-                Err(RecvLockError::Io {
-                    dataset: dataset.to_string(),
-                    source,
-                })
-            }
+        match rustix::fs::flock(&file, FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => Ok(RecvLock { _file: file }),
+            Err(rustix::io::Errno::WOULDBLOCK) => Err(RecvLockError::Busy {
+                dataset: dataset.to_string(),
+            }),
+            Err(errno) => Err(RecvLockError::Io {
+                dataset: dataset.to_string(),
+                source: io::Error::from(errno),
+            }),
         }
     }
 }

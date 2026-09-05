@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT expires_at FROM browser_sessions\n             WHERE session_hash = ? AND namespace = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "expires_at",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "569d7aa91b7a704cd02358bf5c73f180030e69450698c475a369523847c74e32"
+}

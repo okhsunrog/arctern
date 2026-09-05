@@ -31,46 +31,46 @@ pub async fn insert(
     job_name: Option<&str>,
     message: &str,
 ) -> Result<i64, StateError> {
-    let res = sqlx::query(
+    let res = sqlx::query!(
         "INSERT INTO log_events (timestamp, level, job_name, message)
          VALUES (?, ?, ?, ?)",
+        timestamp,
+        level,
+        job_name,
+        message,
     )
-    .bind(timestamp)
-    .bind(level)
-    .bind(job_name)
-    .bind(message)
     .execute(pool)
     .await?;
     Ok(res.last_insert_rowid())
 }
 
 /// Read events strictly newer than `since_id`, oldest first, capped at
-/// `limit`. Used by the SSE bridge in step 11 to replay backlog before
+/// `limit`. Used by the events bridge to replay backlog in order before
 /// switching to the live broadcast.
 pub async fn since(
     pool: &SqlitePool,
     since_id: i64,
     limit: i64,
 ) -> Result<Vec<LogRow>, StateError> {
-    let rows: Vec<(i64, i64, String, Option<String>, String)> = sqlx::query_as(
-        "SELECT id, timestamp, level, job_name, message
-           FROM log_events
-          WHERE id > ?
-          ORDER BY id ASC
-          LIMIT ?",
+    let rows = sqlx::query!(
+        r#"SELECT id, timestamp, level, job_name, message
+             FROM log_events
+            WHERE id > ?
+            ORDER BY id ASC
+            LIMIT ?"#,
+        since_id,
+        limit,
     )
-    .bind(since_id)
-    .bind(limit)
     .fetch_all(pool)
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, timestamp, level, job_name, message)| LogRow {
-            id,
-            timestamp,
-            level,
-            job_name,
-            message,
+        .map(|r| LogRow {
+            id: r.id,
+            timestamp: r.timestamp,
+            level: r.level,
+            job_name: r.job_name,
+            message: r.message,
         })
         .collect())
 }
@@ -98,34 +98,34 @@ pub async fn recent_since(
     since_id: i64,
     limit: i64,
 ) -> Result<Vec<LogRow>, StateError> {
-    let mut rows: Vec<(i64, i64, String, Option<String>, String)> = sqlx::query_as(
-        "SELECT id, timestamp, level, job_name, message
-           FROM log_events
-          WHERE id > ?
-          ORDER BY id DESC
-          LIMIT ?",
+    let mut rows = sqlx::query!(
+        r#"SELECT id, timestamp, level, job_name, message
+             FROM log_events
+            WHERE id > ?
+            ORDER BY id DESC
+            LIMIT ?"#,
+        since_id,
+        limit,
     )
-    .bind(since_id)
-    .bind(limit)
     .fetch_all(pool)
     .await?;
     rows.reverse();
     Ok(rows
         .into_iter()
-        .map(|(id, timestamp, level, job_name, message)| LogRow {
-            id,
-            timestamp,
-            level,
-            job_name,
-            message,
+        .map(|r| LogRow {
+            id: r.id,
+            timestamp: r.timestamp,
+            level: r.level,
+            job_name: r.job_name,
+            message: r.message,
         })
         .collect())
 }
 
-/// Current max(id), or 0 if the table is empty. Used by
-/// `Request::GetLogCursor`.
+/// Current max(id), or 0 if the table is empty. The control channel's
+/// `log_cursor` RPC.
 pub async fn cursor(pool: &SqlitePool) -> Result<i64, StateError> {
-    let v: Option<i64> = sqlx::query_scalar("SELECT MAX(id) FROM log_events")
+    let v = sqlx::query_scalar!(r#"SELECT MAX(id) AS "max: i64" FROM log_events"#)
         .fetch_one(pool)
         .await?;
     Ok(v.unwrap_or(0))
@@ -136,10 +136,12 @@ pub async fn trim_older_than(
     pool: &SqlitePool,
     cutoff_unix_seconds: i64,
 ) -> Result<u64, StateError> {
-    let res = sqlx::query("DELETE FROM log_events WHERE timestamp < ?")
-        .bind(cutoff_unix_seconds)
-        .execute(pool)
-        .await?;
+    let res = sqlx::query!(
+        "DELETE FROM log_events WHERE timestamp < ?",
+        cutoff_unix_seconds
+    )
+    .execute(pool)
+    .await?;
     Ok(res.rows_affected())
 }
 

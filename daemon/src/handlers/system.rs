@@ -38,7 +38,37 @@ pub async fn get_system_info() -> Json<SystemInfo> {
 pub async fn get_arc() -> Result<Json<ArcStats>, ApiError> {
     let s = zfskit::system::arc_stats()
         .map_err(|e| ApiError::internal(format!("arcstats read: {e}")))?;
-    Ok(Json(ArcStats::from(s)))
+    Ok(Json(arc_stats_wire(s)))
+}
+
+fn arc_stats_wire(s: zfskit::system::ArcStats) -> ArcStats {
+    let ratio = s.hit_ratio();
+    ArcStats {
+        hit_ratio: ratio.is_finite().then_some(ratio),
+        size: s.size,
+        c: s.c,
+        c_min: s.c_min,
+        c_max: s.c_max,
+        hits: s.hits,
+        misses: s.misses,
+        demand_data_hits: s.demand_data_hits,
+        demand_data_misses: s.demand_data_misses,
+        demand_metadata_hits: s.demand_metadata_hits,
+        demand_metadata_misses: s.demand_metadata_misses,
+        prefetch_data_hits: s.prefetch_data_hits,
+        prefetch_data_misses: s.prefetch_data_misses,
+        prefetch_metadata_hits: s.prefetch_metadata_hits,
+        prefetch_metadata_misses: s.prefetch_metadata_misses,
+        mru_hits: s.mru_hits,
+        mfu_hits: s.mfu_hits,
+        mru_ghost_hits: s.mru_ghost_hits,
+        mfu_ghost_hits: s.mfu_ghost_hits,
+        l2_size: s.l2_size,
+        l2_hits: s.l2_hits,
+        l2_misses: s.l2_misses,
+        compressed_size: s.compressed_size,
+        uncompressed_size: s.uncompressed_size,
+    }
 }
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]

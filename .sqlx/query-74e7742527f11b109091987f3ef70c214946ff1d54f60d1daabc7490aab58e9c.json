@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MAX(id) AS \"max: i64\" FROM log_events",
+  "describe": {
+    "columns": [
+      {
+        "name": "max: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "74e7742527f11b109091987f3ef70c214946ff1d54f60d1daabc7490aab58e9c"
+}

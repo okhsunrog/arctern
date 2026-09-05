@@ -26,6 +26,7 @@ use zfskit::dataset::ListOptions;
 use zfskit::models::DatasetType;
 use zfskit::runner::CommandRunner;
 
+use super::acl::{check_operation, check_root_fs};
 use super::recv_lock::RecvLocks;
 
 /// Run the control channel until stdin EOF or a fatal transport error.
@@ -78,7 +79,7 @@ impl ArcternControl for ControlServer {
         dataset: String,
         prefix_regex: Option<String>,
     ) -> Result<GuidsReply, WireError> {
-        enforce_control_acl(&self.acl, "control:list_snapshots", true)?;
+        check_operation(&self.acl, "control:list_snapshots", true)?;
         let (snapshots, receive_resume_token, exists) = collect_receiver_snapshots(
             self.runner.as_ref(),
             &self.acl,
@@ -98,14 +99,14 @@ impl ArcternControl for ControlServer {
         _ctx: tarpc::context::Context,
         dataset: String,
     ) -> Result<(), WireError> {
-        enforce_control_acl(&self.acl, "control:discard_partial_recv", false)?;
+        check_operation(&self.acl, "control:discard_partial_recv", false)?;
         validate_dataset_name(&dataset).map_err(|e| {
             WireError::new(
                 ErrorCode::BadRequest,
                 format!("invalid dataset {dataset:?}: {e}"),
             )
         })?;
-        enforce_root_fs(&self.acl, &dataset)?;
+        check_root_fs(&self.acl, &dataset)?;
         // Never abort `%recv` while a receive channel still owns it. This
         // also serializes cleanup with admission of the replacement stream.
         let _recv_lock = self.recv_locks.acquire(&dataset).map_err(|e| {
@@ -145,49 +146,6 @@ impl ArcternControl for ControlServer {
     }
 }
 
-fn enforce_control_acl(
-    acl: &AllowedClient,
-    op: &'static str,
-    allow_legacy_control: bool,
-) -> Result<(), WireError> {
-    if acl.operations.iter().any(|configured| configured == op)
-        || (allow_legacy_control
-            && acl
-                .operations
-                .iter()
-                .any(|configured| configured == "control"))
-    {
-        return Ok(());
-    }
-    Err(WireError::new(
-        ErrorCode::Unauthorized,
-        format!(
-            "identity {:?} is not allowed for control operation {op:?}",
-            acl.identity
-        ),
-    ))
-}
-
-/// Reject `dataset` if the ACL has a `root_fs` set and `dataset` is not
-/// equal to or a descendant of it. No root_fs configured means no
-/// restriction.
-fn enforce_root_fs<'a>(acl: &'a AllowedClient, dataset: &'a str) -> Result<(), WireError> {
-    let Some(root) = acl.root_fs.as_deref() else {
-        return Ok(());
-    };
-    if dataset == root {
-        return Ok(());
-    }
-    let prefix = format!("{root}/");
-    if dataset.starts_with(&prefix) {
-        return Ok(());
-    }
-    Err(WireError::new(
-        ErrorCode::Unauthorized,
-        format!("{dataset:?} is not under allowed root_fs {root:?}"),
-    ))
-}
-
 /// Shared core for the snapshot-inventory requests. Validates the
 /// dataset, enforces `root_fs`, lists matching snapshots and reads the
 /// receive resume token. A missing dataset (first replication) is the
@@ -205,7 +163,7 @@ async fn collect_receiver_snapshots(
             format!("invalid dataset {dataset:?}: {e}"),
         )
     })?;
-    enforce_root_fs(acl, dataset)?;
+    check_root_fs(acl, dataset)?;
     let regex = compile_prefix_regex(prefix_regex).map_err(|e| {
         WireError::new(
             ErrorCode::BadRequest,
@@ -231,25 +189,9 @@ async fn collect_receiver_snapshots(
         }
     };
     let snapshots: Vec<SnapshotEntry> = entries
-        .into_iter()
-        .filter_map(|e| {
-            let snap_name = e.snapshot_name.clone()?;
-            if let Some(re) = &regex
-                && !re.is_match(&snap_name)
-            {
-                return None;
-            }
-            let guid = e
-                .properties
-                .get("guid")
-                .and_then(|p| p.value.parse::<u64>().ok())?;
-            let createtxg = e.createtxg.parse::<u64>().ok()?;
-            Some(SnapshotEntry {
-                name: snap_name,
-                guid,
-                createtxg,
-            })
-        })
+        .iter()
+        .filter_map(crate::inventory::snapshot_entry)
+        .filter(|s| regex.as_ref().is_none_or(|re| re.is_match(&s.name)))
         .collect();
     let receive_resume_token = match zfskit::recv::receive_resume_token(runner, dataset).await {
         Ok(opt) => opt,
@@ -304,9 +246,9 @@ async fn handle_proxy(
     body: Option<String>,
 ) -> Result<ProxyReply, WireError> {
     if method == "GET" {
-        enforce_control_acl(acl, "control:proxy_read", true)?;
+        check_operation(acl, "control:proxy_read", true)?;
     } else if method == "POST" || method == "DELETE" {
-        enforce_control_acl(acl, "control:proxy_admin", false)?;
+        check_operation(acl, "control:proxy_admin", false)?;
     } else {
         return Err(WireError::new(
             ErrorCode::BadRequest,

@@ -61,14 +61,17 @@ crates/
 daemon/        binary crate
   src/
     main.rs                  daemon + dispatch entry points (split via subcommand)
-    auth.rs                  PeerCredentials connect-info for UDS
+    auth.rs                  PeerCredentials connect-info for UDS + browser sessions
     handlers/                axum handlers (local + proxied to peers)
-    jobs/                    JobManager, snap, push, prune
-    peer/                    PeerLink, ControlClient, RecvChannel, reconnect
-    stdinserver/             dispatch + control + recv handlers
-    state/                   SQLite pool, migrations, queries
+    inventory.rs             shared `zfs list` helpers (filters → datasets, GUID inventories)
+    jobs/                    JobManager, periodic (snap, prune), push
+    peer/                    PeerLink, ControlClient, RecvChannel, reconnect, PeersState
+    stdinserver/             dispatch + acl + control + recv + events handlers
+    state/                   SQLite pool, compile-checked queries, tracing layer
     router.rs                axum wiring
     error.rs                 ApiError → HTTP response mapping
+  migrations/                SQLite schema, applied by sqlx::migrate! at open
+.sqlx/                       checked query data for offline `sqlx::query!` builds
 admin-ui/                    Vue 3 SPA, embedded via build.rs
 docs/                        install.md, deploy-snap-only.md, deploy-full-mirror.md,
                              migrate-from-zrepl.md, roadmap.md, example-config.toml (+ diagrams/, screenshots/)
@@ -81,6 +84,8 @@ packaging/systemd/           arctern.service unit
 - `cargo test --workspace`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo add <crate>` for deps
+- `just sqlx-prepare` after changing any `sqlx::query!` or a migration (regenerates `.sqlx/`; CI runs `just sqlx-check`)
+- `just openapi` after changing `crates/api` types or handler signatures (regenerates the spec + TS client)
 - `just vm-up` / `just vm-down` / `just test-integration` — VM-driven integration tests (shared with zfskit, port 2226)
 
 ## Runner override

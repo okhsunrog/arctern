@@ -28,9 +28,10 @@ use crate::peer::state::PeerStatus;
     ),
 )]
 pub async fn list_peers(State(state): State<AppState>) -> Json<Vec<PeerSummary>> {
-    let g = state.peers.read().await;
-    let mut out: Vec<PeerSummary> = g
-        .values()
+    let out: Vec<PeerSummary> = state
+        .peers
+        .all()
+        .iter()
         .map(|e| PeerSummary {
             name: e.name.clone(),
             reachability: render_reachability(&e.status),
@@ -38,22 +39,23 @@ pub async fn list_peers(State(state): State<AppState>) -> Json<Vec<PeerSummary>>
             routes: e.routes.iter().map(render_route).collect(),
         })
         .collect();
-    out.sort_by(|a, b| a.name.cmp(&b.name));
     Json(out)
 }
 
 fn render_route(r: &crate::peer::state::RouteState) -> PeerRoute {
     use crate::peer::state::RouteHealth;
     let (health, last_error) = match &r.health {
-        RouteHealth::Unknown => ("unknown", None),
-        RouteHealth::Connected => ("connected", None),
-        RouteHealth::Failed { last_error } => ("failed", Some(last_error.clone())),
+        RouteHealth::Unknown => (arctern_api::RouteHealth::Unknown, None),
+        RouteHealth::Connected => (arctern_api::RouteHealth::Connected, None),
+        RouteHealth::Failed { last_error } => {
+            (arctern_api::RouteHealth::Failed, Some(last_error.clone()))
+        }
     };
     PeerRoute {
         name: r.name.clone(),
         ssh_target: r.ssh_target.clone(),
         auto: r.auto,
-        health: health.into(),
+        health,
         last_error,
         last_checked: r.last_checked.and_then(|t| t.format(&Rfc3339).ok()),
     }
@@ -75,16 +77,12 @@ fn render_reachability(s: &PeerStatus) -> PeerReachability {
 /// Look up a peer's PeerLink. On miss / not connected, returns 503 with
 /// a Retry-After hint matching the reconnect cap.
 async fn require_link(state: &AppState, peer: &str) -> Result<Arc<PeerLink>, ApiError> {
-    let g = state.peers.read().await;
-    if let Some(entry) = g.get(peer) {
-        if let Some(link) = &entry.link {
-            return Ok(link.clone());
-        }
-        return Err(ApiError::PeerUnavailable(format!(
-            "peer {peer:?} is not currently connected"
-        )));
+    match state.peers.get(peer) {
+        Some(entry) => entry.link.ok_or_else(|| {
+            ApiError::PeerUnavailable(format!("peer {peer:?} is not currently connected"))
+        }),
+        None => Err(ApiError::PeerNotFound(format!("no peer named {peer:?}"))),
     }
-    Err(ApiError::PeerNotFound(format!("no peer named {peer:?}")))
 }
 
 /// Any-method passthrough `/api/v1/peers/{peer}/proxy/{*rest}` → the

@@ -8,6 +8,7 @@ import { useToaster } from './composables/useToaster'
 import { useAuth } from './composables/useAuth'
 import { useHost } from './composables/useHost'
 import { useJobs } from './composables/useJobs'
+import { asPushJob } from './utils/jobs'
 import { jobFailureMessage } from './utils/status'
 import { usePeers } from './composables/usePeers'
 import { usePools } from './composables/usePools'
@@ -152,7 +153,7 @@ const searchGroups = computed(() => [
       // A peer whose manual push is already queued is not offered again:
       // the daemon dedups the request anyway, so the entry would be a
       // no-op that looks like an action.
-      ...(j.targets ?? [])
+      ...(asPushJob(j)?.targets ?? [])
         .filter((t) => t.connected && !t.manual_queued)
         .map((t) => ({
           label: `${j.name} — send now to ${t.peer}`,

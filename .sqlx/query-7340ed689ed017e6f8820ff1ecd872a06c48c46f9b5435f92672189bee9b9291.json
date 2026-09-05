@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO arcstats_history (timestamp, size, c, hits, misses)\n         VALUES (?, ?, ?, ?, ?)\n         ON CONFLICT(timestamp) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "7340ed689ed017e6f8820ff1ecd872a06c48c46f9b5435f92672189bee9b9291"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO browser_sessions (session_hash, namespace, expires_at)\n             VALUES (?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "3c568f836ee0832f81dd608c8f695d0966d032ccd07cd13ba3694284cb81b752"
+}

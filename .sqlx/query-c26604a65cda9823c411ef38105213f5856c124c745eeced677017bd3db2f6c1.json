@@ -1,0 +1,68 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, completed_at, job, identity, dataset, to_snapshot, from_snapshot,\n                  bytes, duration_ms\n             FROM recv_transfers ORDER BY id DESC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "completed_at",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "job",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "identity",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "dataset",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "to_snapshot",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "from_snapshot",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "bytes",
+        "ordinal": 7,
+        "type_info": "Integer"
+      },
+      {
+        "name": "duration_ms",
+        "ordinal": 8,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "c26604a65cda9823c411ef38105213f5856c124c745eeced677017bd3db2f6c1"
+}

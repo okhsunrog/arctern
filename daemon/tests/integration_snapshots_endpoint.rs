@@ -32,7 +32,7 @@ async fn create_snapshot_endpoint_round_trip() {
         .expect("create_snapshot");
 
     assert_eq!(summary.name, format!("{}@s1", pool.name()));
-    assert_eq!(summary.dataset_type, "snapshot");
+    assert_eq!(summary.dataset_type, arctern_api::DatasetType::Snapshot);
 
     // Idempotency contract per spec D3 / FR-010: a repeat creates 409.
     let second = arctern_client::create_snapshot(&socket, pool.name(), &req).await;

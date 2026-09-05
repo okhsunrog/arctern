@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT peer, finished_at, status, error, last_success_at\n           FROM push_syncs WHERE job_name = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "peer",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "finished_at",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "status",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "error",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_success_at",
+        "ordinal": 4,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "86f88d1b255f504d7ab29bbcd7b3563b36f63b8a9afed9894be1432386f48a1d"
+}

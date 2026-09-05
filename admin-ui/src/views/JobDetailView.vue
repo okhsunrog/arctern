@@ -6,6 +6,7 @@ import { useHost } from '../composables/useHost'
 import { useJobs } from '../composables/useJobs'
 import { useJobRuns } from '../composables/useJobRuns'
 import { formatBytes, formatTimestamp } from '../utils/format'
+import { isPushJob } from '../utils/jobs'
 import { formatLastSync, formatSyncState } from '../utils/pushTimes'
 import { jobStatus, runStatus } from '../utils/status'
 import JobActions from '../components/JobActions.vue'
@@ -156,7 +157,10 @@ const tableColumns = computed<TableColumn<JobRun>[]>(() => [
                 </template>
               </dl>
             </div>
-            <div v-if="job.transfers?.length || job.targets?.length || job.paused" class="mt-4">
+            <div
+              v-if="isPushJob(job) && (job.transfers?.length || job.targets?.length || job.paused)"
+              class="mt-4"
+            >
               <TransferPanel :job="job" :on-push-to="pushTo" :is-pushing="isPushing" />
             </div>
           </UCard>

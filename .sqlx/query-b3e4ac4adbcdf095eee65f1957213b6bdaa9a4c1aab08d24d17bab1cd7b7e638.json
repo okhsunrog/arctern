@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE job_runs\n            SET status = ?, finished_at = unixepoch()\n          WHERE status = ? AND finished_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "b3e4ac4adbcdf095eee65f1957213b6bdaa9a4c1aab08d24d17bab1cd7b7e638"
+}

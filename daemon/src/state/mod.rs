@@ -92,21 +92,26 @@ async fn open_inner(state_dir: &Path, reconcile: bool) -> Result<SqlitePool, Sta
     Ok(pool)
 }
 
+/// Bring the schema to the current version: repair the two shapes that
+/// predate the migration ledger, then run `migrations/`.
 async fn migrate(pool: &SqlitePool) -> Result<(), StateError> {
-    // Single inline migration for now. When the schema gains a second
-    // version, switch to sqlx::migrate! against a migrations dir.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS job_runs (
-            run_id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_name      TEXT NOT NULL,
-            started_at    INTEGER NOT NULL,
-            finished_at   INTEGER,
-            status        TEXT NOT NULL,
-            error_message TEXT,
-            bytes_sent    INTEGER
-        )",
+    repair_pre_ledger_schema(pool).await?;
+    sqlx::migrate!("./migrations")
+        .run(pool)
+        .await
+        .map_err(|e| StateError::Migrate(sqlx::Error::Migrate(Box::new(e))))?;
+    Ok(())
+}
+
+/// Databases written before the migration ledger existed may have a
+/// `job_runs` keyed by (job_name, started_at) instead of `run_id`, or a
+/// `push_syncs` without `last_success_at`. Both are fixed in place so
+/// the baseline migration finds the current shape.
+async fn repair_pre_ledger_schema(pool: &SqlitePool) -> Result<(), StateError> {
+    let has_job_runs: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'job_runs'",
     )
-    .execute(pool)
+    .fetch_one(pool)
     .await
     .map_err(StateError::Migrate)?;
     let has_run_id: i64 = sqlx::query_scalar(
@@ -115,7 +120,7 @@ async fn migrate(pool: &SqlitePool) -> Result<(), StateError> {
     .fetch_one(pool)
     .await
     .map_err(StateError::Migrate)?;
-    if has_run_id == 0 {
+    if has_job_runs == 1 && has_run_id == 0 {
         let mut tx = pool.begin().await.map_err(StateError::Migrate)?;
         sqlx::query("ALTER TABLE job_runs RENAME TO job_runs_legacy")
             .execute(&mut *tx)
@@ -150,46 +155,19 @@ async fn migrate(pool: &SqlitePool) -> Result<(), StateError> {
             .map_err(StateError::Migrate)?;
         tx.commit().await.map_err(StateError::Migrate)?;
     }
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS log_events (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp INTEGER NOT NULL,
-            level     TEXT NOT NULL,
-            job_name  TEXT,
-            message   TEXT NOT NULL
-        )",
+    let has_push_syncs: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'push_syncs'",
     )
-    .execute(pool)
+    .fetch_one(pool)
     .await
     .map_err(StateError::Migrate)?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_log_recent ON log_events(timestamp DESC)")
-        .execute(pool)
-        .await
-        .map_err(StateError::Migrate)?;
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS push_syncs (
-            job_name    TEXT NOT NULL,
-            peer        TEXT NOT NULL,
-            finished_at INTEGER NOT NULL,
-            status      TEXT NOT NULL,
-            error       TEXT,
-            last_success_at INTEGER,
-            PRIMARY KEY (job_name, peer)
-        )",
-    )
-    .execute(pool)
-    .await
-    .map_err(StateError::Migrate)?;
-    // v2: an unsuccessful attempt must not erase the scheduling anchor.
-    // Keep the existing attempt columns so upgrades are additive and old
-    // databases remain readable during a rolling binary replacement.
     let has_last_success: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM pragma_table_info('push_syncs') WHERE name = 'last_success_at'",
     )
     .fetch_one(pool)
     .await
     .map_err(StateError::Migrate)?;
-    if has_last_success == 0 {
+    if has_push_syncs == 1 && has_last_success == 0 {
         sqlx::query("ALTER TABLE push_syncs ADD COLUMN last_success_at INTEGER")
             .execute(pool)
             .await
@@ -199,51 +177,6 @@ async fn migrate(pool: &SqlitePool) -> Result<(), StateError> {
             .await
             .map_err(StateError::Migrate)?;
     }
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS recv_transfers (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            completed_at  INTEGER NOT NULL,
-            job           TEXT NOT NULL,
-            identity      TEXT NOT NULL,
-            dataset       TEXT NOT NULL,
-            to_snapshot   TEXT NOT NULL,
-            from_snapshot TEXT,
-            bytes         INTEGER NOT NULL,
-            duration_ms   INTEGER NOT NULL
-        )",
-    )
-    .execute(pool)
-    .await
-    .map_err(StateError::Migrate)?;
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS arcstats_history (
-            timestamp INTEGER PRIMARY KEY,
-            size      INTEGER NOT NULL,
-            c         INTEGER NOT NULL,
-            hits      INTEGER NOT NULL,
-            misses    INTEGER NOT NULL
-        )",
-    )
-    .execute(pool)
-    .await
-    .map_err(StateError::Migrate)?;
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS browser_sessions (
-            session_hash BLOB PRIMARY KEY NOT NULL,
-            namespace    TEXT NOT NULL,
-            expires_at   INTEGER NOT NULL
-        )",
-    )
-    .execute(pool)
-    .await
-    .map_err(StateError::Migrate)?;
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_browser_sessions_expiry
-         ON browser_sessions(namespace, expires_at)",
-    )
-    .execute(pool)
-    .await
-    .map_err(StateError::Migrate)?;
     Ok(())
 }
 
@@ -354,7 +287,7 @@ mod tests {
             .fetch_one(&daemon_pool)
             .await
             .unwrap();
-        assert_eq!(status, job_runs::STATUS_RUNNING);
+        assert_eq!(status, arctern_api::RunStatus::Running.as_str());
     }
 
     // The daemon owns the scheduler, so a row still `running` when it
@@ -374,7 +307,7 @@ mod tests {
             .fetch_one(&second)
             .await
             .unwrap();
-        assert_eq!(status, job_runs::STATUS_INTERRUPTED);
+        assert_eq!(status, arctern_api::RunStatus::Interrupted.as_str());
     }
 
     #[tokio::test]

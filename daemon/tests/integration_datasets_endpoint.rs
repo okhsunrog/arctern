@@ -42,7 +42,10 @@ async fn get_datasets_returns_test_pool() {
         .iter()
         .find(|d| d.name == pool.name())
         .expect("pool entry");
-    assert_eq!(pool_entry.dataset_type, "filesystem");
+    assert_eq!(
+        pool_entry.dataset_type,
+        arctern_api::DatasetType::Filesystem
+    );
 
     pool.destroy().await.expect("destroy pool");
 }

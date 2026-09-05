@@ -1,179 +1,66 @@
-//! Prune-only job. Lists matching snapshots per filesystem, evaluates
-//! the configured keep-rule chain, destroys victims. Never creates
-//! snapshots — that's the snap job's responsibility.
-//!
-//! Use case: a receiver host that gets snapshots from a push sender
-//! still needs retention. zrepl handled this with
-//! `push.pruning.keep_receiver`; arctern's push doesn't manage
-//! receiver-side retention, so the receiver defines a `prune` job over
-//! the received subtree with the desired grid.
+//! Prune-only cycle: evaluate the keep-rule chain per matched
+//! filesystem, destroy victims. Never creates snapshots. This is how a
+//! receiver keeps retention over what it received: arctern's push does
+//! not manage receiver-side retention, so the receiver defines a
+//! `prune` job over the received subtree with the desired grid.
 
-use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::time::Duration as StdDuration;
+use std::time::Duration;
 
+use arctern_api::JobKind;
 use arctern_config::{PruneJobConfig, filter::resolve_all};
-use time::OffsetDateTime;
-use tokio::time::sleep_until;
-use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, info_span, warn};
-use zfskit::dataset::ListOptions;
-use zfskit::models::DatasetType;
+use tracing::warn;
 
-use super::{Job, JobContext, JobStatusInner};
+use super::periodic::{Cycle, PeriodicJob};
+use super::{CycleErrors, DatasetError, JobContext, UnmatchedFilters};
 
-pub const KIND: &str = "prune";
-
-pub struct PruneJob {
+pub struct PruneCycle {
     config: PruneJobConfig,
-    status: Mutex<JobStatusInner>,
-    wakeup: Arc<tokio::sync::Notify>,
-    unmatched: super::UnmatchedFilters,
+    unmatched: UnmatchedFilters,
 }
 
-impl PruneJob {
-    pub fn new(config: PruneJobConfig) -> Self {
-        Self {
+pub type PruneJob = PeriodicJob<PruneCycle>;
+
+impl PruneCycle {
+    pub fn job(config: PruneJobConfig) -> PruneJob {
+        PeriodicJob::new(Self {
             config,
-            status: Mutex::new(JobStatusInner::default()),
-            wakeup: Arc::new(tokio::sync::Notify::new()),
-            unmatched: super::UnmatchedFilters::default(),
-        }
-    }
-
-    fn interval(&self) -> StdDuration {
-        self.config.interval
-    }
-
-    fn record_cycle(
-        &self,
-        last_error: Option<String>,
-        started: OffsetDateTime,
-        interval: StdDuration,
-    ) {
-        let mut s = self.status.lock().unwrap();
-        let now = OffsetDateTime::now_utc();
-        s.last_run = Some(now);
-        // Anchored to the cycle's start so the cadence does not drift by
-        // the cycle's own duration.
-        s.next_run =
-            Some(started + time::Duration::try_from(interval).unwrap_or(time::Duration::ZERO));
-        s.last_error = last_error;
-        s.running = false;
+            unmatched: UnmatchedFilters::default(),
+        })
     }
 }
 
-impl Job for PruneJob {
+impl Cycle for PruneCycle {
+    const KIND: JobKind = JobKind::Prune;
+
     fn name(&self) -> &str {
         &self.config.name
     }
-    fn kind(&self) -> &'static str {
-        KIND
-    }
-    fn status(&self) -> JobStatusInner {
-        self.status.lock().unwrap().clone()
-    }
-    fn wakeup(&self) {
-        self.wakeup.notify_one();
-    }
-    fn run(
-        self: Arc<Self>,
-        ctx: JobContext,
-        cancel: CancellationToken,
-    ) -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        let span = info_span!("prune_job", name = %self.config.name);
-        let job_name = self.config.name.clone();
-        Box::pin(
-            async move {
-                let interval = self.interval();
-                // First deadline is now (startup-immediate); afterwards
-                // each cycle is due `interval` after the previous START.
-                let mut due = tokio::time::Instant::now();
-                loop {
-                    tokio::select! {
-                        _ = cancel.cancelled() => break,
-                        _ = sleep_until(due) => {}
-                        _ = self.wakeup.notified() => {}
-                    }
-                    let started = tokio::time::Instant::now();
-                    run_and_record(&self, &ctx, &job_name, interval).await;
-                    due = started + interval;
-                }
-            }
-            .instrument(span),
-        )
-    }
-}
 
-async fn run_and_record(job: &PruneJob, ctx: &JobContext, job_name: &str, interval: StdDuration) {
-    job.status.lock().unwrap().running = true;
-    let started = OffsetDateTime::now_utc();
-    let started_at = started.unix_timestamp();
-    let run_id = if let Some(pool) = ctx.state.as_ref() {
-        crate::state::job_runs::record_start(pool, job_name, started_at)
-            .await
-            .ok()
-    } else {
-        None
-    };
-    let outcome = job.run_cycle(ctx).await;
-    let finished_at = OffsetDateTime::now_utc().unix_timestamp();
-    let (status, error_message) = match &outcome {
-        Ok(()) => (crate::state::job_runs::STATUS_OK, None),
-        Err(e) => (crate::state::job_runs::STATUS_ERROR, Some(e.as_str())),
-    };
-    if let (Some(pool), Some(run_id)) = (ctx.state.as_ref(), run_id) {
-        let _ = crate::state::job_runs::record_finish(
-            pool,
-            run_id,
-            finished_at,
-            status,
-            error_message,
-            None,
-        )
-        .await;
+    fn interval(&self) -> Duration {
+        self.config.interval
     }
-    job.record_cycle(outcome.err(), started, interval);
-}
 
-impl PruneJob {
-    async fn run_cycle(&self, ctx: &JobContext) -> Result<(), String> {
-        let mut pools: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        for f in &self.config.filesystems {
-            let pool = f.path.split('/').next().unwrap_or(&f.path).to_string();
-            pools.insert(pool);
-        }
-        let roots: Vec<String> = pools.into_iter().collect();
-        let list_opts = ListOptions {
-            recursive: true,
-            types: vec![DatasetType::Filesystem, DatasetType::Volume],
-            roots,
-            ..ListOptions::default()
-        };
-        let entries = ctx
-            .zfs
-            .list_datasets(&list_opts)
-            .await
-            .map_err(|e| format!("list datasets: {e}"))?;
+    async fn run(&self, ctx: &JobContext) -> Result<(), CycleErrors> {
+        let entries =
+            crate::inventory::list_filesystems(ctx.zfs.command_runner(), &self.config.filesystems)
+                .await
+                .map_err(|e| CycleErrors(vec![DatasetError::ListDatasets(e)]))?;
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         self.unmatched
             .report(&self.config.name, &self.config.filesystems, &names);
         let targets = resolve_all(&self.config.filesystems, &names);
-        if targets.is_empty() {
-            return Ok(());
-        }
-        let mut errors: Vec<String> = Vec::new();
+        let mut errors: Vec<DatasetError> = Vec::new();
         for ds in &targets {
-            if let Err(e) = super::prune_dataset(&ctx.zfs, &self.config.pruning().keep, ds).await {
-                warn!(dataset = %ds, error = %e, "prune cycle errored");
-                errors.push(format!("prune {ds}: {e}"));
+            if let Err(source) =
+                super::prune_dataset(&ctx.zfs, &self.config.pruning().keep, ds).await
+            {
+                warn!(dataset = %ds, error = %source, "prune cycle errored");
+                errors.push(DatasetError::Prune {
+                    dataset: ds.to_string(),
+                    source,
+                });
             }
         }
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors.join("; "))
-        }
+        CycleErrors::from_vec(errors)
     }
 }

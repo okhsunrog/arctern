@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM job_runs WHERE started_at < ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "48df84f893357b2cc20a16e63a34a3e8e21195ec23661975a6022e3ed1391a6f"
+}

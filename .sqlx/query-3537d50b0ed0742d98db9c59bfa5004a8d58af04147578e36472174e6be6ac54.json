@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT started_at, finished_at, status, error_message, bytes_sent\n             FROM job_runs\n            WHERE job_name = ?\n              AND (? IS NULL OR started_at >= ?)\n            ORDER BY started_at DESC, run_id DESC\n            LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "started_at",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "finished_at",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "status",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "error_message",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "bytes_sent",
+        "ordinal": 4,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "3537d50b0ed0742d98db9c59bfa5004a8d58af04147578e36472174e6be6ac54"
+}

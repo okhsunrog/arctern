@@ -1,182 +1,51 @@
-//! Periodic-snapshot job. Loops on `interval`, snapshots every matched
-//! filesystem, then prunes per the configured `KeepRule` chain.
-//!
-//! Algorithm matches zrepl's snap-job behaviour:
-//! - On startup, run one cycle immediately (rather than waiting a full
-//!   `interval`) so a daemon restart doesn't skip its window. A snapshot
-//!   taken within the same second as an existing one is an idempotent
-//!   no-op (SnapshotExists).
-//! - Each cycle: list datasets (recursive), resolve filters, for each
-//!   matched dataset: snapshot (idempotent on SnapshotExists); list
-//!   snapshots with `creation`; build SnapshotEntry vec; evaluate
-//!   keep-rules; destroy each victim (idempotent on SnapshotHeld).
-//! - Snapshot tag is `<prefix><RFC3339-utc-no-colons>` — wire-compatible
-//!   with zrepl per constitution VII.
+//! Periodic-snapshot cycle: snapshot every matched filesystem, then
+//! prune per the configured `KeepRule` chain. Snapshot names are
+//! `<prefix><RFC3339-utc-no-colons>`, the zrepl idiom.
 
-use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::time::Duration as StdDuration;
+use std::time::Duration;
 
+use arctern_api::JobKind;
 use arctern_config::{SnapJobConfig, filter::resolve_all};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
-use tokio::time::sleep_until;
-use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, info_span, warn};
-use zfskit::dataset::{ListOptions, SnapshotOptions};
-use zfskit::models::DatasetType;
+use tracing::warn;
+use zfskit::dataset::SnapshotOptions;
 
-use super::{Job, JobContext, JobStatusInner};
+use super::periodic::{Cycle, PeriodicJob};
+use super::{CycleErrors, DatasetError, JobContext, UnmatchedFilters};
 
-pub const KIND: &str = "snap";
-
-pub struct SnapJob {
+pub struct SnapCycle {
     config: SnapJobConfig,
-    status: Mutex<JobStatusInner>,
-    wakeup: Arc<tokio::sync::Notify>,
-    unmatched: super::UnmatchedFilters,
+    unmatched: UnmatchedFilters,
 }
 
-impl SnapJob {
-    pub fn new(config: SnapJobConfig) -> Self {
-        Self {
+pub type SnapJob = PeriodicJob<SnapCycle>;
+
+impl SnapCycle {
+    pub fn job(config: SnapJobConfig) -> SnapJob {
+        PeriodicJob::new(Self {
             config,
-            status: Mutex::new(JobStatusInner::default()),
-            wakeup: Arc::new(tokio::sync::Notify::new()),
-            unmatched: super::UnmatchedFilters::default(),
-        }
-    }
-
-    fn interval(&self) -> StdDuration {
-        self.config.snapshotting().interval
-    }
-
-    fn prefix(&self) -> &str {
-        &self.config.snapshotting().prefix
-    }
-
-    fn record_cycle(
-        &self,
-        last_error: Option<String>,
-        started: OffsetDateTime,
-        interval: StdDuration,
-    ) {
-        let mut s = self.status.lock().unwrap();
-        let now = OffsetDateTime::now_utc();
-        s.last_run = Some(now);
-        // The next cycle fires `interval` after this one STARTED, not
-        // after it finished: a snapshot every 15 minutes means every 15
-        // minutes, not 15 minutes plus however long snapshot+prune took.
-        s.next_run =
-            Some(started + time::Duration::try_from(interval).unwrap_or(time::Duration::ZERO));
-        s.last_error = last_error;
-        s.running = false;
+            unmatched: UnmatchedFilters::default(),
+        })
     }
 }
 
-impl Job for SnapJob {
+impl Cycle for SnapCycle {
+    const KIND: JobKind = JobKind::Snap;
+
     fn name(&self) -> &str {
         &self.config.name
     }
-    fn kind(&self) -> &'static str {
-        KIND
-    }
-    fn status(&self) -> JobStatusInner {
-        self.status.lock().unwrap().clone()
-    }
-    fn wakeup(&self) {
-        self.wakeup.notify_one();
-    }
-    fn run(
-        self: Arc<Self>,
-        ctx: JobContext,
-        cancel: CancellationToken,
-    ) -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        let span = info_span!("snap_job", name = %self.config.name);
-        let job_name = self.config.name.clone();
-        Box::pin(
-            async move {
-                let interval = self.interval();
-                // Startup-immediate: the first deadline is now, so a
-                // restart does not skip its window. After that each cycle
-                // is due `interval` after the previous one began, so the
-                // cadence does not drift by the cycle's own duration.
-                let mut due = tokio::time::Instant::now();
-                loop {
-                    tokio::select! {
-                        _ = cancel.cancelled() => break,
-                        _ = sleep_until(due) => {}
-                        _ = self.wakeup.notified() => {}
-                    }
-                    let started = tokio::time::Instant::now();
-                    run_and_record(&self, &ctx, &job_name, interval).await;
-                    due = started + interval;
-                }
-            }
-            .instrument(span),
-        )
-    }
-}
 
-async fn run_and_record(job: &SnapJob, ctx: &JobContext, job_name: &str, interval: StdDuration) {
-    job.status.lock().unwrap().running = true;
-    let started = OffsetDateTime::now_utc();
-    let started_at = started.unix_timestamp();
-    let run_id = if let Some(pool) = ctx.state.as_ref() {
-        crate::state::job_runs::record_start(pool, job_name, started_at)
-            .await
-            .ok()
-    } else {
-        None
-    };
-    let outcome = job.run_cycle(ctx).await;
-    let finished_at = OffsetDateTime::now_utc().unix_timestamp();
-    let (status, error_message) = match &outcome {
-        Ok(()) => (crate::state::job_runs::STATUS_OK, None),
-        Err(e) => (crate::state::job_runs::STATUS_ERROR, Some(e.as_str())),
-    };
-    if let (Some(pool), Some(run_id)) = (ctx.state.as_ref(), run_id) {
-        let _ = crate::state::job_runs::record_finish(
-            pool,
-            run_id,
-            finished_at,
-            status,
-            error_message,
-            None,
-        )
-        .await;
+    fn interval(&self) -> Duration {
+        self.config.snapshotting().interval
     }
-    job.record_cycle(outcome.err(), started, interval);
-}
 
-impl SnapJob {
-    /// One snapshot+prune pass. Returns Err only if the cycle failed in
-    /// a way the operator should see at the per-job status level.
-    /// Per-dataset failures are logged and accumulated into a summary
-    /// string; the cycle still completes the work it can.
-    async fn run_cycle(&self, ctx: &JobContext) -> Result<(), String> {
-        // 1. List every filesystem + volume under any pool a filter
-        //    references. Scoping to those pools (rather than a global
-        //    list) keeps unrelated pools out of the result and makes
-        //    integration tests robust against parallel test pools.
-        let mut pools: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        for f in &self.config.filesystems {
-            let pool = f.path.split('/').next().unwrap_or(&f.path).to_string();
-            pools.insert(pool);
-        }
-        let roots: Vec<String> = pools.into_iter().collect();
-        let list_opts = ListOptions {
-            recursive: true,
-            types: vec![DatasetType::Filesystem, DatasetType::Volume],
-            roots,
-            ..ListOptions::default()
-        };
-        let entries = ctx
-            .zfs
-            .list_datasets(&list_opts)
-            .await
-            .map_err(|e| format!("list datasets: {e}"))?;
+    async fn run(&self, ctx: &JobContext) -> Result<(), CycleErrors> {
+        let entries =
+            crate::inventory::list_filesystems(ctx.zfs.command_runner(), &self.config.filesystems)
+                .await
+                .map_err(|e| CycleErrors(vec![DatasetError::ListDatasets(e)]))?;
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         self.unmatched
             .report(&self.config.name, &self.config.filesystems, &names);
@@ -186,54 +55,57 @@ impl SnapJob {
             return Ok(());
         }
 
-        let tag = snapshot_tag(self.prefix());
-        let mut errors: Vec<String> = Vec::new();
+        let tag = snapshot_tag(&self.config.snapshotting().prefix);
+        let mut errors: Vec<DatasetError> = Vec::new();
         for ds in &targets {
             let full = format!("{ds}@{tag}");
             tracing::info!(dataset = %ds, snapshot = %tag, "creating snapshot");
-            match ctx
-                .zfs
-                .dataset(*ds)
-                .map_err(|e| e.to_string())?
-                .snapshot(&tag, &SnapshotOptions::new())
-                .await
-            {
-                Ok(_) => {}
+            let result = match ctx.zfs.dataset(*ds) {
+                Ok(dataset) => dataset
+                    .snapshot(&tag, &SnapshotOptions::new())
+                    .await
+                    .map(|_| ()),
+                Err(e) => Err(e.into()),
+            };
+            match result {
+                Ok(()) => {}
+                // A restart within the same second re-requests the same
+                // name; that is the idempotent no-op it looks like.
                 Err(zfskit::ZfsError::SnapshotExists { .. }) => {
                     warn!(snapshot = %full, "snapshot already exists; treating as no-op");
                 }
-                Err(e) => {
-                    let msg = format!("snapshot {full}: {e}");
-                    warn!(error = %msg);
-                    errors.push(msg);
+                Err(source) => {
+                    let e = DatasetError::Snapshot {
+                        snapshot: full,
+                        source,
+                    };
+                    warn!(error = %e);
+                    errors.push(e);
                 }
             }
         }
 
-        // 2. Prune. Per-dataset to keep the algorithm's "now" reference
-        //    local (so a stale dataset's youngest snapshot does not
-        //    skew the bucket math for an active dataset).
+        // Per dataset so the grid's "now" (the youngest snapshot) stays
+        // local: a stale dataset must not skew an active one's buckets.
         for ds in &targets {
-            if let Err(e) = super::prune_dataset(&ctx.zfs, &self.config.pruning().keep, ds).await {
-                warn!(dataset = %ds, error = %e, "prune cycle errored");
-                errors.push(format!("prune {ds}: {e}"));
+            if let Err(source) =
+                super::prune_dataset(&ctx.zfs, &self.config.pruning().keep, ds).await
+            {
+                warn!(dataset = %ds, error = %source, "prune cycle errored");
+                errors.push(DatasetError::Prune {
+                    dataset: ds.to_string(),
+                    source,
+                });
             }
         }
-
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors.join("; "))
-        }
+        CycleErrors::from_vec(errors)
     }
 }
 
 /// `<prefix><RFC3339-utc-no-colons>` at second precision, e.g.
 /// `arctern_2026-07-08T182612Z`. Colons stripped because some
-/// downstream tooling chokes on them; sub-second digits dropped —
-/// they added 10 chars of noise to every snapshot name and the
-/// same-second collision they'd prevent is already an idempotent
-/// no-op (SnapshotExists).
+/// downstream tooling chokes on them; sub-second digits dropped since
+/// a same-second collision is already an idempotent no-op.
 fn snapshot_tag(prefix: &str) -> String {
     let now = OffsetDateTime::now_utc()
         .replace_nanosecond(0)
@@ -259,7 +131,6 @@ mod tests {
     #[test]
     fn snapshot_tag_is_second_precision() {
         let t = snapshot_tag("arctern_");
-        // No fractional-second part: arctern_2026-07-08T182612Z.
         assert!(!t.contains('.'), "got: {t}");
         assert!(t.ends_with('Z'));
     }

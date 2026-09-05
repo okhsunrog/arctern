@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO recv_transfers\n           (completed_at, job, identity, dataset, to_snapshot, from_snapshot, bytes, duration_ms)\n         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "eb7497eaa2ab0f0104ec9d3feb5291dfe40f9e83ce3f52a0b1bb2e511f21ab0a"
+}

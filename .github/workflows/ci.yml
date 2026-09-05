@@ -8,6 +8,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # `sqlx::query!` compiles against the checked query data in `.sqlx/`;
+  # no database is needed to build.
+  SQLX_OFFLINE: "true"
 
 jobs:
   rust:
@@ -52,6 +55,21 @@ jobs:
 
       - name: Check OpenAPI schema
         run: cargo run -q -p arctern-daemon -- openapi | diff -u admin-ui/openapi.json -
+        working-directory: arctern
+
+      # `.sqlx/` must match the queries in the tree: an edited query with
+      # stale data would compile here and fail at the first real run.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli
+      - name: Check sqlx query data
+        run: |
+          export DATABASE_URL="sqlite://$PWD/target/sqlx-dev.db"
+          sqlx database create
+          sqlx migrate run --source daemon/migrations
+          cargo sqlx prepare --check --workspace
+        env:
+          SQLX_OFFLINE: "false"
         working-directory: arctern
 
   frontend:

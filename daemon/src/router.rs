@@ -19,11 +19,20 @@ use crate::{auth, handlers};
     info(title = "arctern", description = "ZFS replication daemon HTTP API",),
     components(schemas(
         arctern_api::DatasetSummary,
+        arctern_api::DatasetType,
         arctern_api::ApiErrorBody,
         arctern_api::CreateSnapshotRequest,
         arctern_api::JobStatus,
+        arctern_api::PeriodicJobStatus,
+        arctern_api::PushJobStatus,
         arctern_api::TransferInfo,
+        arctern_api::TransferKind,
+        arctern_api::TransferPhase,
         arctern_api::TargetStatus,
+        arctern_api::PeerMode,
+        arctern_api::RunStatus,
+        arctern_api::RouteHealth,
+        arctern_api::ScrubAction,
         arctern_api::JobRun,
         arctern_api::PeerSummary,
         arctern_api::PeerRoute,
@@ -197,7 +206,7 @@ mod tests {
     use super::*;
     use crate::app_state::AppState;
     use crate::jobs::JobManager;
-    use crate::peer::state::new_state;
+    use crate::peer::state::PeersState;
     use crate::state;
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};
@@ -212,7 +221,7 @@ mod tests {
         AppState {
             auth: auth::AdminAuth::for_tests([7; 32], pool.as_ref().clone()),
             manager: Arc::new(JobManager::new()),
-            peers: new_state(),
+            peers: PeersState::new(),
             events,
             state: pool,
             zfs: zfskit::Zfs::new(),
@@ -488,7 +497,7 @@ mod tests {
         request
             .extensions_mut()
             .insert(axum::extract::ConnectInfo(auth::PeerCredentials {
-                uid: unsafe { libc::geteuid() },
+                uid: auth::daemon_uid(),
             }));
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);

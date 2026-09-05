@@ -1,12 +1,14 @@
-//! Shared per-peer state. The daemon's reconnect background task is
-//! the sole writer; HTTP handlers read through `RwLock` to render
-//! `GET /api/v1/peers` and to grab the `PeerLink` for proxied calls.
+//! Shared per-peer state. The reconnect background task is the sole
+//! writer; push jobs and HTTP handlers read snapshots. Readers never
+//! hold the lock across an await, and writes are rare (a connectivity
+//! change), so a plain `std::sync::RwLock` serves both sync and async
+//! callers without a `try_read` compromise.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use time::OffsetDateTime;
-use tokio::sync::RwLock;
+use tokio::sync::watch;
 
 use super::PeerLink;
 
@@ -67,8 +69,69 @@ impl PeerEntry {
     }
 }
 
-pub type PeersState = Arc<RwLock<HashMap<String, PeerEntry>>>;
+/// The peers map plus the edge signal push schedulers sleep on.
+#[derive(Clone)]
+pub struct PeersState {
+    inner: Arc<Inner>,
+}
 
-pub fn new_state() -> PeersState {
-    Arc::new(RwLock::new(HashMap::new()))
+struct Inner {
+    entries: RwLock<HashMap<String, PeerEntry>>,
+    changed: watch::Sender<u64>,
+}
+
+impl Default for PeersState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PeersState {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                entries: RwLock::new(HashMap::new()),
+                changed: watch::channel(0).0,
+            }),
+        }
+    }
+
+    pub fn get(&self, name: &str) -> Option<PeerEntry> {
+        self.inner.entries.read().unwrap().get(name).cloned()
+    }
+
+    /// Every peer, sorted by name.
+    pub fn all(&self) -> Vec<PeerEntry> {
+        let mut entries: Vec<PeerEntry> = self
+            .inner
+            .entries
+            .read()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        entries
+    }
+
+    /// The live link to `name`, if connected.
+    pub fn link(&self, name: &str) -> Option<Arc<PeerLink>> {
+        self.inner.entries.read().unwrap().get(name)?.link.clone()
+    }
+
+    /// Replace one peer's entry and wake every subscriber.
+    pub fn publish(&self, entry: PeerEntry) {
+        self.inner
+            .entries
+            .write()
+            .unwrap()
+            .insert(entry.name.clone(), entry);
+        self.inner.changed.send_modify(|v| *v = v.wrapping_add(1));
+    }
+
+    /// Fires on every `publish`. Push jobs re-evaluate due-ness on it
+    /// instead of waiting out their nap.
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.inner.changed.subscribe()
+    }
 }

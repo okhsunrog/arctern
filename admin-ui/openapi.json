@@ -742,6 +742,9 @@
           },
           "404": {
             "description": "No such job"
+          },
+          "409": {
+            "description": "Job kind does not support manual push"
           }
         }
       }
@@ -1274,7 +1277,7 @@
       },
       "ArcHistoryPoint": {
         "type": "object",
-        "description": "One row of `GET /api/v1/system/arc/history`. Slim by design —\nonly the fields the dashboard chart consumes. Add more columns\n(and migrate `arcstats_history`) when a future view needs them.",
+        "description": "One row of `GET /api/v1/system/arc/history`. Slim by design —\nonly the fields the dashboard chart consumes.",
         "required": [
           "timestamp",
           "size",
@@ -1312,7 +1315,7 @@
       },
       "ArcStats": {
         "type": "object",
-        "description": "`GET /api/v1/system/arc` — a typed echo of the kernel's\n`/proc/spl/kstat/zfs/arcstats`, plus a precomputed hit_ratio\n(NaN encoded as `null` for empty caches). Fields mirror the\nzfskit `ArcStats` struct; raw map omitted from the wire to\nkeep responses small.",
+        "description": "`GET /api/v1/system/arc` — a typed echo of the kernel's\n`/proc/spl/kstat/zfs/arcstats`, plus a precomputed hit_ratio\n(NaN encoded as `null` for empty caches).",
         "required": [
           "size",
           "c",
@@ -1466,7 +1469,7 @@
       },
       "ConfigView": {
         "type": "object",
-        "description": "Body of `GET /api/v1/config` — the on-disk TOML the daemon was\nstarted with, plus its absolute path. Read-only: there is no\nwrite-back endpoint, so this is a faithful echo of what's loaded,\nnot what the daemon may have parsed (you can spot drift by\ncomparing to the other endpoints).",
+        "description": "Body of `GET /api/v1/config` — the on-disk TOML the daemon was\nstarted with, plus its absolute path. Read-only.",
         "required": [
           "path",
           "content_toml"
@@ -1518,7 +1521,7 @@
       },
       "DatasetSummary": {
         "type": "object",
-        "description": "Slim projection of [`zfskit::ZfsListEntry`] suitable for HTTP +\nOpenAPI. Native ZFS properties carry typed data (bytes, bool, …) but\n`BTreeMap<String, String>` serializes more cleanly through utoipa;\nconsumers parse property values as needed.",
+        "description": "Slim projection of a `zfs list` entry suitable for HTTP + OpenAPI.\nNative ZFS properties carry typed data (bytes, bool, …) but\n`BTreeMap<String, String>` serializes more cleanly through utoipa;\nconsumers parse property values as needed.",
         "required": [
           "name",
           "dataset_type"
@@ -1528,8 +1531,7 @@
             "type": "string"
           },
           "dataset_type": {
-            "type": "string",
-            "description": "`\"filesystem\" | \"volume\" | \"snapshot\" | \"bookmark\"` — lowercase\nto match `zfs(8)`'s output and avoid leaking zfskit's enum repr."
+            "$ref": "#/components/schemas/DatasetType"
           },
           "properties": {
             "type": "object",
@@ -1541,6 +1543,16 @@
             }
           }
         }
+      },
+      "DatasetType": {
+        "type": "string",
+        "description": "`zfs list -t` kinds, lowercase as `zfs(8)` prints them.",
+        "enum": [
+          "filesystem",
+          "volume",
+          "snapshot",
+          "bookmark"
+        ]
       },
       "JobRun": {
         "type": "object",
@@ -1562,7 +1574,7 @@
             "format": "int64"
           },
           "status": {
-            "type": "string"
+            "$ref": "#/components/schemas/RunStatus"
           },
           "error_message": {
             "type": [
@@ -1580,68 +1592,72 @@
         }
       },
       "JobStatus": {
-        "type": "object",
-        "description": "One entry in the response of `GET /api/v1/jobs`. RFC3339 timestamps\nare nullable: `last_run` is null until the job has completed at\nleast one cycle; `next_run` is set as soon as the loop knows when\nit will fire next; `last_error` is null when the most recent cycle\nfinished cleanly.",
-        "required": [
-          "name",
-          "kind"
-        ],
-        "properties": {
-          "name": {
-            "type": "string"
-          },
-          "kind": {
-            "type": "string"
-          },
-          "last_run": {
-            "type": [
-              "string",
-              "null"
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PeriodicJobStatus"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "snap"
+                    ]
+                  }
+                }
+              }
             ]
           },
-          "next_run": {
-            "type": [
-              "string",
-              "null"
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PeriodicJobStatus"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "prune"
+                    ]
+                  }
+                }
+              }
             ]
           },
-          "last_error": {
-            "type": [
-              "string",
-              "null"
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/PushJobStatus"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "push"
+                    ]
+                  }
+                }
+              }
             ]
-          },
-          "running": {
-            "type": "boolean",
-            "description": "True while a cycle is currently executing (e.g. a multi-hour\nfull send). `last_*` fields describe the previous cycle."
-          },
-          "paused": {
-            "type": "boolean",
-            "description": "True while the job is paused: the current transfer was aborted\n(resumably) and scheduled cycles are suspended until resumed."
-          },
-          "cancellable": {
-            "type": "boolean",
-            "description": "True while a cancel request would actually abort something. False\nonce every in-flight transfer has passed the point where cancel is\na no-op (finalizing/committing) — the decision belongs to the job,\nnot to each UI surface that draws a stop button."
-          },
-          "dry_run": {
-            "type": "boolean",
-            "description": "Push jobs configured with `dry_run = true`: every cycle plans and\nlogs but sends nothing, so the job can never be \"synced\". Runs and\ntarget outcomes carry the status `dry_run` instead of `ok`."
-          },
-          "transfers": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/TransferInfo"
-            },
-            "description": "In-flight transfers, one per parallel send slot. UI derives\nspeed from `bytes_sent` deltas between live snapshots."
-          },
-          "targets": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/TargetStatus"
-            },
-            "description": "Push jobs: per-target replication policy + last outcome.\nEmpty for snap/prune jobs."
           }
-        }
+        ],
+        "description": "One entry in the response of `GET /api/v1/jobs`, discriminated by\n`kind`."
       },
       "LogEvent": {
         "type": "object",
@@ -1676,6 +1692,14 @@
             "type": "string"
           }
         }
+      },
+      "PeerMode": {
+        "type": "string",
+        "description": "Replication policy for one peer of a push job.",
+        "enum": [
+          "auto",
+          "manual"
+        ]
       },
       "PeerReachability": {
         "oneOf": [
@@ -1762,8 +1786,7 @@
             "description": "Whether scheduled (auto) replication may run over this route."
           },
           "health": {
-            "type": "string",
-            "description": "`\"connected\" | \"failed\" | \"unknown\"` — last connect result for\nthis route. Lower-priority routes are only probed on failover /\nre-rank, so `unknown` is the common idle state."
+            "$ref": "#/components/schemas/RouteHealth"
           },
           "last_error": {
             "type": [
@@ -1807,6 +1830,43 @@
             "items": {
               "$ref": "#/components/schemas/PeerRoute"
             }
+          }
+        }
+      },
+      "PeriodicJobStatus": {
+        "type": "object",
+        "description": "Fields every job kind reports.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "last_run": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC3339; null until the job has completed at least one cycle."
+          },
+          "next_run": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC3339; set as soon as the loop knows when it fires next."
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Null when the most recent cycle finished cleanly."
+          },
+          "running": {
+            "type": "boolean",
+            "description": "True while a cycle is currently executing. `last_*` describe the\nprevious cycle."
           }
         }
       },
@@ -1896,6 +1956,65 @@
           }
         }
       },
+      "PushJobStatus": {
+        "type": "object",
+        "description": "Status of a push job: the periodic fields plus transfer state.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "last_run": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "next_run": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "running": {
+            "type": "boolean"
+          },
+          "paused": {
+            "type": "boolean",
+            "description": "True while the job is paused: the current transfer was aborted\n(resumably) and scheduled cycles are suspended until resumed."
+          },
+          "cancellable": {
+            "type": "boolean",
+            "description": "True while a cancel request would actually abort something. False\nonce every in-flight transfer has passed the point where cancel is\na no-op (finalizing/committing)."
+          },
+          "dry_run": {
+            "type": "boolean",
+            "description": "Configured with `dry_run = true`: every cycle plans and logs but\nsends nothing, so the job can never be \"synced\"."
+          },
+          "transfers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TransferInfo"
+            },
+            "description": "In-flight transfers, one per parallel send slot. UI derives\nspeed from `bytes_sent` deltas between live snapshots."
+          },
+          "targets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TargetStatus"
+            },
+            "description": "Per-target replication policy + last outcome."
+          }
+        }
+      },
       "RecvTransfer": {
         "type": "object",
         "description": "One completed inbound transfer, as recorded by the recv channel on\nthis host. `GET /api/v1/transfers/recent`.",
@@ -1948,6 +2067,27 @@
             "format": "int64"
           }
         }
+      },
+      "RouteHealth": {
+        "type": "string",
+        "description": "Last connect result for one route. Lower-priority routes are only\nprobed on failover / re-rank, so `unknown` is the common idle\nstate.",
+        "enum": [
+          "unknown",
+          "connected",
+          "failed"
+        ]
+      },
+      "RunStatus": {
+        "type": "string",
+        "description": "Terminal (or in-flight) state of one job cycle, as stored in\n`job_runs.status` and `push_syncs.status`.",
+        "enum": [
+          "ok",
+          "error",
+          "running",
+          "cancelled",
+          "dry_run",
+          "interrupted"
+        ]
       },
       "ScanSummary": {
         "type": "object",
@@ -2014,6 +2154,16 @@
           }
         }
       },
+      "ScrubAction": {
+        "type": "string",
+        "description": "`zpool scrub` verbs.",
+        "enum": [
+          "start",
+          "pause",
+          "resume",
+          "stop"
+        ]
+      },
       "ScrubRequest": {
         "type": "object",
         "description": "Body of `POST /api/v1/pools/{name}/scrub`.",
@@ -2022,8 +2172,7 @@
         ],
         "properties": {
           "action": {
-            "type": "string",
-            "description": "`\"start\"`, `\"pause\"`, `\"resume\"`, or `\"stop\"`."
+            "$ref": "#/components/schemas/ScrubAction"
           }
         }
       },
@@ -2071,8 +2220,7 @@
             "type": "string"
           },
           "mode": {
-            "type": "string",
-            "description": "`\"auto\" | \"manual\"`."
+            "$ref": "#/components/schemas/PeerMode"
           },
           "connected": {
             "type": "boolean"
@@ -2090,7 +2238,7 @@
           },
           "manual_queued": {
             "type": "boolean",
-            "description": "A manual push to this peer is queued and will run on the next\ncycle. Set from the moment the request is accepted until the\ncycle that drains it starts, so an operator who pressed \"send\nnow\" during a running transfer can see that it was taken."
+            "description": "A manual push to this peer is queued and will run on the next\ncycle. Set from the moment the request is accepted until the\ncycle that drains it starts."
           },
           "auto_interval_secs": {
             "type": [
@@ -2118,11 +2266,15 @@
             "description": "Unix seconds of the most recent attempted sync, regardless of outcome."
           },
           "last_outcome": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "`\"ok\" | \"error\" | \"cancelled\"` for the most recent attempt."
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RunStatus",
+                "description": "Outcome of the most recent attempt: `ok`, `error`, `cancelled`\nor `dry_run`."
+              }
+            ]
           },
           "last_message": {
             "type": [
@@ -2158,8 +2310,7 @@
             "type": "string"
           },
           "kind": {
-            "type": "string",
-            "description": "`\"full\" | \"incremental\" | \"resume\"`."
+            "$ref": "#/components/schemas/TransferKind"
           },
           "bytes_sent": {
             "type": "integer",
@@ -2181,8 +2332,7 @@
             "description": "Unix seconds."
           },
           "phase": {
-            "type": "string",
-            "description": "Current executor phase. Kept as a string so future phases remain\nbackwards-compatible: `sending`, `waiting_sender`,\n`waiting_receiver`, `finalizing`, or `committing`."
+            "$ref": "#/components/schemas/TransferPhase"
           },
           "phase_since": {
             "type": "integer",
@@ -2190,6 +2340,27 @@
             "description": "Unix seconds when `phase` last changed. Lets clients render a live\nwait duration even while no byte-count events are arriving."
           }
         }
+      },
+      "TransferKind": {
+        "type": "string",
+        "description": "What kind of `zfs send` stream a transfer carries.",
+        "enum": [
+          "full",
+          "incremental",
+          "resume"
+        ]
+      },
+      "TransferPhase": {
+        "type": "string",
+        "description": "Where the executor is in one transfer. Phases past `finalizing`\ncannot be cancelled: the bytes are with the receiver.",
+        "enum": [
+          "sending",
+          "waiting_sender",
+          "waiting_receiver",
+          "finalizing",
+          "committing",
+          "cancelling"
+        ]
       },
       "VdevNode": {
         "type": "object",

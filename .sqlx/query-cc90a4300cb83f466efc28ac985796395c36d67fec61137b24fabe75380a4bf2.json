@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT timestamp, size, c, hits, misses\n             FROM arcstats_history\n            WHERE (? IS NULL OR timestamp >= ?)\n            ORDER BY timestamp DESC\n            LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "timestamp",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "size",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "c",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "hits",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "misses",
+        "ordinal": 4,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "cc90a4300cb83f466efc28ac985796395c36d67fec61137b24fabe75380a4bf2"
+}

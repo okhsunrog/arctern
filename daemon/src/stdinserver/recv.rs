@@ -10,8 +10,7 @@
 //!      just-received snapshot so a receiver-side prune job cannot
 //!      destroy the last common snapshot between syncs.
 //!   7. Record the completed transfer (bytes, duration) in
-//!      `recv_transfers` and emit a structured completion event —
-//!      receiver-side visibility for the "Incoming" panel.
+//!      `recv_transfers` and emit a structured completion event.
 //!   8. Write a single `ResponseFrame` (Ok / Error) to stdout.
 
 use std::sync::Arc;
@@ -19,16 +18,18 @@ use std::sync::Arc;
 use arctern_config::AllowedClient;
 use arctern_config::zfs_names::{validate_dataset_name, validate_snapshot_leaf};
 use arctern_transport::{
-    ErrorCode, RecvHeader, Response, ResponseFrame, read_header, write_response,
+    ErrorCode, ProtocolError, RecvHeader, Response, ResponseFrame, read_header, write_response,
 };
 use sqlx::SqlitePool;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use zfskit::ZfsError;
 use zfskit::dataset::ListOptions;
 use zfskit::models::DatasetType;
 use zfskit::recv::{RecvArgs, recv as zfs_recv};
 use zfskit::runner::CommandRunner;
 
-use super::recv_lock::RecvLocks;
+use super::acl::{AclError, check_operation, check_root_fs};
+use super::recv_lock::{RecvLockError, RecvLocks};
 
 /// Properties that decide WHERE and WHETHER a received dataset mounts.
 /// Mount policy is the receiving host's to set, never the sending
@@ -36,6 +37,81 @@ use super::recv_lock::RecvLocks;
 /// dispatcher creates with `mountpoint=none`) instead of being taken
 /// from the stream.
 const MOUNT_POLICY_PROPERTIES: [&str; 2] = ["mountpoint", "canmount"];
+
+/// Why a receive was refused or failed, with the wire code the sender
+/// gets to see.
+#[derive(Debug, thiserror::Error)]
+pub enum RecvError {
+    #[error("read RecvHeader: {0}")]
+    Header(#[source] ProtocolError),
+    #[error("invalid target_dataset {name:?}: {reason}")]
+    InvalidTarget { name: String, reason: String },
+    #[error("invalid {field} snapshot name {name:?}: {reason}")]
+    InvalidSnapshot {
+        field: &'static str,
+        name: String,
+        reason: String,
+    },
+    #[error(transparent)]
+    Acl(#[from] AclError),
+    #[error(transparent)]
+    Lock(#[from] RecvLockError),
+    #[error("abort_partial {dataset}: {source}")]
+    AbortPartial {
+        dataset: String,
+        #[source]
+        source: ZfsError,
+    },
+    #[error("probe ancestor {name}: {source}")]
+    ProbeAncestor {
+        name: String,
+        #[source]
+        source: ZfsError,
+    },
+    #[error("create ancestor {name}: {source}")]
+    CreateAncestor {
+        name: String,
+        #[source]
+        source: ZfsError,
+    },
+    #[error("spawn zfs recv: {0}")]
+    SpawnRecv(#[source] zfskit::recv::RecvError),
+    #[error("zfs recv failed: {0}")]
+    RecvFailed(#[source] zfskit::recv::RecvError),
+    #[error("stream copy: {0}")]
+    StreamCopy(#[source] std::io::Error),
+    #[error("no stdin on recv child")]
+    NoChildStdin,
+}
+
+impl RecvError {
+    fn code(&self) -> ErrorCode {
+        match self {
+            RecvError::Header(_)
+            | RecvError::InvalidTarget { .. }
+            | RecvError::InvalidSnapshot { .. } => ErrorCode::BadRequest,
+            RecvError::Acl(_) => ErrorCode::Unauthorized,
+            RecvError::NoChildStdin => ErrorCode::Internal,
+            RecvError::Lock(_)
+            | RecvError::AbortPartial { .. }
+            | RecvError::ProbeAncestor { .. }
+            | RecvError::CreateAncestor { .. }
+            | RecvError::SpawnRecv(_)
+            | RecvError::RecvFailed(_)
+            | RecvError::StreamCopy(_) => ErrorCode::Zfs,
+        }
+    }
+
+    fn response(&self) -> ResponseFrame {
+        ResponseFrame {
+            request_id: None,
+            body: Response::Error {
+                code: self.code(),
+                message: self.to_string(),
+            },
+        }
+    }
+}
 
 /// Drive one recv channel from start to finish. Errors are surfaced as
 /// `Response::Error` written back to the caller; the function only
@@ -57,36 +133,37 @@ where
     let header = match read_header(&mut reader).await {
         Ok(h) => h,
         Err(e) => {
-            let resp = ResponseFrame {
-                request_id: None,
-                body: Response::Error {
-                    code: ErrorCode::BadRequest,
-                    message: format!("read RecvHeader: {e}"),
-                },
-            };
-            let _ = write_response(&mut writer, &resp).await;
+            let _ = write_response(&mut writer, &RecvError::Header(e).response()).await;
             let _ = writer.flush().await;
             return Ok(());
         }
     };
     let started = std::time::Instant::now();
     let outcome = drive(&runner, &acl, &recv_locks, &header, &mut reader).await;
-    if let Ok(bytes) = outcome {
-        advance_last_hold(
-            runner.as_ref(),
-            job,
-            &header.target_dataset,
-            &header.send.to_snap.name,
-        )
-        .await;
-        report_transfer(pool.as_deref(), job, &acl.identity, &header, bytes, started).await;
-    }
-    let resp = ResponseFrame {
-        request_id: None,
-        body: match outcome {
-            Ok(_) => Response::Ok,
-            Err((code, message)) => Response::Error { code, message },
-        },
+    let resp = match &outcome {
+        Ok(bytes) => {
+            advance_last_hold(
+                runner.as_ref(),
+                job,
+                &header.target_dataset,
+                &header.send.to_snap.name,
+            )
+            .await;
+            report_transfer(
+                pool.as_deref(),
+                job,
+                &acl.identity,
+                &header,
+                *bytes,
+                started,
+            )
+            .await;
+            ResponseFrame {
+                request_id: None,
+                body: Response::Ok,
+            }
+        }
+        Err(e) => e.response(),
     };
     if let Err(e) = write_response(&mut writer, &resp).await {
         tracing::warn!(error = %e, "recv: write final response failed");
@@ -209,16 +286,14 @@ fn creatable_ancestors(target: &str, root_fs: Option<&str>) -> Vec<String> {
 ///
 /// Not `zfs create -p -o ...`: `-p` applies the `-o` properties to the
 /// named dataset only, and `canmount` is not inherited, so every ancestor
-/// `-p` created in between came up `canmount=on` under whatever
-/// mountpoint it inherited from the receive root — and mounted on the
-/// next `zfs mount -a`. Mount policy belongs to the receiving host; a
-/// placeholder for a backup tree has no business appearing in its
-/// filesystem namespace.
+/// `-p` created in between would come up `canmount=on` under whatever
+/// mountpoint it inherited from the receive root and mount on the next
+/// `zfs mount -a`.
 async fn ensure_receive_ancestors(
     runner: &dyn CommandRunner,
     root_fs: Option<&str>,
     target: &str,
-) -> Result<(), (ErrorCode, String)> {
+) -> Result<(), RecvError> {
     let candidates = creatable_ancestors(target, root_fs);
     // Datasets nest, so the first missing ancestor means every deeper one
     // is missing too: one probe per receive on the common path.
@@ -233,11 +308,16 @@ async fn ensure_receive_ancestors(
         };
         match zfskit::dataset::list(runner, &opts).await {
             Ok(_) => {}
-            Err(zfskit::ZfsError::DatasetNotFound { .. }) => {
+            Err(ZfsError::DatasetNotFound { .. }) => {
                 first_missing = i;
                 break;
             }
-            Err(e) => return Err((ErrorCode::Zfs, format!("probe ancestor {name}: {e}"))),
+            Err(source) => {
+                return Err(RecvError::ProbeAncestor {
+                    name: name.clone(),
+                    source,
+                });
+            }
         }
     }
     for name in &candidates[first_missing..] {
@@ -246,7 +326,10 @@ async fn ensure_receive_ancestors(
             .property("canmount", "off");
         zfskit::dataset::create(runner, name, &opts)
             .await
-            .map_err(|e| (ErrorCode::Zfs, format!("create ancestor {name}: {e}")))?;
+            .map_err(|source| RecvError::CreateAncestor {
+                name: name.clone(),
+                source,
+            })?;
     }
     Ok(())
 }
@@ -257,38 +340,35 @@ async fn drive<R>(
     recv_locks: &RecvLocks,
     header: &RecvHeader,
     reader: &mut R,
-) -> Result<u64, (ErrorCode, String)>
+) -> Result<u64, RecvError>
 where
     R: AsyncRead + Unpin,
 {
     validate_header(header)?;
-    if let Err(msg) = enforce_root_fs(acl, &header.target_dataset) {
-        return Err((ErrorCode::Unauthorized, msg));
-    }
-    // Hold this across abort, stream ingestion and ZFS finalization.
-    // The control RPC uses the same lock, so it cannot destroy `%recv` under
-    // an active receiver and a second recv channel cannot enter concurrently.
-    let _recv_lock = recv_locks.acquire(&header.target_dataset).map_err(|e| {
-        tracing::warn!(target = %header.target_dataset, error = %e, "recv admission refused");
-        (ErrorCode::Zfs, e.to_string())
-    })?;
+    check_root_fs(acl, &header.target_dataset)?;
+    // Held across abort, stream ingestion and ZFS finalization. The
+    // control RPC uses the same lock, so it cannot destroy `%recv` under
+    // an active receiver and a second recv channel cannot enter.
+    let _recv_lock = recv_locks
+        .acquire(&header.target_dataset)
+        .inspect_err(|e| {
+            tracing::warn!(target = %header.target_dataset, error = %e, "recv admission refused");
+        })?;
     if header.send.discard_partial_recv {
-        // Same operation, same grant as the control RPC. Honouring the
-        // header without checking left `control:discard_partial_recv`
-        // decorative: a client with only `recv` could throw away a
-        // resumable receive by setting a flag, and the grant an operator
-        // withheld bought them nothing.
-        enforce_discard_acl(acl)?;
+        // Same operation, same grant as the control RPC: a client with
+        // only `recv` must not be able to throw away a resumable receive
+        // by setting a flag.
+        check_operation(acl, "control:discard_partial_recv", false)?;
         tracing::info!(
             target = %header.target_dataset,
             "recv: discarding partial recv per sender request"
         );
-        if let Err(e) = zfskit::recv::abort_partial(runner.as_ref(), &header.target_dataset).await {
-            return Err((
-                ErrorCode::Zfs,
-                format!("abort_partial {}: {e}", header.target_dataset),
-            ));
-        }
+        zfskit::recv::abort_partial(runner.as_ref(), &header.target_dataset)
+            .await
+            .map_err(|source| RecvError::AbortPartial {
+                dataset: header.target_dataset.clone(),
+                source,
+            })?;
     }
     ensure_receive_ancestors(
         runner.as_ref(),
@@ -299,37 +379,24 @@ where
     let args = recv_args(&header.target_dataset, acl);
     let mut handle = zfs_recv(runner.as_ref(), &args)
         .await
-        .map_err(|e| (ErrorCode::Zfs, format!("spawn zfs recv: {e}")))?;
-    let mut child_stdin = handle
-        .take_stdin()
-        .ok_or((ErrorCode::Internal, "no stdin on recv child".into()))?;
-    // `copy` returns the byte count — that IS the transfer size report.
+        .map_err(RecvError::SpawnRecv)?;
+    let mut child_stdin = handle.take_stdin().ok_or(RecvError::NoChildStdin)?;
     let copy_res = tokio::io::copy(reader, &mut child_stdin).await;
     let _ = child_stdin.shutdown().await;
     drop(child_stdin);
     if let Err(copy_err) = copy_res {
-        // A receiver that refuses the stream — "destination has been
-        // modified", out of space, a bad property — exits and closes its
-        // stdin, so the copy fails with EPIPE. That is the symptom; the
-        // reason is in the child's stderr, which cancelling threw away,
-        // and the sender was told only "Broken pipe".
-        //
-        // Reaped rather than killed: its stdin is shut down and dropped,
-        // so it reaches EOF and exits. Waiting here is no more exposure
-        // than the success path below, which also waits without a bound
-        // — and `finish` consumes the handle, so a timeout could only
-        // drop the future and leave the process orphaned.
-        let reason = match handle.finish().await {
-            Err(e) => format!("zfs recv failed: {e}"),
-            // The pipe broke for a reason of its own; the child is fine.
-            Ok(()) => format!("stream copy: {copy_err}"),
-        };
-        return Err((ErrorCode::Zfs, reason));
+        // A receiver that refuses the stream ("destination has been
+        // modified", out of space, a bad property) exits and closes its
+        // stdin, so the copy fails with EPIPE. The reason is in the
+        // child's stderr, which killing it would throw away. It is
+        // reaped, not killed: its stdin is shut down, so it reaches EOF
+        // and exits.
+        return Err(match handle.finish().await {
+            Err(e) => RecvError::RecvFailed(e),
+            Ok(()) => RecvError::StreamCopy(copy_err),
+        });
     }
-    handle
-        .finish()
-        .await
-        .map_err(|e| (ErrorCode::Zfs, format!("zfs recv failed: {e}")))?;
+    handle.finish().await.map_err(RecvError::RecvFailed)?;
     Ok(copy_res.unwrap_or(0))
 }
 
@@ -345,7 +412,6 @@ async fn report_transfer(
     started: std::time::Instant,
 ) {
     let duration_ms = started.elapsed().as_millis() as i64;
-    let from = header.send.from_snap.as_ref().map(|s| s.name.as_str());
     tracing::info!(
         dataset = %header.target_dataset,
         snapshot = %header.send.to_snap.name,
@@ -354,30 +420,26 @@ async fn report_transfer(
         "recv: transfer complete"
     );
     let Some(pool) = pool else { return };
-    if let Err(e) = crate::state::recv_transfers::record(
-        pool,
-        time::OffsetDateTime::now_utc().unix_timestamp(),
+    let transfer = crate::state::recv_transfers::NewTransfer {
+        completed_at: time::OffsetDateTime::now_utc().unix_timestamp(),
         job,
         identity,
-        &header.target_dataset,
-        &header.send.to_snap.name,
-        from,
-        bytes as i64,
+        dataset: &header.target_dataset,
+        to_snapshot: &header.send.to_snap.name,
+        from_snapshot: header.send.from_snap.as_ref().map(|s| s.name.as_str()),
+        bytes: bytes as i64,
         duration_ms,
-    )
-    .await
-    {
+    };
+    if let Err(e) = crate::state::recv_transfers::record(pool, transfer).await {
         tracing::warn!(error = %e, "recv: transfer record failed");
     }
 }
 
-fn validate_header(header: &RecvHeader) -> Result<(), (ErrorCode, String)> {
-    if let Err(e) = validate_dataset_name(&header.target_dataset) {
-        return Err((
-            ErrorCode::BadRequest,
-            format!("invalid target_dataset {:?}: {e}", header.target_dataset),
-        ));
-    }
+fn validate_header(header: &RecvHeader) -> Result<(), RecvError> {
+    validate_dataset_name(&header.target_dataset).map_err(|reason| RecvError::InvalidTarget {
+        name: header.target_dataset.clone(),
+        reason,
+    })?;
     validate_snapshot_ref("to_snap", &header.send.to_snap.name)?;
     if let Some(from) = &header.send.from_snap {
         validate_snapshot_ref("from_snap", &from.name)?;
@@ -385,50 +447,12 @@ fn validate_header(header: &RecvHeader) -> Result<(), (ErrorCode, String)> {
     Ok(())
 }
 
-fn validate_snapshot_ref(field: &str, name: &str) -> Result<(), (ErrorCode, String)> {
-    if let Err(e) = validate_snapshot_leaf(name) {
-        return Err((
-            ErrorCode::BadRequest,
-            format!("invalid {field} snapshot name {name:?}: {e}"),
-        ));
-    }
-    Ok(())
-}
-
-/// The recv channel's `discard_partial_recv` flag performs the same
-/// `zfs recv -A` as the control RPC, so it answers to the same grant —
-/// and, like the RPC, does not accept the legacy `control` umbrella:
-/// throwing away a partial receive is fine-grained on purpose.
-fn enforce_discard_acl(acl: &AllowedClient) -> Result<(), (ErrorCode, String)> {
-    let allowed = acl
-        .operations
-        .iter()
-        .any(|op| op == "control:discard_partial_recv");
-    if allowed {
-        return Ok(());
-    }
-    Err((
-        ErrorCode::Unauthorized,
-        format!(
-            "identity {:?} is not allowed for control operation \
-             \"control:discard_partial_recv\"",
-            acl.identity
-        ),
-    ))
-}
-
-fn enforce_root_fs(acl: &AllowedClient, dataset: &str) -> Result<(), String> {
-    let Some(root) = acl.root_fs.as_deref() else {
-        return Ok(());
-    };
-    if dataset == root {
-        return Ok(());
-    }
-    let prefix = format!("{root}/");
-    if dataset.starts_with(&prefix) {
-        return Ok(());
-    }
-    Err(format!("{dataset:?} is not under allowed root_fs {root:?}"))
+fn validate_snapshot_ref(field: &'static str, name: &str) -> Result<(), RecvError> {
+    validate_snapshot_leaf(name).map_err(|reason| RecvError::InvalidSnapshot {
+        field,
+        name: name.to_string(),
+        reason,
+    })
 }
 
 #[cfg(test)]
@@ -581,39 +605,6 @@ mod tests {
         }
     }
 
-    fn acl_ops(operations: &[&str]) -> AllowedClient {
-        AllowedClient {
-            identity: "laptop".into(),
-            fingerprint: None,
-            jobs: vec![],
-            operations: operations.iter().map(|s| s.to_string()).collect(),
-            root_fs: None,
-            recv: arctern_config::RecvConfig::default(),
-        }
-    }
-
-    // The recv header's discard flag runs the same `zfs recv -A` as the
-    // control RPC. Honouring it without the grant made the grant
-    // decorative: `recv` alone was enough to throw away a resumable
-    // receive.
-    #[test]
-    fn discarding_a_partial_receive_needs_its_own_grant() {
-        let e = enforce_discard_acl(&acl_ops(&["recv"])).expect_err("recv alone is not enough");
-        assert_eq!(e.0, ErrorCode::Unauthorized);
-        assert!(e.1.contains("control:discard_partial_recv"), "got: {}", e.1);
-    }
-
-    // Matches the RPC path, which passes `allow_legacy_control: false`.
-    #[test]
-    fn the_legacy_control_umbrella_does_not_cover_it() {
-        assert!(enforce_discard_acl(&acl_ops(&["recv", "control"])).is_err());
-    }
-
-    #[test]
-    fn the_fine_grained_grant_allows_it() {
-        assert!(enforce_discard_acl(&acl_ops(&["recv", "control:discard_partial_recv"])).is_ok());
-    }
-
     fn acl_with(inherit: &[&str], overrides: &[(&str, &str)]) -> AllowedClient {
         AllowedClient {
             identity: "laptop".into(),
@@ -691,21 +682,38 @@ mod tests {
     fn validate_header_rejects_invalid_target_dataset() {
         let h = header("tank/backups#bookmark", None, "snap1");
         let err = validate_header(&h).unwrap_err();
-        assert_eq!(err.0, ErrorCode::BadRequest);
-        assert!(err.1.contains("invalid target_dataset"));
+        assert_eq!(err.code(), ErrorCode::BadRequest);
+        assert!(matches!(err, RecvError::InvalidTarget { .. }), "{err:?}");
     }
 
     #[test]
     fn validate_header_rejects_invalid_snapshot_refs() {
         let h = header("tank/backups", Some("base snap"), "snap1");
         let err = validate_header(&h).unwrap_err();
-        assert_eq!(err.0, ErrorCode::BadRequest);
-        assert!(err.1.contains("from_snap"));
+        assert_eq!(err.code(), ErrorCode::BadRequest);
+        assert!(
+            matches!(
+                err,
+                RecvError::InvalidSnapshot {
+                    field: "from_snap",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
 
         let h = header("tank/backups", None, "snap/child");
         let err = validate_header(&h).unwrap_err();
-        assert_eq!(err.0, ErrorCode::BadRequest);
-        assert!(err.1.contains("to_snap"));
+        assert!(
+            matches!(
+                err,
+                RecvError::InvalidSnapshot {
+                    field: "to_snap",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -716,5 +724,18 @@ mod tests {
             "zrepl_2026-05-16",
         );
         validate_header(&h).unwrap();
+    }
+
+    // The recv header's discard flag runs the same `zfs recv -A` as the
+    // control RPC; the grant it answers to is the same fine-grained one,
+    // and the wire code says so.
+    #[test]
+    fn an_acl_refusal_is_unauthorized_on_the_wire() {
+        let err = RecvError::from(AclError::OperationNotGranted {
+            identity: "laptop".into(),
+            op: "control:discard_partial_recv",
+        });
+        assert_eq!(err.code(), ErrorCode::Unauthorized);
+        assert!(err.to_string().contains("control:discard_partial_recv"));
     }
 }

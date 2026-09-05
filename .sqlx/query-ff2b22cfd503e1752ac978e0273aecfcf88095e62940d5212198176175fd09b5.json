@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM browser_sessions\n                 WHERE session_hash = (\n                     SELECT session_hash FROM browser_sessions\n                     WHERE namespace = ? ORDER BY expires_at ASC LIMIT 1\n                 )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "ff2b22cfd503e1752ac978e0273aecfcf88095e62940d5212198176175fd09b5"
+}

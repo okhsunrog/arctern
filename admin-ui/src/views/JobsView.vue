@@ -6,6 +6,7 @@ import IncomingTransfers from '../components/IncomingTransfers.vue'
 import JobActions from '../components/JobActions.vue'
 import { useJobs } from '../composables/useJobs'
 import { formatNextRun, formatRelative } from '../utils/format'
+import { asPushJob } from '../utils/jobs'
 import { formatLastSync, formatSyncState } from '../utils/pushTimes'
 import { jobFailureMessage, jobStatus } from '../utils/status'
 import type { JobStatus } from '../client'
@@ -63,7 +64,7 @@ const columns = computed<TableColumn<JobStatus>[]>(() => [
     id: 'targets',
     header: 'Targets',
     cell: ({ row }) => {
-      const targets = row.original.targets ?? []
+      const targets = asPushJob(row.original)?.targets ?? []
       if (targets.length === 0) return ''
       return h(
         'div',

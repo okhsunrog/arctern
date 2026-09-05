@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE browser_sessions SET expires_at = ?\n                 WHERE session_hash = ? AND namespace = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "dd113838359eff5f3a649f5fdc75eb925f506c1c108fe9d38a8a0c7b26dc0117"
+}

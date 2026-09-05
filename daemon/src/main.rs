@@ -1,11 +1,11 @@
 //! arctern daemon binary.
 //!
-//! Three subcommands per the constitution and CLAUDE.md "Out-of-scope CLI":
-//! - `daemon` runs the axum server (the only fully-implemented subcommand
-//!   this slice).
-//! - `stdinserver <ident>` is the SSH transport entry point invoked by sshd
-//!   via authorized_keys `command="..."`. Stub through slice 003.
+//! - `daemon` runs the scheduler, the UNIX-socket API and the loopback
+//!   web console.
+//! - `stdinserver-dispatch <identity>` is the SSH transport entry point
+//!   invoked by sshd via authorized_keys `command="..."`.
 //! - `configcheck <path>` validates a config file for CI / pre-deploy.
+//! - `openapi` prints the OpenAPI spec for the UI's generated client.
 
 // musl's allocator is noticeably slower under multithreaded load than
 // glibc's; mimalloc levels the static-musl release builds with the
@@ -17,26 +17,35 @@ use std::future::Future;
 use std::io::{ErrorKind, Write};
 use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use sqlx::SqlitePool;
 use tokio::net::UnixListener;
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+use tracing_subscriber::Layer as _;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Registry};
 
 mod app_state;
 mod auth;
 mod configcheck;
 mod error;
 mod handlers;
+mod inventory;
 mod jobs;
 mod peer;
 mod router;
 mod state;
 mod stdinserver;
 
+const DEFAULT_STATE_DIR: &str = "/var/lib/arctern";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(20);
 /// Servers and jobs stop together — see `orderly_shutdown` — so they
 /// share one stage: while it is current, either could be what is holding
@@ -61,7 +70,7 @@ fn shutdown_stage_name(stage: u8) -> &'static str {
 }
 
 async fn supervise_shutdown<F>(
-    cancellation: tokio_util::sync::CancellationToken,
+    cancellation: CancellationToken,
     shutdown: F,
     stage: Arc<AtomicU8>,
     timeout: Duration,
@@ -162,28 +171,50 @@ fn main() -> eyre::Result<()> {
     }
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn run_stdinserver_dispatch(identity: String, config: PathBuf) -> eyre::Result<()> {
-    // The dispatcher logs structured events; pipe them to stderr so
-    // sshd's wrapping channel only sees the protocol bytes on stdout.
-    // EnvFilter respects RUST_LOG so operators can crank verbosity.
-    // The SQLite layer mirrors INFO+ events into the per-host state.db
-    // so the receiver-side SubscribeEvents handler can stream them back.
-    use tracing_subscriber::EnvFilter;
-    use tracing_subscriber::Layer as _;
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-
-    // Resolve config + state_dir up front so the subscriber has access
-    // to the same SQLite the daemon writes to. A failure to open the
-    // pool falls back to stderr-only tracing so the dispatch still runs.
-    let cfg =
-        arctern_config::load_from_path(&config).map_err(|e| eyre::eyre!("config load: {e}"))?;
-    let state_dir = cfg
+fn state_dir(config: &arctern_config::Config) -> PathBuf {
+    config
         .state_dir
         .clone()
-        .unwrap_or_else(|| PathBuf::from("/var/lib/arctern"));
-    let pool = match state::open(&state_dir).await {
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_STATE_DIR))
+}
+
+/// The tracing layers both processes share: `RUST_LOG`-filtered stderr
+/// (ANSI only on a terminal; under systemd or an SSH pipe it would land
+/// in a log), plus the SQLite layer when a pool is available. tarpc's
+/// per-RPC INFO lines are protocol noise, so they drop to WARN. Returns
+/// the broadcast the SQLite layer publishes events on.
+fn init_tracing(
+    pool: Option<Arc<SqlitePool>>,
+) -> tokio::sync::broadcast::Sender<arctern_api::LogEvent> {
+    use std::io::IsTerminal as _;
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,tarpc=warn"));
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal());
+    let (events_tx, _) = tokio::sync::broadcast::channel::<arctern_api::LogEvent>(256);
+    match pool {
+        Some(pool) => {
+            let (sqlite_layer, _writer) =
+                state::log_events::SqliteLogLayer::with_writer(pool, events_tx.clone());
+            Registry::default()
+                .with(env_filter)
+                .with(fmt_layer)
+                .with(sqlite_layer.with_filter(state::log_events::SqliteLogLayer::filter()))
+                .init();
+        }
+        None => Registry::default().with(env_filter).with(fmt_layer).init(),
+    }
+    events_tx
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn run_stdinserver_dispatch(identity: String, config: PathBuf) -> eyre::Result<()> {
+    let cfg =
+        arctern_config::load_from_path(&config).map_err(|e| eyre::eyre!("config load: {e}"))?;
+    // A failure to open the pool falls back to stderr-only tracing so the
+    // dispatch still runs.
+    let pool = match state::open(&state_dir(&cfg)).await {
         Ok(p) => Some(Arc::new(p)),
         Err(e) => {
             eprintln!(
@@ -192,38 +223,7 @@ async fn run_stdinserver_dispatch(identity: String, config: PathBuf) -> eyre::Re
             None
         }
     };
-
-    // tarpc traces every RPC at INFO (BeginRequest/SendResponse, four
-    // lines per probe); over the stderr bridge that would flood the
-    // sender's event log every 15s. WARN keeps real tarpc failures.
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,tarpc=warn"));
-    // stderr here is an SSH pipe read by the peer's stderr drain (or
-    // journald); ANSI colour codes would travel into the peer's event
-    // log as garbage.
-    use std::io::IsTerminal as _;
-    let fmt_layer = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stderr)
-        .with_ansi(std::io::stderr().is_terminal());
-    if let Some(p) = pool.clone() {
-        // No in-process subscribers here — the broadcast half exists so
-        // the writer task has a uniform signature; the daemon is the
-        // one who fans events out.
-        let (events_tx, _) = tokio::sync::broadcast::channel(16);
-        let (layer, _writer) = state::log_events::SqliteLogLayer::with_writer(p, events_tx);
-        let sqlite_layer = layer.with_filter(state::log_events::SqliteLogLayer::filter());
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(fmt_layer)
-            .with(sqlite_layer)
-            .init();
-    } else {
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(fmt_layer)
-            .init();
-    }
-
+    init_tracing(pool.clone());
     stdinserver::dispatch::run_with(&identity, cfg, pool).await
 }
 
@@ -231,14 +231,9 @@ async fn run_stdinserver_dispatch(identity: String, config: PathBuf) -> eyre::Re
 /// `--socket` flag, then the config's `socket` key (which
 /// `stdinserver-dispatch` also reads, so the two processes agree),
 /// then the environment default.
-fn resolve_socket_path(arg: Option<PathBuf>, config: Option<&std::path::Path>) -> PathBuf {
-    if let Some(p) = arg {
-        return p;
-    }
-    if let Some(p) = config {
-        return p.to_path_buf();
-    }
-    default_socket_path()
+fn resolve_socket_path(arg: Option<PathBuf>, config: Option<&Path>) -> PathBuf {
+    arg.or_else(|| config.map(Path::to_path_buf))
+        .unwrap_or_else(default_socket_path)
 }
 
 /// Environment fallback shared by the daemon bind and the
@@ -252,160 +247,158 @@ pub(crate) fn default_socket_path() -> PathBuf {
     PathBuf::from("/run/arctern.sock")
 }
 
+fn bind_unix_socket(path: &Path) -> eyre::Result<UnixListener> {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(eyre::eyre!("remove stale socket {}: {e}", path.display())),
+    }
+    let listener = UnixListener::bind(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
+}
+
+/// The daemon runs on the ZFS host, so its runner is `RealRunner`.
+/// `ZFSKIT_SSH_TARGET` swaps in the SSH runner the integration tests
+/// use to drive the daemon against the test VM.
+fn zfs_facade() -> eyre::Result<zfskit::Zfs> {
+    match std::env::var("ZFSKIT_SSH_TARGET") {
+        Ok(s) if !s.is_empty() => Ok(zfskit::Zfs::with_runner(
+            zfskit::SshCommandRunner::from_env()
+                .map_err(|e| eyre::eyre!("ZFSKIT_SSH_TARGET configuration: {e}"))?,
+        )),
+        _ => Ok(zfskit::Zfs::new()),
+    }
+}
+
+/// One eager-reconnect task per `[[peers]]` entry, all sharing the
+/// peers map the push jobs and handlers read.
+struct PeerLinks {
+    state: peer::state::PeersState,
+    cancel: CancellationToken,
+    tasks: Vec<JoinHandle<()>>,
+}
+
+impl PeerLinks {
+    fn spawn(peers: &[arctern_config::PeerConfig]) -> Self {
+        let state = peer::state::PeersState::new();
+        let cancel = CancellationToken::new();
+        let tasks = peers
+            .iter()
+            .map(|p| {
+                let state = state.clone();
+                let cancel = cancel.clone();
+                let name = p.name.clone();
+                let routes = p.routes.clone();
+                tokio::spawn(async move {
+                    peer::reconnect::run_for_peer(state, name, routes, cancel).await;
+                })
+            })
+            .collect();
+        Self {
+            state,
+            cancel,
+            tasks,
+        }
+    }
+
+    async fn shutdown(self) {
+        self.cancel.cancel();
+        for task in self.tasks {
+            let _ = task.await;
+        }
+    }
+}
+
+fn spawn_jobs(
+    config: &arctern_config::Config,
+    jobs: Vec<arctern_config::JobConfig>,
+    ctx: &jobs::JobContext,
+    peers: &peer::state::PeersState,
+) -> eyre::Result<Arc<jobs::JobManager>> {
+    let manager = Arc::new(jobs::JobManager::new());
+    for job in jobs {
+        match job {
+            arctern_config::JobConfig::Snap(s) => {
+                manager.spawn(Arc::new(jobs::snap::SnapCycle::job(s)), ctx.clone());
+            }
+            arctern_config::JobConfig::Push(s) => {
+                let job = jobs::push::PushJob::new(s, Some(peers.clone()), &config.peers)
+                    .map_err(|e| eyre::eyre!("push job filter regex: {e}"))?;
+                manager.spawn(Arc::new(job), ctx.clone());
+            }
+            arctern_config::JobConfig::Prune(s) => {
+                manager.spawn(Arc::new(jobs::prune::PruneCycle::job(s)), ctx.clone());
+            }
+        }
+    }
+    Ok(manager)
+}
+
+/// A background task with its own cancel token, stopped in its own
+/// shutdown stage.
+struct Sweeper {
+    cancel: CancellationToken,
+    task: JoinHandle<()>,
+}
+
+impl Sweeper {
+    fn spawn(start: impl FnOnce(CancellationToken) -> JoinHandle<()>) -> Self {
+        let cancel = CancellationToken::new();
+        let task = start(cancel.clone());
+        Self { cancel, task }
+    }
+
+    async fn shutdown(self) {
+        self.cancel.cancel();
+        let _ = self.task.await;
+    }
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn run_daemon(
     socket_arg: Option<PathBuf>,
     config_path: PathBuf,
     http_address: SocketAddr,
 ) -> eyre::Result<()> {
-    // Load and validate the config BEFORE binding any socket — fail
-    // loudly if the operator's file is missing or malformed.
-    let config = arctern_config::load_from_path(&config_path)
+    // Load and validate the config before binding any socket so a bad
+    // file fails loudly and leaves nothing behind.
+    let mut config = arctern_config::load_from_path(&config_path)
         .map_err(|e| eyre::eyre!("config load: {e}"))?;
-
     let socket_path = resolve_socket_path(socket_arg, config.socket.as_deref());
+    let listener = bind_unix_socket(&socket_path)?;
+    let zfs = zfs_facade()?;
 
-    match std::fs::remove_file(&socket_path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == ErrorKind::NotFound => {}
-        Err(e) => {
-            return Err(eyre::eyre!(
-                "remove stale socket {}: {e}",
-                socket_path.display()
-            ));
-        }
-    }
-
-    let listener = UnixListener::bind(&socket_path)?;
-    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
-
-    // Under the SSH-transport pivot the daemon runs on the actual ZFS
-    // host, so its local CommandRunner is RealRunner. SshCommandRunner
-    // is kept as a dev/test override: setting ZFSKIT_SSH_TARGET
-    // selects it, matching the integration-test harness convention.
-    let zfs = match std::env::var("ZFSKIT_SSH_TARGET") {
-        Ok(s) if !s.is_empty() => zfskit::Zfs::with_runner(
-            zfskit::SshCommandRunner::from_env()
-                .map_err(|e| eyre::eyre!("ZFSKIT_SSH_TARGET configuration: {e}"))?,
-        ),
-        _ => zfskit::Zfs::new(),
-    };
-
-    // Resolve the state directory and ensure it exists; SQLite + the
-    // tracing layer's table both live under this path.
-    let state_dir = config
-        .state_dir
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("/var/lib/arctern"));
+    let state_dir = state_dir(&config);
     std::fs::create_dir_all(&state_dir)
         .map_err(|e| eyre::eyre!("create state_dir {}: {e}", state_dir.display()))?;
-
     let pool = Arc::new(
         state::open_for_daemon(&state_dir)
             .await
             .map_err(|e| eyre::eyre!("state open: {e}"))?,
     );
-
     let admin_auth = auth::AdminAuth::load_or_create(&state_dir, pool.as_ref().clone())
         .map_err(|e| eyre::eyre!("load or create admin token in {}: {e}", state_dir.display()))?;
+    let events_tx = init_tracing(Some(pool.clone()));
 
-    // Tracing fan-out: stderr fmt for live debugging, SQLite layer for
-    // INFO+ persistence. The fmt layer keeps DEBUG/TRACE; the SQLite
-    // layer carries a per-layer filter (INFO+, minus the sqlx target) so
-    // it alone drops those events without affecting the fmt layer.
-    use tracing_subscriber::EnvFilter;
-    use tracing_subscriber::Layer as _;
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-    // tarpc=warn: its per-RPC INFO tracing (four lines per control-
-    // channel call) is protocol noise, not operator signal.
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,tarpc=warn"));
-    // Under systemd stderr is a pipe to journald — no ANSI there either.
-    use std::io::IsTerminal as _;
-    let fmt_layer = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stderr)
-        .with_ansi(std::io::stderr().is_terminal());
-    // Event bus: tracing layer → writer task (SQLite assigns ids) →
-    // this broadcast. SSE handlers subscribe directly; there is no
-    // polling anywhere in the daemon-side pipeline.
-    let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<arctern_api::LogEvent>(256);
-    let (sqlite_layer, _events_writer) =
-        state::log_events::SqliteLogLayer::with_writer(pool.clone(), events_tx.clone());
-    let sqlite_layer = sqlite_layer.with_filter(state::log_events::SqliteLogLayer::filter());
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(fmt_layer)
-        .with(sqlite_layer)
-        .init();
-
-    let manager = Arc::new(jobs::JobManager::new());
     let ctx = jobs::JobContext {
         zfs: zfs.clone(),
         state: Some(pool.clone()),
     };
-    // One eager-reconnect background task per [[peers]] entry. Each
-    // task owns its peer's PeerLink lifecycle and updates the shared
-    // peers map; push jobs and HTTP handlers read from there. A
-    // CancellationToken drives graceful shutdown.
-    let peers_state = peer::state::new_state();
-    // Connectivity edge signal: reconnect tasks bump this on every
-    // publish; push jobs re-evaluate due-ness immediately instead of
-    // waiting out their nap.
-    let (peers_changed_tx, peers_changed_rx) = tokio::sync::watch::channel(0u64);
-    let peers_cancel = tokio_util::sync::CancellationToken::new();
-    let mut reconnect_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-    for p in &config.peers {
-        let state_for_task = peers_state.clone();
-        let cancel = peers_cancel.clone();
-        let name = p.name.clone();
-        let routes = p.routes.clone();
-        let changed = peers_changed_tx.clone();
-        reconnect_handles.push(tokio::spawn(async move {
-            peer::reconnect::run_for_peer(state_for_task, name, routes, changed, cancel).await;
-        }));
-    }
-    for job in config.jobs {
-        match job {
-            arctern_config::JobConfig::Snap(s) => {
-                let job = Arc::new(jobs::snap::SnapJob::new(s));
-                manager.spawn(job, ctx.clone());
-            }
-            arctern_config::JobConfig::Push(s) => {
-                let job = jobs::push::PushJob::new(
-                    s,
-                    Some(peers_state.clone()),
-                    &config.peers,
-                    Some(peers_changed_rx.clone()),
-                )
-                .map_err(|e| eyre::eyre!("push job filter regex: {e}"))?;
-                manager.spawn(Arc::new(job), ctx.clone());
-            }
-            arctern_config::JobConfig::Prune(s) => {
-                let job = Arc::new(jobs::prune::PruneJob::new(s));
-                manager.spawn(job, ctx.clone());
-            }
-        }
-    }
+    let peers = PeerLinks::spawn(&config.peers);
+    let job_configs = std::mem::take(&mut config.jobs);
+    let manager = spawn_jobs(&config, job_configs, &ctx, &peers.state)?;
+    let arc_sweeper = Sweeper::spawn(|cancel| state::arcstats::spawn_sweeper(pool.clone(), cancel));
+    let trim_sweeper = Sweeper::spawn(|cancel| state::spawn_trim_sweeper(pool.clone(), cancel));
 
-    // ARC stats sweeper: writes /proc/spl/kstat/zfs/arcstats into
-    // arcstats_history every minute, prunes rows older than 24h. The
-    // dashboard chart reads from there.
-    let arc_cancel = tokio_util::sync::CancellationToken::new();
-    let arc_sweeper = state::arcstats::spawn_sweeper(pool.clone(), arc_cancel.clone());
-
-    // Retention sweep for the observability tables (job_runs, log_events).
-    let trim_cancel = tokio_util::sync::CancellationToken::new();
-    let trim_sweeper = state::spawn_trim_sweeper(pool.clone(), trim_cancel.clone());
-
-    let shutdown_token = tokio_util::sync::CancellationToken::new();
+    let shutdown_token = CancellationToken::new();
     let app_state = app_state::AppState {
         auth: admin_auth.clone(),
         manager: manager.clone(),
-        peers: peers_state.clone(),
+        peers: peers.state.clone(),
         events: events_tx,
         state: pool.clone(),
-        zfs: zfs.clone(),
+        zfs,
         config_path: config_path
             .canonicalize()
             .unwrap_or_else(|_| config_path.clone()),
@@ -414,9 +407,8 @@ async fn run_daemon(
     let app = router::build_router(app_state.clone());
     let loopback_app = router::build_loopback_router(app_state);
 
-    // Loopback TCP serves the embedded admin UI + the same API. The default
-    // port matches the dev proxy; tests use port 0 to avoid colliding with an
-    // installed daemon.
+    // Loopback TCP serves the embedded admin UI + the same API. Tests use
+    // port 0 to avoid colliding with an installed daemon.
     let loopback_listener = tokio::net::TcpListener::bind(http_address).await?;
     let loopback_addr = loopback_listener.local_addr()?;
 
@@ -424,90 +416,78 @@ async fn run_daemon(
     println!("LISTEN http://{loopback_addr}");
     println!("ADMIN_TOKEN_FILE {}", admin_auth.token_path().display());
     std::io::stdout().flush().ok();
-
     tracing::info!(path = %socket_path.display(), "arctern daemon listening");
     tracing::info!(addr = %loopback_addr, "arctern admin UI listening");
 
-    let mut sigterm = signal(SignalKind::terminate())?;
-    let mut sigint = signal(SignalKind::interrupt())?;
-    let cleanup_path = socket_path.clone();
-    let shutdown_token_uds = shutdown_token.clone();
-    let shutdown_token_tcp = shutdown_token.clone();
-    let shutdown_deadline_token = shutdown_token.clone();
-    let shutdown_after_server_token = shutdown_token.clone();
-    let shutdown_token_for_jobs = shutdown_token.clone();
-    tokio::spawn(async move {
-        tokio::select! {
-            _ = sigterm.recv() => tracing::info!("SIGTERM"),
-            _ = sigint.recv() => tracing::info!("SIGINT"),
-        }
-        shutdown_token.cancel();
-    });
+    spawn_signal_handler(shutdown_token.clone())?;
 
     let uds_serve = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<auth::PeerCredentials>(),
     )
-    .with_graceful_shutdown(async move { shutdown_token_uds.cancelled().await });
-
+    .with_graceful_shutdown(shutdown_token.clone().cancelled_owned());
     let tcp_serve = axum::serve(loopback_listener, loopback_app.into_make_service())
-        .with_graceful_shutdown(async move { shutdown_token_tcp.cancelled().await });
+        .with_graceful_shutdown(shutdown_token.clone().cancelled_owned());
 
-    let shutdown_stage = Arc::new(AtomicU8::new(SHUTDOWN_STAGE_SERVERS_AND_JOBS));
-    let orderly_stage = shutdown_stage.clone();
-    let timeout_cleanup_path = cleanup_path.clone();
-    let orderly_shutdown = async move {
-        // Servers and jobs stop concurrently. A job needs no listener and
-        // the listener needs no job, but draining first meant one slow
-        // in-flight request spent the budget a job needed to record its
-        // terminal state — so a routine restart during, say, a large
-        // holds query left runs marked `interrupted` instead of what they
-        // actually were.
-        let servers = async {
-            let result =
-                tokio::try_join!(uds_serve.into_future(), tcp_serve.into_future()).map(|_| ());
-            // A listener can also terminate independently of
-            // SIGTERM/SIGINT. Start the same bounded cleanup deadline —
-            // and release the job half — in that case.
-            shutdown_after_server_token.cancel();
-            result
-        };
-        let jobs = async {
-            shutdown_token_for_jobs.cancelled().await;
-            manager.shutdown(Duration::from_secs(5)).await;
-        };
-        let (result, ()) = tokio::join!(servers, jobs);
+    let stage = Arc::new(AtomicU8::new(SHUTDOWN_STAGE_SERVERS_AND_JOBS));
+    let orderly_shutdown = {
+        let stage = stage.clone();
+        let shutdown_token = shutdown_token.clone();
+        let socket_path = socket_path.clone();
+        async move {
+            // Servers and jobs stop concurrently: draining first meant one
+            // slow in-flight request spent the budget a job needed to
+            // record its terminal state.
+            let servers = async {
+                let result =
+                    tokio::try_join!(uds_serve.into_future(), tcp_serve.into_future()).map(|_| ());
+                // A listener can also terminate on its own; that starts the
+                // same bounded cleanup and releases the job half.
+                shutdown_token.cancel();
+                result
+            };
+            let jobs = async {
+                shutdown_token.cancelled().await;
+                manager.shutdown(Duration::from_secs(5)).await;
+            };
+            let (result, ()) = tokio::join!(servers, jobs);
 
-        orderly_stage.store(SHUTDOWN_STAGE_PEERS, Ordering::SeqCst);
-        peers_cancel.cancel();
-        for handle in reconnect_handles {
-            let _ = handle.await;
+            stage.store(SHUTDOWN_STAGE_PEERS, Ordering::SeqCst);
+            peers.shutdown().await;
+            stage.store(SHUTDOWN_STAGE_ARC, Ordering::SeqCst);
+            arc_sweeper.shutdown().await;
+            stage.store(SHUTDOWN_STAGE_RETENTION, Ordering::SeqCst);
+            trim_sweeper.shutdown().await;
+            stage.store(SHUTDOWN_STAGE_SOCKET, Ordering::SeqCst);
+            let _ = std::fs::remove_file(&socket_path);
+            stage.store(SHUTDOWN_STAGE_COMPLETE, Ordering::SeqCst);
+
+            result?;
+            Ok(())
         }
-
-        orderly_stage.store(SHUTDOWN_STAGE_ARC, Ordering::SeqCst);
-        arc_cancel.cancel();
-        let _ = arc_sweeper.await;
-
-        orderly_stage.store(SHUTDOWN_STAGE_RETENTION, Ordering::SeqCst);
-        trim_cancel.cancel();
-        let _ = trim_sweeper.await;
-
-        orderly_stage.store(SHUTDOWN_STAGE_SOCKET, Ordering::SeqCst);
-        let _ = std::fs::remove_file(&cleanup_path);
-        orderly_stage.store(SHUTDOWN_STAGE_COMPLETE, Ordering::SeqCst);
-
-        result?;
-        Ok(())
     };
 
     supervise_shutdown(
-        shutdown_deadline_token,
+        shutdown_token,
         orderly_shutdown,
-        shutdown_stage,
+        stage,
         SHUTDOWN_TIMEOUT,
-        timeout_cleanup_path,
+        socket_path,
     )
     .await
+}
+
+fn spawn_signal_handler(shutdown: CancellationToken) -> eyre::Result<()> {
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = sigterm.recv() => tracing::info!("SIGTERM"),
+            _ = sigint.recv() => tracing::info!("SIGINT"),
+        }
+        shutdown.cancel();
+    });
+    Ok(())
 }
 
 #[cfg(test)]
@@ -527,7 +507,7 @@ mod shutdown_tests {
 
     #[tokio::test]
     async fn shutdown_completes_without_waiting_for_cancellation() {
-        let cancellation = tokio_util::sync::CancellationToken::new();
+        let cancellation = CancellationToken::new();
         let stage = Arc::new(AtomicU8::new(SHUTDOWN_STAGE_SERVERS_AND_JOBS));
         let socket_path = temp_socket_path();
 
@@ -544,7 +524,7 @@ mod shutdown_tests {
 
     #[tokio::test]
     async fn shutdown_timeout_reports_stage_and_removes_socket() {
-        let cancellation = tokio_util::sync::CancellationToken::new();
+        let cancellation = CancellationToken::new();
         let cancellation_from_shutdown = cancellation.clone();
         let stage = Arc::new(AtomicU8::new(SHUTDOWN_STAGE_PEERS));
         let socket_path = temp_socket_path();
@@ -565,5 +545,14 @@ mod shutdown_tests {
 
         assert!(error.to_string().contains("peer reconnect shutdown"));
         assert!(!socket_path.exists());
+    }
+
+    #[test]
+    fn socket_path_prefers_the_flag_then_the_config() {
+        let flag = PathBuf::from("/tmp/flag.sock");
+        let cfg = PathBuf::from("/tmp/cfg.sock");
+        assert_eq!(resolve_socket_path(Some(flag.clone()), Some(&cfg)), flag);
+        assert_eq!(resolve_socket_path(None, Some(&cfg)), cfg);
+        assert_eq!(resolve_socket_path(None, None), default_socket_path());
     }
 }

@@ -84,21 +84,11 @@ async fn connect_ranked(
     None
 }
 
-async fn publish(state: &PeersState, changed: &tokio::sync::watch::Sender<u64>, entry: PeerEntry) {
-    let mut g = state.write().await;
-    g.insert(entry.name.clone(), entry);
-    drop(g);
-    // Edge signal for schedulers (push jobs sleep until due OR until a
-    // link appears/dies).
-    changed.send_modify(|v| *v = v.wrapping_add(1));
-}
-
 /// Reconnect loop for one peer. Runs until `cancel` fires.
 pub async fn run_for_peer(
     state: PeersState,
     peer_name: String,
     routes: Vec<RouteConfig>,
-    changed: tokio::sync::watch::Sender<u64>,
     cancel: CancellationToken,
 ) {
     let mut attempt: u32 = 0;
@@ -116,18 +106,13 @@ pub async fn run_for_peer(
                     route = %routes[active_idx].name,
                     "peer connected"
                 );
-                publish(
-                    &state,
-                    &changed,
-                    PeerEntry {
-                        name: peer_name.clone(),
-                        status: PeerStatus::Connected,
-                        active_route: Some(routes[active_idx].name.clone()),
-                        routes: states.clone(),
-                        link: Some(link.clone()),
-                    },
-                )
-                .await;
+                state.publish(PeerEntry {
+                    name: peer_name.clone(),
+                    status: PeerStatus::Connected,
+                    active_route: Some(routes[active_idx].name.clone()),
+                    routes: states.clone(),
+                    link: Some(link.clone()),
+                });
                 attempt = 0;
                 let probe_interval = Duration::from_secs(15);
                 // Bound the probe itself: on a half-open connection the RPC
@@ -171,20 +156,15 @@ pub async fn run_for_peer(
                             last_error: format!("probe: {e}"),
                         };
                         states[active_idx].last_checked = Some(OffsetDateTime::now_utc());
-                        publish(
-                            &state,
-                            &changed,
-                            PeerEntry {
-                                name: peer_name.clone(),
-                                status: PeerStatus::Reconnecting {
-                                    since: OffsetDateTime::now_utc(),
-                                },
-                                active_route: None,
-                                routes: states.clone(),
-                                link: None,
+                        state.publish(PeerEntry {
+                            name: peer_name.clone(),
+                            status: PeerStatus::Reconnecting {
+                                since: OffsetDateTime::now_utc(),
                             },
-                        )
-                        .await;
+                            active_route: None,
+                            routes: states.clone(),
+                            link: None,
+                        });
                         break;
                     }
                     // Re-rank: prefer a higher-priority route once it is
@@ -211,18 +191,13 @@ pub async fn run_for_peer(
                         states[active_idx].health = RouteHealth::Unknown;
                         link = Arc::new(better_link);
                         active_idx = better_idx;
-                        publish(
-                            &state,
-                            &changed,
-                            PeerEntry {
-                                name: peer_name.clone(),
-                                status: PeerStatus::Connected,
-                                active_route: Some(routes[active_idx].name.clone()),
-                                routes: states.clone(),
-                                link: Some(link.clone()),
-                            },
-                        )
-                        .await;
+                        state.publish(PeerEntry {
+                            name: peer_name.clone(),
+                            status: PeerStatus::Connected,
+                            active_route: Some(routes[active_idx].name.clone()),
+                            routes: states.clone(),
+                            link: Some(link.clone()),
+                        });
                     }
                 }
             }
@@ -239,21 +214,16 @@ pub async fn run_for_peer(
                         _ => None,
                     })
                     .unwrap_or_else(|| "no routes attempted".into());
-                publish(
-                    &state,
-                    &changed,
-                    PeerEntry {
-                        name: peer_name.clone(),
-                        status: PeerStatus::Failed {
-                            since: now,
-                            last_error: last_error.clone(),
-                        },
-                        active_route: None,
-                        routes: states.clone(),
-                        link: None,
+                state.publish(PeerEntry {
+                    name: peer_name.clone(),
+                    status: PeerStatus::Failed {
+                        since: now,
+                        last_error: last_error.clone(),
                     },
-                )
-                .await;
+                    active_route: None,
+                    routes: states.clone(),
+                    link: None,
+                });
                 let delay = next_delay(attempt);
                 tracing::warn!(
                     peer = %peer_name,

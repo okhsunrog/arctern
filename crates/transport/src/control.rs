@@ -1,8 +1,8 @@
 //! Control-channel RPC service. The trait is the wire contract; tarpc
-//! generates the client (`ArcternControlClient`) and the server glue
-//! (`serve()`), replacing the hand-rolled request-id demux this crate
-//! used to carry. Framing stays `LengthDelimitedCodec` + JSON (see
-//! `transport()`), so the payloads remain inspectable in logs.
+//! generates the client (`ArcternControlClient`), the server glue
+//! (`serve()`) and the request-id demux. Framing is
+//! `LengthDelimitedCodec` + JSON (see `transport()`), so the payloads
+//! remain inspectable in logs.
 //!
 //! The method set states the plane split: `list_receiver_guids` /
 //! `discard_partial_recv` are the replication core and must work with
@@ -37,11 +37,11 @@ impl WireError {
 pub struct GuidsReply {
     pub guids: Vec<u64>,
     pub receive_resume_token: Option<String>,
-    /// Whether the target dataset exists at all. An empty `guids` used to
-    /// mean "first replication" — but a dataset that exists without
-    /// snapshots (a placeholder created for a child's receive) looks the
-    /// same and cannot take a full stream. Defaults to false so a reply
-    /// from a receiver that predates the field keeps its old meaning.
+    /// Whether the target dataset exists at all. Empty `guids` alone
+    /// cannot tell a first replication from a dataset that exists
+    /// without snapshots (a placeholder created for a child's receive),
+    /// and the latter cannot take a full stream. Defaults to false so a
+    /// reply from a receiver that predates the field reads as absent.
     #[serde(default)]
     pub exists: bool,
 }

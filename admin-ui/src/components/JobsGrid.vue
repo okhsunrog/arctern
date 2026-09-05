@@ -2,6 +2,7 @@
 import { useHost } from '../composables/useHost'
 import type { JobStatus } from '../client'
 import { formatNextRun, formatRelative } from '../utils/format'
+import { isPushJob } from '../utils/jobs'
 import { formatLastSync, formatSyncState } from '../utils/pushTimes'
 import { jobStatus } from '../utils/status'
 import JobActions from './JobActions.vue'
@@ -80,7 +81,10 @@ defineProps<{
           {{ j.last_error }}
         </div>
       </dl>
-      <div v-if="j.transfers?.length || j.targets?.length || j.paused" class="mt-3">
+      <div
+        v-if="isPushJob(j) && (j.transfers?.length || j.targets?.length || j.paused)"
+        class="mt-3"
+      >
         <TransferPanel :job="j" :on-push-to="onPushTo" :is-pushing="isPushing" />
       </div>
       <template #footer>

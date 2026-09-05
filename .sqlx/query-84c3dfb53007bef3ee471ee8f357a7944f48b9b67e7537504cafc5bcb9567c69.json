@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM browser_sessions WHERE session_hash = ? AND namespace = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "84c3dfb53007bef3ee471ee8f357a7944f48b9b67e7537504cafc5bcb9567c69"
+}

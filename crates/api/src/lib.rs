@@ -1,42 +1,90 @@
 //! Shared request/response types for the arctern HTTP API.
 //!
-//! Wire types decouple the daemon's HTTP surface from `zfskit`'s
-//! internal models so zfskit can refactor freely without breaking
-//! the API. Both the in-process axum router and the `arctern-client`
-//! crate consume these types.
+//! Pure serde + utoipa types: no zfskit, no I/O. Both the in-process
+//! axum router and the `arctern-client` crate consume these, and the
+//! admin UI's TypeScript client is generated from their OpenAPI schema.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-/// Slim projection of [`zfskit::ZfsListEntry`] suitable for HTTP +
-/// OpenAPI. Native ZFS properties carry typed data (bytes, bool, …) but
+/// A string that is not one of an enum's wire values. Returned by the
+/// `FromStr` impls below when a stored value (SQLite) or a peer's reply
+/// predates the current set of variants.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{value:?} is not a valid {kind}")]
+pub struct UnknownVariant {
+    pub kind: &'static str,
+    pub value: String,
+}
+
+/// A closed set of lowercase snake_case wire values with a string
+/// round-trip for SQLite columns and log fields.
+macro_rules! wire_enum {
+    (
+        $(#[$meta:meta])*
+        $name:ident {
+            $( $(#[$vmeta:meta])* $variant:ident => $text:literal ),+ $(,)?
+        }
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+        #[serde(rename_all = "snake_case")]
+        pub enum $name {
+            $( $(#[$vmeta])* $variant ),+
+        }
+
+        impl $name {
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $( Self::$variant => $text ),+
+                }
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl std::str::FromStr for $name {
+            type Err = UnknownVariant;
+
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                match s {
+                    $( $text => Ok(Self::$variant), )+
+                    other => Err(UnknownVariant {
+                        kind: stringify!($name),
+                        value: other.to_string(),
+                    }),
+                }
+            }
+        }
+    };
+}
+
+wire_enum! {
+    /// `zfs list -t` kinds, lowercase as `zfs(8)` prints them.
+    DatasetType {
+        Filesystem => "filesystem",
+        Volume => "volume",
+        Snapshot => "snapshot",
+        Bookmark => "bookmark",
+    }
+}
+
+/// Slim projection of a `zfs list` entry suitable for HTTP + OpenAPI.
+/// Native ZFS properties carry typed data (bytes, bool, …) but
 /// `BTreeMap<String, String>` serializes more cleanly through utoipa;
 /// consumers parse property values as needed.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct DatasetSummary {
     pub name: String,
-    /// `"filesystem" | "volume" | "snapshot" | "bookmark"` — lowercase
-    /// to match `zfs(8)`'s output and avoid leaking zfskit's enum repr.
-    pub dataset_type: String,
+    pub dataset_type: DatasetType,
     #[serde(default)]
     pub properties: BTreeMap<String, String>,
-}
-
-impl From<zfskit::dataset::ZfsListEntry> for DatasetSummary {
-    fn from(entry: zfskit::dataset::ZfsListEntry) -> Self {
-        let properties = entry
-            .properties
-            .into_iter()
-            .map(|(k, v)| (k, v.value))
-            .collect();
-        Self {
-            name: entry.name,
-            dataset_type: entry.kind.cli_name().to_string(),
-            properties,
-        }
-    }
 }
 
 /// Response of `GET /api/v1/system/info`: identity of the daemon serving
@@ -48,30 +96,58 @@ pub struct SystemInfo {
     pub version: String,
 }
 
-/// String constant for the `snap` job kind. The wire field is a
-/// `String` (not an enum) so that adding a future job kind in a later
-/// slice does not break clients pinned to an older `JobKind` enum
-/// definition.
-pub const JOB_KIND_SNAP: &str = "snap";
+wire_enum! {
+    /// The `type` of a `[[jobs]]` entry.
+    JobKind {
+        Snap => "snap",
+        Push => "push",
+        Prune => "prune",
+    }
+}
 
-/// String constant for the `push` job kind. See `JOB_KIND_SNAP` for the
-/// rationale.
-pub const JOB_KIND_PUSH: &str = "push";
+wire_enum! {
+    /// Terminal (or in-flight) state of one job cycle, as stored in
+    /// `job_runs.status` and `push_syncs.status`.
+    RunStatus {
+        Ok => "ok",
+        Error => "error",
+        /// Only in `job_runs`: the cycle is still executing.
+        Running => "running",
+        /// The operator stopped or paused the cycle, or the daemon shut
+        /// down. Not a failure.
+        Cancelled => "cancelled",
+        /// A push cycle in `dry_run` mode that completed without errors.
+        /// Never counts as a sync.
+        DryRun => "dry_run",
+        /// Only in `job_runs`: the daemon died between start and finish
+        /// and the row was reconciled at the next startup.
+        Interrupted => "interrupted",
+    }
+}
 
-/// One entry in the response of `GET /api/v1/jobs`. RFC3339 timestamps
-/// are nullable: `last_run` is null until the job has completed at
-/// least one cycle; `next_run` is set as soon as the loop knows when
-/// it will fire next; `last_error` is null when the most recent cycle
-/// finished cleanly.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct JobStatus {
+/// Fields every job kind reports.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct PeriodicJobStatus {
     pub name: String,
-    pub kind: String,
+    /// RFC3339; null until the job has completed at least one cycle.
+    pub last_run: Option<String>,
+    /// RFC3339; set as soon as the loop knows when it fires next.
+    pub next_run: Option<String>,
+    /// Null when the most recent cycle finished cleanly.
+    pub last_error: Option<String>,
+    /// True while a cycle is currently executing. `last_*` describe the
+    /// previous cycle.
+    #[serde(default)]
+    pub running: bool,
+}
+
+/// Status of a push job: the periodic fields plus transfer state.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct PushJobStatus {
+    pub name: String,
     pub last_run: Option<String>,
     pub next_run: Option<String>,
     pub last_error: Option<String>,
-    /// True while a cycle is currently executing (e.g. a multi-hour
-    /// full send). `last_*` fields describe the previous cycle.
     #[serde(default)]
     pub running: bool,
     /// True while the job is paused: the current transfer was aborted
@@ -80,23 +156,75 @@ pub struct JobStatus {
     pub paused: bool,
     /// True while a cancel request would actually abort something. False
     /// once every in-flight transfer has passed the point where cancel is
-    /// a no-op (finalizing/committing) — the decision belongs to the job,
-    /// not to each UI surface that draws a stop button.
+    /// a no-op (finalizing/committing).
     #[serde(default)]
     pub cancellable: bool,
-    /// Push jobs configured with `dry_run = true`: every cycle plans and
-    /// logs but sends nothing, so the job can never be "synced". Runs and
-    /// target outcomes carry the status `dry_run` instead of `ok`.
+    /// Configured with `dry_run = true`: every cycle plans and logs but
+    /// sends nothing, so the job can never be "synced".
     #[serde(default)]
     pub dry_run: bool,
     /// In-flight transfers, one per parallel send slot. UI derives
     /// speed from `bytes_sent` deltas between live snapshots.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transfers: Vec<TransferInfo>,
-    /// Push jobs: per-target replication policy + last outcome.
-    /// Empty for snap/prune jobs.
+    /// Per-target replication policy + last outcome.
     #[serde(default)]
     pub targets: Vec<TargetStatus>,
+}
+
+/// One entry in the response of `GET /api/v1/jobs`, discriminated by
+/// `kind`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum JobStatus {
+    Snap(PeriodicJobStatus),
+    Prune(PeriodicJobStatus),
+    Push(PushJobStatus),
+}
+
+impl JobStatus {
+    pub fn name(&self) -> &str {
+        match self {
+            JobStatus::Snap(s) | JobStatus::Prune(s) => &s.name,
+            JobStatus::Push(s) => &s.name,
+        }
+    }
+
+    pub fn kind(&self) -> JobKind {
+        match self {
+            JobStatus::Snap(_) => JobKind::Snap,
+            JobStatus::Prune(_) => JobKind::Prune,
+            JobStatus::Push(_) => JobKind::Push,
+        }
+    }
+}
+
+wire_enum! {
+    /// What kind of `zfs send` stream a transfer carries.
+    TransferKind {
+        Full => "full",
+        Incremental => "incremental",
+        Resume => "resume",
+    }
+}
+
+wire_enum! {
+    /// Where the executor is in one transfer. Phases past `finalizing`
+    /// cannot be cancelled: the bytes are with the receiver.
+    TransferPhase {
+        Sending => "sending",
+        /// `zfs send` has not produced the next record for a while.
+        WaitingSender => "waiting_sender",
+        /// The SSH channel is applying backpressure: network, or the
+        /// receiver's `zfs recv` / storage.
+        WaitingReceiver => "waiting_receiver",
+        /// All bytes are written; waiting for the receiver's verdict.
+        Finalizing => "finalizing",
+        /// Advancing the cursor bookmark and releasing step holds.
+        Committing => "committing",
+        /// Cancel requested; waiting for the remote `zfs recv` to exit.
+        Cancelling => "cancelling",
+    }
 }
 
 /// Progress of an in-flight `zfs send` stream.
@@ -104,35 +232,38 @@ pub struct JobStatus {
 pub struct TransferInfo {
     pub dataset: String,
     pub peer: String,
-    /// `"full" | "incremental" | "resume"`.
-    pub kind: String,
+    pub kind: TransferKind,
     pub bytes_sent: u64,
     /// Dry-run estimate. None for resume sends (no estimate available).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_bytes: Option<u64>,
     /// Unix seconds.
     pub started_at: i64,
-    /// Current executor phase. Kept as a string so future phases remain
-    /// backwards-compatible: `sending`, `waiting_sender`,
-    /// `waiting_receiver`, `finalizing`, or `committing`.
     #[serde(default = "default_transfer_phase")]
-    pub phase: String,
+    pub phase: TransferPhase,
     /// Unix seconds when `phase` last changed. Lets clients render a live
     /// wait duration even while no byte-count events are arriving.
     #[serde(default)]
     pub phase_since: i64,
 }
 
-fn default_transfer_phase() -> String {
-    "sending".into()
+fn default_transfer_phase() -> TransferPhase {
+    TransferPhase::Sending
+}
+
+wire_enum! {
+    /// Replication policy for one peer of a push job.
+    PeerMode {
+        Auto => "auto",
+        Manual => "manual",
+    }
 }
 
 /// One replication target of a push job.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TargetStatus {
     pub peer: String,
-    /// `"auto" | "manual"`.
-    pub mode: String,
+    pub mode: PeerMode,
     pub connected: bool,
     /// Active route name while connected (e.g. `"lan"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -142,8 +273,7 @@ pub struct TargetStatus {
     pub route_auto: bool,
     /// A manual push to this peer is queued and will run on the next
     /// cycle. Set from the moment the request is accepted until the
-    /// cycle that drains it starts, so an operator who pressed "send
-    /// now" during a running transfer can see that it was taken.
+    /// cycle that drains it starts.
     #[serde(default)]
     pub manual_queued: bool,
     /// For auto mode: the configured `auto_interval` in seconds. The
@@ -157,9 +287,10 @@ pub struct TargetStatus {
     /// Unix seconds of the most recent attempted sync, regardless of outcome.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_attempt: Option<i64>,
-    /// `"ok" | "error" | "cancelled"` for the most recent attempt.
+    /// Outcome of the most recent attempt: `ok`, `error`, `cancelled`
+    /// or `dry_run`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_outcome: Option<String>,
+    pub last_outcome: Option<RunStatus>,
     /// Human-readable context for the most recent non-successful attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_message: Option<String>,
@@ -238,11 +369,20 @@ pub struct VdevNode {
     pub children: Vec<VdevNode>,
 }
 
+wire_enum! {
+    /// `zpool scrub` verbs.
+    ScrubAction {
+        Start => "start",
+        Pause => "pause",
+        Resume => "resume",
+        Stop => "stop",
+    }
+}
+
 /// Body of `POST /api/v1/pools/{name}/scrub`.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ScrubRequest {
-    /// `"start"`, `"pause"`, `"resume"`, or `"stop"`.
-    pub action: String,
+    pub action: ScrubAction,
 }
 
 /// One hold entry returned by
@@ -256,9 +396,7 @@ pub struct SnapshotHold {
 
 /// `GET /api/v1/system/arc` — a typed echo of the kernel's
 /// `/proc/spl/kstat/zfs/arcstats`, plus a precomputed hit_ratio
-/// (NaN encoded as `null` for empty caches). Fields mirror the
-/// zfskit `ArcStats` struct; raw map omitted from the wire to
-/// keep responses small.
+/// (NaN encoded as `null` for empty caches).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ArcStats {
     pub size: u64,
@@ -289,41 +427,8 @@ pub struct ArcStats {
     pub hit_ratio: Option<f64>,
 }
 
-impl From<zfskit::system::ArcStats> for ArcStats {
-    fn from(s: zfskit::system::ArcStats) -> Self {
-        let ratio = s.hit_ratio();
-        Self {
-            hit_ratio: if ratio.is_finite() { Some(ratio) } else { None },
-            size: s.size,
-            c: s.c,
-            c_min: s.c_min,
-            c_max: s.c_max,
-            hits: s.hits,
-            misses: s.misses,
-            demand_data_hits: s.demand_data_hits,
-            demand_data_misses: s.demand_data_misses,
-            demand_metadata_hits: s.demand_metadata_hits,
-            demand_metadata_misses: s.demand_metadata_misses,
-            prefetch_data_hits: s.prefetch_data_hits,
-            prefetch_data_misses: s.prefetch_data_misses,
-            prefetch_metadata_hits: s.prefetch_metadata_hits,
-            prefetch_metadata_misses: s.prefetch_metadata_misses,
-            mru_hits: s.mru_hits,
-            mfu_hits: s.mfu_hits,
-            mru_ghost_hits: s.mru_ghost_hits,
-            mfu_ghost_hits: s.mfu_ghost_hits,
-            l2_size: s.l2_size,
-            l2_hits: s.l2_hits,
-            l2_misses: s.l2_misses,
-            compressed_size: s.compressed_size,
-            uncompressed_size: s.uncompressed_size,
-        }
-    }
-}
-
 /// One row of `GET /api/v1/system/arc/history`. Slim by design —
-/// only the fields the dashboard chart consumes. Add more columns
-/// (and migrate `arcstats_history`) when a future view needs them.
+/// only the fields the dashboard chart consumes.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ArcHistoryPoint {
     /// Unix seconds.
@@ -335,10 +440,7 @@ pub struct ArcHistoryPoint {
 }
 
 /// Body of `GET /api/v1/config` — the on-disk TOML the daemon was
-/// started with, plus its absolute path. Read-only: there is no
-/// write-back endpoint, so this is a faithful echo of what's loaded,
-/// not what the daemon may have parsed (you can spot drift by
-/// comparing to the other endpoints).
+/// started with, plus its absolute path. Read-only.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ConfigView {
     pub path: String,
@@ -352,7 +454,7 @@ pub struct ConfigView {
 pub struct JobRun {
     pub started_at: i64,
     pub finished_at: Option<i64>,
-    pub status: String,
+    pub status: RunStatus,
     pub error_message: Option<String>,
     pub bytes_sent: Option<i64>,
 }
@@ -395,6 +497,17 @@ pub enum PeerReachability {
     },
 }
 
+wire_enum! {
+    /// Last connect result for one route. Lower-priority routes are only
+    /// probed on failover / re-rank, so `unknown` is the common idle
+    /// state.
+    RouteHealth {
+        Unknown => "unknown",
+        Connected => "connected",
+        Failed => "failed",
+    }
+}
+
 /// One network route of a peer, in priority order (first = preferred).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct PeerRoute {
@@ -402,10 +515,7 @@ pub struct PeerRoute {
     pub ssh_target: String,
     /// Whether scheduled (auto) replication may run over this route.
     pub auto: bool,
-    /// `"connected" | "failed" | "unknown"` — last connect result for
-    /// this route. Lower-priority routes are only probed on failover /
-    /// re-rank, so `unknown` is the common idle state.
-    pub health: String,
+    pub health: RouteHealth,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
     /// RFC3339 timestamp of the last connect attempt, if any.
@@ -474,23 +584,44 @@ pub struct CreateSnapshotRequest {
 mod tests {
     use super::*;
 
-    fn list_entry(name: &str, kind: zfskit::models::DatasetType) -> zfskit::dataset::ZfsListEntry {
-        zfskit::dataset::ZfsListEntry {
-            name: name.into(),
-            kind,
-            pool: name.split('/').next().unwrap().to_string(),
-            createtxg: "1".into(),
-            dataset: None,
-            snapshot_name: None,
-            properties: Default::default(),
+    #[test]
+    fn wire_enums_round_trip_through_their_strings() {
+        for status in [
+            RunStatus::Ok,
+            RunStatus::Error,
+            RunStatus::Running,
+            RunStatus::Cancelled,
+            RunStatus::DryRun,
+            RunStatus::Interrupted,
+        ] {
+            assert_eq!(status.as_str().parse::<RunStatus>().unwrap(), status);
+            // serde and as_str agree, so a value written by one reader
+            // is accepted by the other.
+            assert_eq!(
+                serde_json::to_string(&status).unwrap(),
+                format!("\"{}\"", status.as_str())
+            );
         }
+        let err = "bogus".parse::<RunStatus>().unwrap_err();
+        assert_eq!(err.kind, "RunStatus");
+        assert_eq!(err.value, "bogus");
     }
 
     #[test]
-    fn from_zfs_list_entry_lowercases_kind() {
-        let s = DatasetSummary::from(list_entry("tank", zfskit::models::DatasetType::Filesystem));
-        assert_eq!(s.name, "tank");
-        assert_eq!(s.dataset_type, "filesystem");
+    fn job_status_is_tagged_by_kind() {
+        let status = JobStatus::Push(PushJobStatus {
+            name: "push".into(),
+            ..Default::default()
+        });
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["kind"], "push");
+        assert_eq!(json["name"], "push");
+        let back: JobStatus = serde_json::from_value(json).unwrap();
+        assert_eq!(back.kind(), JobKind::Push);
+        assert_eq!(back.name(), "push");
+
+        let snap: JobStatus = serde_json::from_str(r#"{"kind":"snap","name":"s"}"#).unwrap();
+        assert!(matches!(snap, JobStatus::Snap(_)));
     }
 
     #[test]
@@ -532,7 +663,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert_eq!(transfer.phase, "sending");
+        assert_eq!(transfer.phase, TransferPhase::Sending);
         assert_eq!(transfer.phase_since, 0);
     }
 
@@ -540,15 +671,16 @@ mod tests {
     fn serde_roundtrip() {
         let s = DatasetSummary {
             name: "tank/data".into(),
-            dataset_type: "filesystem".into(),
+            dataset_type: DatasetType::Filesystem,
             properties: [("compression".to_string(), "lz4".to_string())]
                 .into_iter()
                 .collect(),
         };
         let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains(r#""dataset_type":"filesystem""#));
         let back: DatasetSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(back.name, s.name);
-        assert_eq!(back.dataset_type, s.dataset_type);
+        assert_eq!(back.dataset_type, DatasetType::Filesystem);
         assert_eq!(
             back.properties.get("compression").map(String::as_str),
             Some("lz4")

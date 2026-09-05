@@ -10,12 +10,13 @@ use arctern_transport::{
 };
 use thiserror::Error;
 use tracing::warn;
-use zfskit::dataset::ListOptions;
-use zfskit::models::DatasetType;
+use zfskit::ZfsError;
 use zfskit::runner::CommandRunner;
 use zfskit::send::SendArgs;
 
-use crate::peer::PeerLink;
+pub use crate::inventory::BookmarkRef;
+use crate::inventory::{list_bookmarks, list_snapshots};
+use crate::peer::{PeerLink, RpcError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SnapshotPlan {
@@ -30,9 +31,11 @@ pub enum SnapshotPlan {
         discard_partial_recv: bool,
     },
     /// `zfs send -I <from> <to>`: the same delta as `Incremental`, but
-    /// the stream also carries every filtered snapshot between the two,
-    /// and `zfs recv` commits each as it arrives. `ReplicateMode::All`
-    /// picks this whenever there is at least one snapshot in between.
+    /// the stream also carries every snapshot between the two (ZFS does
+    /// not know the job's filter, so manual snapshots travel too), and
+    /// `zfs recv` commits each as it arrives. `ReplicateMode::All`
+    /// picks this whenever there is at least one filtered snapshot in
+    /// between.
     /// A bookmark cannot be the base of `-I`, so a cursor-based step
     /// stays `IncrementalFromBookmark` to the first snapshot past the
     /// bookmark and the catch-up loop continues from there.
@@ -61,15 +64,6 @@ pub enum SnapshotPlan {
     },
 }
 
-/// One sender-side bookmark, as listed for the fallback planner.
-/// `leaf` is the part after `#`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BookmarkRef {
-    pub leaf: String,
-    pub guid: u64,
-    pub createtxg: u64,
-}
-
 #[derive(Debug, Clone)]
 pub struct CompiledFilter {
     re: Option<regex::Regex>,
@@ -89,55 +83,50 @@ impl CompiledFilter {
     }
 }
 
+/// Why no plan could be made for one filesystem.
+///
+/// The two `Unreceivable` shapes are decided here rather than left to
+/// `zfs recv`: sending anyway failed every cycle, forever, after paying
+/// for a step hold and an opened stream, with whatever wording `zfs
+/// recv` chose. arctern never emits `recv -F`, so a receiver that
+/// already has data is never rolled back.
 #[derive(Debug, Error)]
 pub enum PlanError {
     #[error("list sender snapshots on {dataset}: {source}")]
     SenderList {
         dataset: String,
         #[source]
-        source: zfskit::ZfsError,
+        source: ZfsError,
     },
-}
-
-pub async fn list_sender_snaps(
-    runner: &dyn CommandRunner,
-    sender_dataset: &str,
-    filter: &CompiledFilter,
-) -> Result<Vec<SnapshotEntry>, PlanError> {
-    let opts = ListOptions {
-        recursive: false,
-        types: vec![DatasetType::Snapshot],
-        roots: vec![sender_dataset.to_string()],
-        properties: vec!["guid".into()],
-        ..ListOptions::default()
-    };
-    let entries = zfskit::dataset::list(runner, &opts)
-        .await
-        .map_err(|source| PlanError::SenderList {
-            dataset: sender_dataset.to_string(),
-            source,
-        })?;
-    let mut snaps: Vec<SnapshotEntry> = entries
-        .into_iter()
-        .filter_map(|e| {
-            let snap_name = e.snapshot_name.clone()?;
-            if !filter.matches(&snap_name) {
-                return None;
-            }
-            let guid = e
-                .properties
-                .get("guid")
-                .and_then(|p| p.value.parse::<u64>().ok())?;
-            let createtxg = e.createtxg.parse::<u64>().ok()?;
-            Some(SnapshotEntry {
-                name: snap_name,
-                guid,
-                createtxg,
-            })
-        })
-        .collect();
-    snaps.sort_by_key(|s| s.createtxg);
-    Ok(snaps)
+    #[error("list receiver snapshots on {target}: {source}")]
+    ReceiverList {
+        target: String,
+        #[source]
+        source: RpcError,
+    },
+    /// The receiver holds snapshots but none shares a GUID with the
+    /// sender, and no bookmark rescues it: the two sides have diverged.
+    #[error(
+        "{target} holds {receiver_snapshots} snapshot(s) but shares no snapshot or bookmark with \
+         the sender, so only a full send applies and a full send cannot be received over existing \
+         data. The two have diverged; reconcile by hand — destroy {target} to allow a fresh full \
+         send, or restore a common base on the sender."
+    )]
+    Diverged {
+        target: String,
+        receiver_snapshots: usize,
+    },
+    /// The target exists without snapshots. Nothing diverged, but `zfs
+    /// recv` will not lay a full stream over an existing dataset either.
+    /// This is what an earlier child receive leaves behind when it
+    /// created its parent as a placeholder.
+    #[error(
+        "{target} exists but has no snapshots, and a full send cannot be received over an \
+         existing dataset. It is most likely a placeholder created for a child's receive. If \
+         nothing lives under it, destroy it and the next cycle will send it in full; if received \
+         children already live under it, move them aside first."
+    )]
+    Placeholder { target: String },
 }
 
 fn snap_ref(s: &SnapshotEntry) -> SnapshotRef {
@@ -287,44 +276,6 @@ pub fn apply_bookmark_fallback(
         }
         (None, _) => plan,
     }
-}
-
-/// List every bookmark of `sender_dataset` with its GUID. Unfiltered by
-/// name on purpose — the fallback matches by GUID, and foreign bookmarks
-/// (zrepl cursors) are exactly the migration case.
-pub async fn list_sender_bookmarks(
-    runner: &dyn CommandRunner,
-    sender_dataset: &str,
-) -> Result<Vec<BookmarkRef>, PlanError> {
-    let opts = ListOptions {
-        recursive: false,
-        types: vec![DatasetType::Bookmark],
-        roots: vec![sender_dataset.to_string()],
-        properties: vec!["guid".into()],
-        ..ListOptions::default()
-    };
-    let entries = zfskit::dataset::list(runner, &opts)
-        .await
-        .map_err(|source| PlanError::SenderList {
-            dataset: sender_dataset.to_string(),
-            source,
-        })?;
-    Ok(entries
-        .into_iter()
-        .filter_map(|e| {
-            let leaf = e.name.split_once('#').map(|(_, l)| l.to_string())?;
-            let guid = e
-                .properties
-                .get("guid")
-                .and_then(|p| p.value.parse::<u64>().ok())?;
-            let createtxg = e.createtxg.parse::<u64>().ok()?;
-            Some(BookmarkRef {
-                leaf,
-                guid,
-                createtxg,
-            })
-        })
-        .collect())
 }
 
 pub fn pick_plan_with_token(
@@ -477,53 +428,29 @@ pub fn build_send_args(
     Some(args)
 }
 
-/// Naming conventions pinned in ARCHITECTURE.md. Peer-namespaced so a
-/// multi-target push job tracks each receiver's cursor independently:
-/// peer A can be a week behind peer B and still catch up cleanly from
-/// its own bookmark instead of triggering a full resend.
-/// Refuse a `Full` plan aimed at a receiver that already holds
-/// snapshots.
-///
+/// A `Full` plan only applies to a target that does not exist yet.
 /// `pick_plan` degrades to `Full` when no sender snapshot shares a GUID
-/// with the receiver, and `apply_bookmark_fallback` rescues that when a
-/// bookmark still matches. When neither does, the two sides have
-/// genuinely diverged — and arctern never emits `zfs recv -F`, so the
-/// receive is refused rather than rolling the receiver back over data it
-/// may be the only copy of.
-///
-/// Sending anyway just failed: every cycle, forever, with whatever
-/// wording `zfs recv` chose, after paying for a step hold and an opened
-/// stream. Deciding it here costs nothing and says what to do about it.
-///
-/// A target that exists WITHOUT snapshots is refused for the same reason
-/// with a different remedy: nothing diverged, but `zfs recv` will not lay
-/// a full stream over an existing dataset either. This is what a child's
-/// receive leaves behind when it creates its parent as a placeholder
-/// before the parent's own first sync ran.
+/// with the receiver and no bookmark rescued it; against an existing
+/// target that is a refusal, not a plan.
 fn reject_unreceivable_full(
     plan: SnapshotPlan,
     target_dataset: &str,
     receiver: &[SnapshotEntry],
     target_exists: bool,
-) -> Result<SnapshotPlan, String> {
+) -> Result<SnapshotPlan, PlanError> {
     if !matches!(plan, SnapshotPlan::Full { .. }) {
         return Ok(plan);
     }
     if !receiver.is_empty() {
-        return Err(format!(
-            "{target_dataset} holds {} snapshot(s) but shares no snapshot or bookmark with the \
-             sender, so only a full send applies and a full send cannot be received over existing \
-             data. The two have diverged; reconcile by hand — destroy {target_dataset} to allow a \
-             fresh full send, or restore a common base on the sender.",
-            receiver.len()
-        ));
+        return Err(PlanError::Diverged {
+            target: target_dataset.to_string(),
+            receiver_snapshots: receiver.len(),
+        });
     }
     if target_exists {
-        return Err(format!(
-            "{target_dataset} exists but has no snapshots, and a full send cannot be received \
-             over an existing dataset. It is most likely a placeholder created for a child's \
-             receive; destroy it (it holds nothing) and the next cycle will send it in full."
-        ));
+        return Err(PlanError::Placeholder {
+            target: target_dataset.to_string(),
+        });
     }
     Ok(plan)
 }
@@ -535,10 +462,13 @@ pub(super) async fn plan_one_filesystem(
     target_dataset: &str,
     filter: &CompiledFilter,
     mode: ReplicateMode,
-) -> Result<(SnapshotPlan, Vec<SnapshotEntry>), String> {
-    let sender = list_sender_snaps(runner, sender_dataset, filter)
+) -> Result<(SnapshotPlan, Vec<SnapshotEntry>), PlanError> {
+    let sender = list_snapshots(runner, sender_dataset, |name| filter.matches(name))
         .await
-        .map_err(|e| format!("{e}"))?;
+        .map_err(|source| PlanError::SenderList {
+            dataset: sender_dataset.to_string(),
+            source,
+        })?;
     if sender.is_empty() {
         return Ok((SnapshotPlan::Nothing, sender));
     }
@@ -548,12 +478,14 @@ pub(super) async fn plan_one_filesystem(
     // switch, a manual snapshot that travelled in a send stream. The
     // sender-side list stays filtered, so the filter still decides what
     // gets SENT; the receiver list only decides what counts as a
-    // common base. Filtering here forced a full resend in exactly the
-    // migration scenarios the bookmark fallback exists for.
+    // common base.
     let reply = peer
         .list_receiver_guids(target_dataset.to_string(), None)
         .await
-        .map_err(|e| format!("list_receiver_guids: {e}"))?;
+        .map_err(|source| PlanError::ReceiverList {
+            target: target_dataset.to_string(),
+            source,
+        })?;
     let (guids, token, target_exists) = (reply.guids, reply.receive_resume_token, reply.exists);
     // The planner intersects on GUID only (see pick_plan); the receiver's
     // snapshot names and createtxg are unused, so carry each GUID in an
@@ -586,11 +518,10 @@ pub(super) async fn plan_one_filesystem(
         },
         None => None,
     };
-    // Bookmarks participate in resume validation; list them once here
-    // (only when a token is in play — the common no-token path pays
-    // nothing extra; the fallback path lists lazily as before).
+    // Bookmarks participate in resume validation; the common no-token
+    // path pays nothing extra and the fallback path lists lazily.
     let bookmarks = if decoded.is_some() {
-        list_sender_bookmarks(runner, sender_dataset)
+        list_bookmarks(runner, sender_dataset)
             .await
             .unwrap_or_default()
     } else {
@@ -632,7 +563,7 @@ async fn maybe_bookmark_fallback(
     {
         return plan;
     }
-    match list_sender_bookmarks(runner, sender_dataset).await {
+    match list_bookmarks(runner, sender_dataset).await {
         Ok(bookmarks) => {
             let plan = apply_bookmark_fallback(plan, sender, receiver, &bookmarks, mode);
             if let SnapshotPlan::IncrementalFromBookmark { from, .. } = &plan {
@@ -709,9 +640,19 @@ mod tests {
         };
         let err = reject_unreceivable_full(plan, "backup/nova/data", &[s("x", 9)], true)
             .expect_err("a full send cannot land on a populated receiver");
-        assert!(err.contains("backup/nova/data"), "got: {err}");
-        assert!(err.contains("diverged"), "got: {err}");
-        assert!(err.contains("destroy"), "no remedy offered: {err}");
+        assert!(
+            matches!(
+                &err,
+                PlanError::Diverged {
+                    target,
+                    receiver_snapshots: 1
+                } if target == "backup/nova/data"
+            ),
+            "got: {err:?}"
+        );
+        let text = err.to_string();
+        assert!(text.contains("diverged"), "got: {text}");
+        assert!(text.contains("destroy"), "no remedy offered: {text}");
     }
 
     #[test]
@@ -738,9 +679,11 @@ mod tests {
         };
         let err = reject_unreceivable_full(plan, "backup/nova/data", &[], true)
             .expect_err("a full send cannot land on an existing dataset");
-        assert!(err.contains("placeholder"), "got: {err}");
-        assert!(err.contains("destroy"), "no remedy offered: {err}");
-        assert!(!err.contains("diverged"), "nothing diverged here: {err}");
+        assert!(matches!(err, PlanError::Placeholder { .. }), "got: {err:?}");
+        let text = err.to_string();
+        assert!(text.contains("placeholder"), "got: {text}");
+        assert!(text.contains("destroy"), "no remedy offered: {text}");
+        assert!(!text.contains("diverged"), "nothing diverged here: {text}");
     }
 
     // Divergence is about the FULL plan specifically: the fallback runs

@@ -73,7 +73,10 @@ pub async fn list_snapshots(
         let pat = format!("@{prefix}");
         entries.retain(|e| e.name.contains(&pat));
     }
-    let summaries: Vec<DatasetSummary> = entries.into_iter().map(DatasetSummary::from).collect();
+    let summaries: Vec<DatasetSummary> = entries
+        .into_iter()
+        .map(super::datasets::dataset_summary)
+        .collect();
     Ok(Json(summaries))
 }
 
@@ -129,7 +132,10 @@ pub async fn create_snapshot(
         ))
     })?;
 
-    Ok((StatusCode::CREATED, Json(DatasetSummary::from(entry))))
+    Ok((
+        StatusCode::CREATED,
+        Json(super::datasets::dataset_summary(entry)),
+    ))
 }
 
 /// Destroy snapshot `{name}@{snapshot}`. Path-segment escaping: the

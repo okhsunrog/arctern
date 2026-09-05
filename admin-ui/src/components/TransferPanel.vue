@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { JobStatus, TargetStatus } from '../client'
+import type { TargetStatus } from '../client'
 import { isTransferring, sendControl } from '../utils/actions'
 import { formatAge, formatDuration } from '../utils/format'
+import type { PushJob } from '../utils/jobs'
 import TransferSlot from './TransferSlot.vue'
 
 const props = defineProps<{
-  job: JobStatus
+  job: PushJob
   onPushTo?: (name: string, peer: string) => void
   isPushing?: (name: string, peer: string) => boolean
 }>()

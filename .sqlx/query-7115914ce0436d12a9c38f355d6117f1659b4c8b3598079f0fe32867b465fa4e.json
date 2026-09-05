@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO push_syncs\n           (job_name, peer, finished_at, status, error, last_success_at)\n         VALUES (?, ?, ?, ?, ?, CASE WHEN ? = 'ok' THEN ? ELSE NULL END)\n         ON CONFLICT(job_name, peer) DO UPDATE SET\n           finished_at = excluded.finished_at,\n           status = excluded.status,\n           error = excluded.error,\n           last_success_at = CASE\n             WHEN excluded.status = 'ok' THEN excluded.finished_at\n             ELSE push_syncs.last_success_at\n           END",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "7115914ce0436d12a9c38f355d6117f1659b4c8b3598079f0fe32867b465fa4e"
+}

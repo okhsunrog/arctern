@@ -110,35 +110,37 @@ impl AdminAuth {
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let expires_at = now + SESSION_TTL.as_secs() as i64;
         let hash = session_hash(&id);
+        let hash = hash.as_slice();
+        let namespace = self.cookie_name();
         let mut transaction = self.inner.sessions.begin().await?;
-        sqlx::query("DELETE FROM browser_sessions WHERE expires_at <= ?")
-            .bind(now)
+        sqlx::query!("DELETE FROM browser_sessions WHERE expires_at <= ?", now)
             .execute(&mut *transaction)
             .await?;
-        let count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM browser_sessions WHERE namespace = ?")
-                .bind(self.cookie_name())
-                .fetch_one(&mut *transaction)
-                .await?;
+        let count = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "count: i64" FROM browser_sessions WHERE namespace = ?"#,
+            namespace
+        )
+        .fetch_one(&mut *transaction)
+        .await?;
         if count >= MAX_SESSIONS as i64 {
-            sqlx::query(
+            sqlx::query!(
                 "DELETE FROM browser_sessions
                  WHERE session_hash = (
                      SELECT session_hash FROM browser_sessions
                      WHERE namespace = ? ORDER BY expires_at ASC LIMIT 1
                  )",
+                namespace
             )
-            .bind(self.cookie_name())
             .execute(&mut *transaction)
             .await?;
         }
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO browser_sessions (session_hash, namespace, expires_at)
              VALUES (?, ?, ?)",
+            hash,
+            namespace,
+            expires_at,
         )
-        .bind(hash.as_slice())
-        .bind(self.cookie_name())
-        .bind(expires_at)
         .execute(&mut *transaction)
         .await?;
         transaction.commit().await?;
@@ -148,12 +150,14 @@ impl AdminAuth {
     async fn validate_session(&self, id: &[u8; 32]) -> Result<SessionValidity, sqlx::Error> {
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let hash = session_hash(id);
-        let expires_at: Option<i64> = sqlx::query_scalar(
+        let hash = hash.as_slice();
+        let namespace = self.cookie_name();
+        let expires_at = sqlx::query_scalar!(
             "SELECT expires_at FROM browser_sessions
              WHERE session_hash = ? AND namespace = ?",
+            hash,
+            namespace,
         )
-        .bind(hash.as_slice())
-        .bind(self.cookie_name())
         .fetch_optional(&self.inner.sessions)
         .await?;
         let Some(expires_at) = expires_at else {
@@ -168,13 +172,13 @@ impl AdminAuth {
             expires_at - SESSION_TTL.as_secs() as i64 + SESSION_REFRESH_INTERVAL.as_secs() as i64;
         if now >= refresh_at {
             let new_expiry = now + SESSION_TTL.as_secs() as i64;
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE browser_sessions SET expires_at = ?
                  WHERE session_hash = ? AND namespace = ?",
+                new_expiry,
+                hash,
+                namespace,
             )
-            .bind(new_expiry)
-            .bind(hash.as_slice())
-            .bind(self.cookie_name())
             .execute(&self.inner.sessions)
             .await?;
             return Ok(SessionValidity::Valid { refreshed: true });
@@ -184,11 +188,15 @@ impl AdminAuth {
 
     async fn revoke_session(&self, id: &[u8; 32]) -> Result<(), sqlx::Error> {
         let hash = session_hash(id);
-        sqlx::query("DELETE FROM browser_sessions WHERE session_hash = ? AND namespace = ?")
-            .bind(hash.as_slice())
-            .bind(self.cookie_name())
-            .execute(&self.inner.sessions)
-            .await?;
+        let hash = hash.as_slice();
+        let namespace = self.cookie_name();
+        sqlx::query!(
+            "DELETE FROM browser_sessions WHERE session_hash = ? AND namespace = ?",
+            hash,
+            namespace,
+        )
+        .execute(&self.inner.sessions)
+        .await?;
         Ok(())
     }
 
@@ -226,13 +234,17 @@ fn session_cookie_name(token: &[u8; 32]) -> String {
     format!("{SESSION_COOKIE_PREFIX}_{namespace}")
 }
 
+pub(crate) fn daemon_uid() -> u32 {
+    rustix::process::geteuid().as_raw()
+}
+
 fn random_error(error: getrandom::Error) -> io::Error {
     io::Error::other(format!("operating-system random source: {error}"))
 }
 
 fn validate_state_dir(path: &Path) -> io::Result<()> {
     let metadata = std::fs::metadata(path)?;
-    let daemon_uid = unsafe { libc::geteuid() };
+    let daemon_uid = daemon_uid();
     if !metadata.is_dir() || metadata.uid() != daemon_uid || metadata.mode() & 0o022 != 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -255,7 +267,7 @@ fn validate_token_file(file: &File, path: &Path) -> io::Result<()> {
     }
     // The daemon commonly runs as root, but the same invariant makes local
     // development safe when it runs under an ordinary account.
-    let daemon_uid = unsafe { libc::geteuid() };
+    let daemon_uid = daemon_uid();
     if metadata.uid() != daemon_uid || metadata.mode() & 0o077 != 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -271,7 +283,7 @@ fn validate_token_file(file: &File, path: &Path) -> io::Result<()> {
 fn read_token(path: &Path) -> io::Result<[u8; 32]> {
     let mut file = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
         .open(path)?;
     validate_token_file(&file, path)?;
     let mut encoded = String::new();
@@ -299,7 +311,7 @@ fn create_token(path: &Path) -> io::Result<[u8; 32]> {
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
         .open(path)?;
     writeln!(file, "{}", URL_SAFE_NO_PAD.encode(token))?;
     file.sync_all()?;
@@ -439,8 +451,7 @@ pub async fn enforce_same_uid(
     request: Request,
     next: Next,
 ) -> Response {
-    // SAFETY: `geteuid` is a vDSO syscall; cannot fail.
-    let daemon_uid = unsafe { libc::geteuid() };
+    let daemon_uid = daemon_uid();
     if peer.uid != daemon_uid {
         let body = ApiErrorBody {
             error: "peer_uid_mismatch".into(),

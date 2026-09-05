@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, timestamp, level, job_name, message\n             FROM log_events\n            WHERE id > ?\n            ORDER BY id DESC\n            LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "timestamp",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "level",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "job_name",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "message",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "57d41247ba1b84c4d0a7cce2581dd3f3b2d81f11c94a0ef8a4b1961bf246c351"
+}

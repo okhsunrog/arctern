@@ -101,8 +101,10 @@ SSH):
 - **Just the head, or the full history:** `replicate = "latest"` (default)
   sends one snapshot per push, the smallest delta, for a workstation that
   keeps its own fine-grained history and treats the NAS as the disaster
-  copy; `"all"` mirrors every filtered snapshot to the receiver like zrepl
-  does, for setups where the receiver is the archive.
+  copy; `"all"` mirrors the whole history to the receiver like zrepl does
+  (`zfs send -I`, so every snapshot between the common base and the head
+  travels, manual ones included), for setups where the receiver is the
+  archive.
 - **Robust replication:** GUID-based common-snapshot detection, resume tokens
   (`recv -s`), `discard_partial_recv`, bookmark fallback when the common
   snapshot aged out (zrepl's `#zrepl_CURSOR_*` bookmarks qualify — that is the

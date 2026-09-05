@@ -4,6 +4,7 @@
 // invent their own mapping.
 
 import type { JobStatus, PeerReachability } from '../client'
+import { asPushJob } from './jobs'
 
 export type StatusColor = 'success' | 'warning' | 'error' | 'info' | 'neutral'
 
@@ -30,16 +31,16 @@ function view(color: StatusColor, icon: string, label: string, pulse = false): S
 }
 
 export function jobStatus(j: JobStatus): StatusView {
+  const push = asPushJob(j)
   // running/paused win: last_* describe the previous cycle and are
   // stale while a long send is in flight.
-  if (j.paused) return view('neutral', 'i-lucide-circle-pause', 'paused')
+  if (push?.paused) return view('neutral', 'i-lucide-circle-pause', 'paused')
   if (j.running) return view('info', 'i-lucide-loader', 'running', true)
   if (jobFailureMessage(j)) return view('error', 'i-lucide-circle-x', 'error')
-  // Plan-only: the job runs, logs what it would send, and sends nothing.
-  // It cannot be "ok" in the sense the other jobs mean, and it used to
-  // say exactly that.
-  if (j.dry_run) return view('neutral', 'i-lucide-flask-conical', 'dry run')
-  const targets = j.targets ?? []
+  // Plan-only: the job runs, logs what it would send, and sends nothing,
+  // so it cannot be "ok" in the sense the other jobs mean.
+  if (push?.dry_run) return view('neutral', 'i-lucide-flask-conical', 'dry run')
+  const targets = push?.targets ?? []
   // Push jobs: per-target history survives daemon restarts (SQLite),
   // while last_run is in-memory — a freshly restarted daemon must not
   // demote a healthy job to "idle".
@@ -60,13 +61,14 @@ export type JobActivity = 'sending' | 'checking' | 'idle'
 
 export function jobActivity(j: JobStatus): JobActivity {
   if (!j.running) return 'idle'
-  return (j.transfers?.length ?? 0) > 0 ? 'sending' : 'checking'
+  return (asPushJob(j)?.transfers?.length ?? 0) > 0 ? 'sending' : 'checking'
 }
 
 export function jobFailureMessage(j: JobStatus): string | null {
   if (j.last_error) return j.last_error
-  const activePeers = new Set((j.transfers ?? []).map((transfer) => transfer.peer))
-  const failed = (j.targets ?? []).find(
+  const push = asPushJob(j)
+  const activePeers = new Set((push?.transfers ?? []).map((transfer) => transfer.peer))
+  const failed = (push?.targets ?? []).find(
     (t) =>
       !activePeers.has(t.peer) &&
       (t.last_outcome === 'error' || (t.last_outcome == null && t.last_error != null)),

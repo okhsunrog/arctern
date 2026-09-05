@@ -15,10 +15,10 @@ use axum::{
 };
 use futures_util::Stream;
 use serde::Deserialize;
-use time::format_description::well_known::Rfc3339;
 
 use crate::app_state::AppState;
 use crate::error::ApiError;
+use crate::jobs::{ControlOutcome, PushRequestError};
 
 #[utoipa::path(
     get,
@@ -34,24 +34,15 @@ pub async fn list_jobs(State(state): State<AppState>) -> Json<Vec<JobStatus>> {
 }
 
 pub(crate) fn status_snapshot(state: &AppState) -> Vec<JobStatus> {
-    state
-        .manager
-        .statuses()
-        .into_iter()
-        .map(|(name, kind, s)| JobStatus {
-            name,
-            kind: kind.to_string(),
-            last_run: s.last_run.and_then(|t| t.format(&Rfc3339).ok()),
-            next_run: s.next_run.and_then(|t| t.format(&Rfc3339).ok()),
-            last_error: s.last_error,
-            running: s.running,
-            paused: s.paused,
-            cancellable: s.cancellable,
-            dry_run: s.dry_run,
-            transfers: s.transfers,
-            targets: s.targets,
-        })
-        .collect()
+    state.manager.statuses()
+}
+
+fn control_status(outcome: ControlOutcome) -> StatusCode {
+    match outcome {
+        ControlOutcome::Applied => StatusCode::NO_CONTENT,
+        ControlOutcome::Unsupported => StatusCode::CONFLICT,
+        ControlOutcome::NoSuchJob => StatusCode::NOT_FOUND,
+    }
 }
 
 /// Live job state for the admin UI. A full snapshot is sent immediately,
@@ -128,11 +119,7 @@ pub async fn wakeup(State(state): State<AppState>, Path(name): Path<String>) -> 
     ),
 )]
 pub async fn cancel(State(state): State<AppState>, Path(name): Path<String>) -> StatusCode {
-    match state.manager.cancel_by_name(&name) {
-        Some(true) => StatusCode::NO_CONTENT,
-        Some(false) => StatusCode::CONFLICT,
-        None => StatusCode::NOT_FOUND,
-    }
+    control_status(state.manager.cancel_by_name(&name))
 }
 
 #[utoipa::path(
@@ -147,11 +134,7 @@ pub async fn cancel(State(state): State<AppState>, Path(name): Path<String>) -> 
     ),
 )]
 pub async fn pause(State(state): State<AppState>, Path(name): Path<String>) -> StatusCode {
-    match state.manager.pause_by_name(&name) {
-        Some(true) => StatusCode::NO_CONTENT,
-        Some(false) => StatusCode::CONFLICT,
-        None => StatusCode::NOT_FOUND,
-    }
+    control_status(state.manager.pause_by_name(&name))
 }
 
 #[utoipa::path(
@@ -166,11 +149,7 @@ pub async fn pause(State(state): State<AppState>, Path(name): Path<String>) -> S
     ),
 )]
 pub async fn resume(State(state): State<AppState>, Path(name): Path<String>) -> StatusCode {
-    match state.manager.resume_by_name(&name) {
-        Some(true) => StatusCode::NO_CONTENT,
-        Some(false) => StatusCode::CONFLICT,
-        None => StatusCode::NOT_FOUND,
-    }
+    control_status(state.manager.resume_by_name(&name))
 }
 
 #[utoipa::path(
@@ -185,6 +164,7 @@ pub async fn resume(State(state): State<AppState>, Path(name): Path<String>) -> 
         (status = 204, description = "Manual replication to the peer queued"),
         (status = 400, description = "Peer is not a target of this job", body = arctern_api::ApiErrorBody),
         (status = 404, description = "No such job"),
+        (status = 409, description = "Job kind does not support manual push"),
     ),
 )]
 pub async fn push_to_peer(
@@ -193,13 +173,14 @@ pub async fn push_to_peer(
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     match state.manager.request_push_by_name(&name, &peer) {
-        None => StatusCode::NOT_FOUND.into_response(),
-        Some(Ok(())) => StatusCode::NO_CONTENT.into_response(),
-        Some(Err(message)) => (
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(PushRequestError::NoSuchJob) => StatusCode::NOT_FOUND.into_response(),
+        Err(PushRequestError::Unsupported) => StatusCode::CONFLICT.into_response(),
+        Err(e @ PushRequestError::NotATarget { .. }) => (
             StatusCode::BAD_REQUEST,
             Json(arctern_api::ApiErrorBody {
                 error: "bad_peer".into(),
-                message,
+                message: e.to_string(),
             }),
         )
             .into_response(),

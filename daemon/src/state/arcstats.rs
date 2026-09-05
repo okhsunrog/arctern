@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arctern_api::ArcHistoryPoint;
-use sqlx::{Row, SqlitePool};
+use sqlx::SqlitePool;
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 
@@ -27,16 +27,17 @@ pub async fn record(
     hits: u64,
     misses: u64,
 ) -> Result<(), StateError> {
-    sqlx::query(
+    let (size, c, hits, misses) = (size as i64, c as i64, hits as i64, misses as i64);
+    sqlx::query!(
         "INSERT INTO arcstats_history (timestamp, size, c, hits, misses)
          VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(timestamp) DO NOTHING",
+        timestamp,
+        size,
+        c,
+        hits,
+        misses,
     )
-    .bind(timestamp)
-    .bind(size as i64)
-    .bind(c as i64)
-    .bind(hits as i64)
-    .bind(misses as i64)
     .execute(pool)
     .await?;
     Ok(())
@@ -48,26 +49,26 @@ pub async fn list_recent(
     since_unix_seconds: Option<i64>,
     limit: i64,
 ) -> Result<Vec<ArcHistoryPoint>, StateError> {
-    let rows = sqlx::query(
-        "SELECT timestamp, size, c, hits, misses
-           FROM arcstats_history
-          WHERE (? IS NULL OR timestamp >= ?)
-          ORDER BY timestamp DESC
-          LIMIT ?",
+    let rows = sqlx::query!(
+        r#"SELECT timestamp, size, c, hits, misses
+             FROM arcstats_history
+            WHERE (? IS NULL OR timestamp >= ?)
+            ORDER BY timestamp DESC
+            LIMIT ?"#,
+        since_unix_seconds,
+        since_unix_seconds,
+        limit,
     )
-    .bind(since_unix_seconds)
-    .bind(since_unix_seconds)
-    .bind(limit)
     .fetch_all(pool)
     .await?;
     Ok(rows
         .into_iter()
         .map(|r| ArcHistoryPoint {
-            timestamp: r.get::<i64, _>("timestamp"),
-            size: r.get::<i64, _>("size") as u64,
-            c: r.get::<i64, _>("c") as u64,
-            hits: r.get::<i64, _>("hits") as u64,
-            misses: r.get::<i64, _>("misses") as u64,
+            timestamp: r.timestamp,
+            size: r.size as u64,
+            c: r.c as u64,
+            hits: r.hits as u64,
+            misses: r.misses as u64,
         })
         .collect())
 }
@@ -76,10 +77,12 @@ pub async fn trim_older_than(
     pool: &SqlitePool,
     cutoff_unix_seconds: i64,
 ) -> Result<u64, StateError> {
-    let res = sqlx::query("DELETE FROM arcstats_history WHERE timestamp < ?")
-        .bind(cutoff_unix_seconds)
-        .execute(pool)
-        .await?;
+    let res = sqlx::query!(
+        "DELETE FROM arcstats_history WHERE timestamp < ?",
+        cutoff_unix_seconds
+    )
+    .execute(pool)
+    .await?;
     Ok(res.rows_affected())
 }
 

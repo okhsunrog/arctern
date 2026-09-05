@@ -138,16 +138,11 @@ pub async fn pool_scrub(
     Path(name): Path<String>,
     Json(req): Json<ScrubRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let action = match req.action.as_str() {
-        "start" => ScrubAction::Start,
-        "pause" => ScrubAction::Pause,
-        "resume" => ScrubAction::Resume,
-        "stop" => ScrubAction::Stop,
-        other => {
-            return Err(ApiError::bad_request(format!(
-                "unknown scrub action {other}; expected start|pause|resume|stop"
-            )));
-        }
+    let action = match req.action {
+        arctern_api::ScrubAction::Start => ScrubAction::Start,
+        arctern_api::ScrubAction::Pause => ScrubAction::Pause,
+        arctern_api::ScrubAction::Resume => ScrubAction::Resume,
+        arctern_api::ScrubAction::Stop => ScrubAction::Stop,
     };
     state.zfs.pool(name)?.scrub(action).await?;
     Ok(StatusCode::NO_CONTENT)

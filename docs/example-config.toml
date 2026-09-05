@@ -121,10 +121,11 @@ targets = ["nas", "nas-remote"]
 # only the newest snapshot per push: the smallest possible delta, one
 # snapshot per push on the receiver — the laptop keeps the fine-grained
 # history for quick rollback, the NAS is the disaster copy. "all" is
-# zrepl's behaviour: every filtered snapshot is replicated (one
-# `zfs send -I` per cycle), so the receiver mirrors the sender's history
-# and its own prune job has something to thin; it costs the data written
-# and deleted between snapshots, which on a home directory can be
+# zrepl's behaviour: the whole history is replicated (one `zfs send -I`
+# per cycle, which carries every snapshot between the common base and
+# the head, manual ones included), so the receiver mirrors the sender's
+# history and its own prune job has something to thin; it costs the data
+# written and deleted between snapshots, which on a home directory can be
 # several times the single daily delta.
 # replicate = "latest"
 dry_run = true # first-run safety: plan and log actions without sending

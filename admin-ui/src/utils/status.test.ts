@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vite-plus/test'
-import type { JobStatus } from '../client'
+import type { JobStatus, PushJobStatus } from '../client'
 import { jobFailureMessage, jobStatus, runStatus } from './status'
 
-function pushJob(overrides: Partial<JobStatus> = {}): JobStatus {
-  return { name: 'push', kind: 'push', ...overrides }
+function pushJob(overrides: Partial<PushJobStatus> = {}): JobStatus {
+  return { name: 'push', kind: 'push', targets: [], ...overrides }
 }
 
 describe('job status outcomes', () => {

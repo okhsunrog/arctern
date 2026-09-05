@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vite-plus/test'
-import type { JobStatus, TargetStatus } from '../client'
+import type { JobStatus, PushJobStatus, TargetStatus } from '../client'
 import { pushOutcome, wakeOutcome } from './actions'
 
 const HOUR = 3600
@@ -19,7 +19,7 @@ function target(overrides: Partial<TargetStatus> = {}): TargetStatus {
   }
 }
 
-function job(overrides: Partial<JobStatus> = {}): JobStatus {
+function job(overrides: Partial<PushJobStatus> = {}): JobStatus {
   return {
     name: 'push_to_mira',
     kind: 'push',
@@ -37,7 +37,8 @@ function job(overrides: Partial<JobStatus> = {}): JobStatus {
 
 describe('wakeOutcome', () => {
   it('reports a plain success for kinds whose cycle always runs', () => {
-    expect(wakeOutcome(job({ kind: 'snap', targets: [] }), 'snap_nova').tone).toBe('success')
+    const snap: JobStatus = { name: 'snap_nova', kind: 'snap' }
+    expect(wakeOutcome(snap, 'snap_nova').tone).toBe('success')
   })
 
   // The original complaint: a manual-only active route means the woken

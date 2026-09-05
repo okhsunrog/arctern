@@ -5,6 +5,7 @@
 // idle tick. An operator reading that toast has been told a lie.
 
 import type { JobStatus, TargetStatus } from '../client'
+import { asPushJob } from './jobs'
 import { nextSync } from './pushTimes'
 
 export interface ActionOutcome {
@@ -92,7 +93,7 @@ export function pushOutcome(job: JobStatus | undefined, name: string, peer: stri
 
 /** A target currently receiving bytes, per the job's transfer list. */
 export function isTransferring(job: JobStatus, target: TargetStatus): boolean {
-  return (job.transfers ?? []).some((t) => t.peer === target.peer)
+  return (asPushJob(job)?.transfers ?? []).some((t) => t.peer === target.peer)
 }
 
 export type SendControl =

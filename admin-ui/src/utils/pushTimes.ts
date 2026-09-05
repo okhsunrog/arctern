@@ -5,6 +5,7 @@
 
 import type { JobStatus, TargetStatus } from '../client'
 import { formatDuration } from './format'
+import { asPushJob } from './jobs'
 import { jobActivity } from './status'
 
 export interface NextSync {
@@ -17,7 +18,7 @@ export interface NextSync {
 
 export function lastSync(job: JobStatus): number | null {
   let max: number | null = null
-  for (const t of job.targets ?? []) {
+  for (const t of asPushJob(job)?.targets ?? []) {
     if (t.last_success != null && (max == null || t.last_success > max)) max = t.last_success
   }
   return max
@@ -30,7 +31,7 @@ function targetDueAt(t: TargetStatus): number {
 
 export function nextSync(job: JobStatus): NextSync {
   const now = Math.floor(Date.now() / 1000)
-  const auto = (job.targets ?? []).filter((t) => t.mode === 'auto')
+  const auto = (asPushJob(job)?.targets ?? []).filter((t) => t.mode === 'auto')
   if (auto.length === 0) return { kind: 'manual' }
   let best: TargetStatus | null = null
   let bestAt = Number.POSITIVE_INFINITY

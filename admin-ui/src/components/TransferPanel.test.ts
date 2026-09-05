@@ -1,7 +1,8 @@
 // @vitest-environment happy-dom
 import { describe, expect, it } from 'vite-plus/test'
 import { mount } from '@vue/test-utils'
-import type { JobStatus, TargetStatus, TransferInfo } from '../client'
+import type { PushJobStatus, TargetStatus, TransferInfo } from '../client'
+import type { PushJob } from '../utils/jobs'
 import TransferPanel from './TransferPanel.vue'
 
 // Nuxt UI components are stubbed: what matters here is which controls the
@@ -47,7 +48,7 @@ function transfer(peer = 'mira'): TransferInfo {
   }
 }
 
-function job(o: Partial<JobStatus> = {}): JobStatus {
+function job(o: Partial<PushJobStatus> = {}): PushJob {
   return {
     name: 'push_to_mira',
     kind: 'push',

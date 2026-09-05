@@ -32,19 +32,5 @@ pub async fn recent_transfers(
     let rows = crate::state::recv_transfers::recent(&state.state, limit)
         .await
         .unwrap_or_default();
-    axum::Json(
-        rows.into_iter()
-            .map(|r| RecvTransfer {
-                id: r.id,
-                completed_at: r.completed_at,
-                job: r.job,
-                identity: r.identity,
-                dataset: r.dataset,
-                to_snapshot: r.to_snapshot,
-                from_snapshot: r.from_snapshot,
-                bytes: r.bytes,
-                duration_ms: r.duration_ms,
-            })
-            .collect(),
-    )
+    axum::Json(rows)
 }

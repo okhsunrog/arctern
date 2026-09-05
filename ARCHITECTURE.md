@@ -201,11 +201,13 @@ For a push job replicating one target peer:
      `latest` (default) sends `-i` straight to the head, one snapshot per
      push, the smallest delta — the sender keeps the fine-grained history,
      the receiver is the disaster copy; `all` (zrepl's behaviour) sends
-     `zfs send -I` so every filtered snapshot between the common base and
-     the head reaches the receiver, and a first sync starts from the oldest
-     snapshot. A bookmark cannot be the base of `-I`, so a cursor-based step
-     in `all` mode goes to the first snapshot past the bookmark and the next
-     step continues with `-I`.
+     `zfs send -I` so every snapshot between the common base and the head
+     reaches the receiver (ZFS includes the intermediates regardless of
+     the job's snapshot filter, so manual snapshots travel too), and a
+     first sync starts from the oldest filtered snapshot. A bookmark
+     cannot be the base of `-I`, so a cursor-based step in `all` mode goes
+     to the first snapshot past the bookmark and the next step continues
+     with `-I`.
    - If the plan wants `discard_partial_recv`, call the RPC first — it's
      idempotent and makes the recv channel's first action a clean recv.
    - Place step holds (the `to` snapshot, plus the `from` snapshot for
@@ -424,7 +426,11 @@ cycle. **Do not introduce etcd or any external coordination store.**
 
 Per-daemon SQLite for observability plus browser-session persistence. Path:
 `<state_dir>/state.db`. `sqlx` with the `sqlite` + `runtime-tokio` features,
-`journal_mode=WAL`, `synchronous=NORMAL`. Tables:
+`journal_mode=WAL`, `synchronous=NORMAL`. The schema lives in
+`daemon/migrations/` and is applied by `sqlx::migrate!` at open; every
+query is a compile-checked `sqlx::query!` whose checked form is committed
+under `.sqlx/` (`just sqlx-prepare` regenerates it, CI verifies it), so a
+plain `cargo build` needs no database. Tables:
 
 - `job_runs` — one row per cycle (status, error, bytes sent). 30-day trim.
 - `log_events` — the host event log, written by a tracing layer (INFO+ only;
@@ -487,7 +493,8 @@ daemon/
     jobs/                    JobManager + snap / push / prune
     peer/                    PeerLink (tarpc client), reconnect + route ranking
     stdinserver/             dispatch, control (tarpc server), recv, events
-    state/                   SQLite pool, migrations, queries, tracing layer
+    inventory.rs             shared `zfs list` helpers (filters → datasets, GUID inventories)
+    state/                   SQLite pool, queries, tracing layer (schema in ../migrations)
     router.rs                axum wiring
     error.rs                 ApiError → HTTP response mapping
 admin-ui/                    Vue 3 + Nuxt UI SPA; host-scoped console under

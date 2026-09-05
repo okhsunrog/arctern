@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vite-plus/test'
-import type { JobStatus, TargetStatus } from '../client'
+import type { TargetStatus } from '../client'
+import type { PushJob } from './jobs'
 import { formatNextSync, formatSyncState, lastSync, nextSync } from './pushTimes'
 
 const HOUR = 3600
@@ -19,7 +20,7 @@ function target(overrides: Partial<TargetStatus> = {}): TargetStatus {
   }
 }
 
-function job(targets: TargetStatus[]): JobStatus {
+function job(targets: TargetStatus[]): PushJob {
   return {
     name: 'push_to_mira',
     kind: 'push',

@@ -1,10 +1,8 @@
 //! Background-job runtime. The daemon spawns one tokio task per
 //! configured job; each task owns a `CancellationToken` for graceful
 //! shutdown. Status is read by `GET /api/v1/jobs` over the same Arc.
-//!
-//! Slice 003 introduces this; only `SnapJob` implements it. Future
-//! slices add push/pull/source/sink as siblings.
 
+pub mod periodic;
 pub mod prune;
 pub mod push;
 pub mod snap;
@@ -13,23 +11,20 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use arctern_api::{JobStatus, PeriodicJobStatus};
 use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use zfskit::ZfsError;
 
 /// Latches the set of `filesystems` entries that currently match no
 /// dataset, so the warning is emitted on change instead of every cycle.
-///
-/// Without this a standing misconfiguration reprints hourly and gets
-/// tuned out, which is the opposite of the point: the warning exists
-/// because a filter that matches nothing is otherwise silent.
+/// A standing misconfiguration that reprints hourly gets tuned out.
 #[derive(Default)]
 pub struct UnmatchedFilters(Mutex<Vec<String>>);
 
 impl UnmatchedFilters {
-    /// The unmatched set, but only when it differs from the previous
-    /// call. Separated from the logging so the latch can be tested
-    /// without capturing a tracing subscriber.
     fn take_change(
         &self,
         filters: &[arctern_config::FilesystemFilter],
@@ -68,29 +63,25 @@ impl UnmatchedFilters {
     }
 }
 
+/// The scheduling fields every job kind keeps between cycles.
 #[derive(Debug, Clone, Default)]
-pub struct JobStatusInner {
+pub struct PeriodicStatus {
     pub last_run: Option<OffsetDateTime>,
     pub next_run: Option<OffsetDateTime>,
     pub last_error: Option<String>,
-    /// True while a cycle is executing. Long-running cycles (a full
-    /// send) would otherwise be indistinguishable from idle-with-stale-
-    /// status in the UI.
     pub running: bool,
-    /// True while the job is paused (current transfer aborted resumably,
-    /// scheduled cycles suspended).
-    pub paused: bool,
-    /// True while `cancel_current` would abort real work. Kinds without
-    /// a cancellable cycle leave this false.
-    pub cancellable: bool,
-    /// Push jobs in plan-only mode: cycles log what they would send and
-    /// send nothing, so their clean runs are `dry_run`, never `ok`.
-    pub dry_run: bool,
-    /// In-flight transfer progress (push jobs only), one entry per
-    /// parallel send slot.
-    pub transfers: Vec<arctern_api::TransferInfo>,
-    /// Per-target replication policy + last outcome (push jobs only).
-    pub targets: Vec<arctern_api::TargetStatus>,
+}
+
+impl PeriodicStatus {
+    pub fn render(&self, name: &str) -> PeriodicJobStatus {
+        PeriodicJobStatus {
+            name: name.to_string(),
+            last_run: self.last_run.and_then(|t| t.format(&Rfc3339).ok()),
+            next_run: self.next_run.and_then(|t| t.format(&Rfc3339).ok()),
+            last_error: self.last_error.clone(),
+            running: self.running,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -98,14 +89,33 @@ pub struct JobContext {
     pub zfs: zfskit::Zfs,
     /// Per-daemon SQLite pool. None inside test-only `JobManager` setups
     /// that don't care about persistence; production code paths always
-    /// pass `Some(pool)` from `daemon::main::run_daemon`.
+    /// pass `Some(pool)`.
     pub state: Option<Arc<sqlx::SqlitePool>>,
+}
+
+/// What a control request (cancel / pause / resume) did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlOutcome {
+    Applied,
+    /// The job kind has nothing to cancel, pause or resume.
+    Unsupported,
+    NoSuchJob,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PushRequestError {
+    #[error("no such job")]
+    NoSuchJob,
+    #[error("job kind does not support manual push")]
+    Unsupported,
+    #[error("peer {peer:?} is not a target of job {job:?}")]
+    NotATarget { job: String, peer: String },
 }
 
 pub trait Job: Send + Sync + 'static {
     fn name(&self) -> &str;
-    fn kind(&self) -> &'static str;
-    fn status(&self) -> JobStatusInner;
+    /// The kind is the `JobStatus` variant.
+    fn status(&self) -> JobStatus;
     /// Runs until cancelled. Implementations MUST honour `cancel`
     /// inside any sleep / await they perform.
     fn run(
@@ -113,49 +123,107 @@ pub trait Job: Send + Sync + 'static {
         ctx: JobContext,
         cancel: CancellationToken,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
-    /// Wake the job's cycle loop early. Default no-op so kinds that
-    /// don't have a cycle (sink — event-driven) absorb the call
-    /// harmlessly. Snap and push override.
+    /// Wake the job's cycle loop early.
     fn wakeup(&self) {}
     /// Abort the in-flight transfer (resumable via `recv -s` partial
-    /// state). Returns false when the job kind has nothing to cancel.
-    fn cancel_current(&self) -> bool {
-        false
+    /// state).
+    fn cancel_current(&self) -> ControlOutcome {
+        ControlOutcome::Unsupported
     }
-    /// Pause: abort the in-flight transfer AND suspend scheduled cycles
-    /// until `resume`. Returns false when unsupported.
-    fn pause(&self) -> bool {
-        false
+    /// Abort the in-flight transfer AND suspend scheduled cycles until
+    /// `resume`.
+    fn pause(&self) -> ControlOutcome {
+        ControlOutcome::Unsupported
     }
     /// Clear the paused flag and wake the cycle loop (a paused transfer
-    /// continues from its resume token). Returns false when unsupported.
-    fn resume(&self) -> bool {
-        false
+    /// continues from its resume token).
+    fn resume(&self) -> ControlOutcome {
+        ControlOutcome::Unsupported
     }
     /// Queue a manual replication to `peer` and wake the cycle loop.
-    /// Push jobs validate the peer against their targets.
-    fn request_push(&self, _peer: &str) -> Result<(), String> {
-        Err("job kind does not support manual push".into())
+    fn request_push(&self, _peer: &str) -> Result<(), PushRequestError> {
+        Err(PushRequestError::Unsupported)
     }
 }
 
 struct JobHandle {
     name: String,
-    kind: &'static str,
     cancel: CancellationToken,
     task: JoinHandle<()>,
     job: Arc<dyn Job>,
 }
 
+/// Why one snapshot could not be pruned.
+#[derive(Debug, thiserror::Error)]
+pub enum PruneError {
+    #[error("list snapshots: {0}")]
+    ListSnapshots(#[source] ZfsError),
+    #[error("keep-rule evaluation: {0}")]
+    KeepRules(#[from] arctern_config::PruneError),
+    #[error("destroy {snapshot}: {source}")]
+    Destroy {
+        snapshot: String,
+        #[source]
+        source: ZfsError,
+    },
+}
+
+/// One dataset's failure inside a snap or prune cycle. The cycle
+/// finishes the rest of its work and reports all of them together.
+#[derive(Debug, thiserror::Error)]
+pub enum DatasetError {
+    #[error("list datasets: {0}")]
+    ListDatasets(#[source] ZfsError),
+    #[error("snapshot {snapshot}: {source}")]
+    Snapshot {
+        snapshot: String,
+        #[source]
+        source: ZfsError,
+    },
+    #[error("prune {dataset}: {source}")]
+    Prune {
+        dataset: String,
+        #[source]
+        source: PruneError,
+    },
+}
+
+/// Every per-dataset failure of one cycle. Non-empty by construction.
+#[derive(Debug)]
+pub struct CycleErrors(pub Vec<DatasetError>);
+
+impl std::fmt::Display for CycleErrors {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (i, e) in self.0.iter().enumerate() {
+            if i > 0 {
+                f.write_str("; ")?;
+            }
+            write!(f, "{e}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for CycleErrors {}
+
+impl CycleErrors {
+    pub fn from_vec(errors: Vec<DatasetError>) -> Result<(), Self> {
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Self(errors))
+        }
+    }
+}
+
 /// One prune pass over a single dataset: list snapshots with
 /// `creation`, evaluate the keep-rule chain against the bare tags,
-/// destroy the victims. Shared by the snap job (post-snapshot prune)
-/// and the standalone prune job. Held snapshots are skipped, not fatal.
+/// destroy the victims. Held and busy snapshots are skipped, not fatal.
 pub(crate) async fn prune_dataset(
     zfs: &zfskit::Zfs,
     keep: &[arctern_config::KeepRule],
     dataset: &str,
-) -> Result<(), String> {
+) -> Result<(), PruneError> {
     use zfskit::dataset::{DestroyOptions, ListOptions};
     use zfskit::models::DatasetType;
 
@@ -169,12 +237,11 @@ pub(crate) async fn prune_dataset(
     let snaps = zfs
         .list_datasets(&opts)
         .await
-        .map_err(|e| format!("list snapshots: {e}"))?;
+        .map_err(PruneError::ListSnapshots)?;
     let mut entries: Vec<arctern_config::SnapshotEntry> = Vec::with_capacity(snaps.len());
-    // Parallel vector of full ZFS names (`pool/ds@tag`); the prune
-    // algorithm matches on the bare tag (so a user's `^zrepl_.*`
-    // regex does not have to embed the dataset name), but destroy
-    // needs the fully-qualified target.
+    // The keep rules match on the bare tag so a user's `^zrepl_.*`
+    // regex need not embed the dataset name; destroy needs the full
+    // name, hence the parallel vector.
     let mut full_names: Vec<String> = Vec::with_capacity(snaps.len());
     for s in &snaps {
         let creation = s
@@ -193,29 +260,31 @@ pub(crate) async fn prune_dataset(
         });
         full_names.push(s.name.clone());
     }
-    let destroy_idx = arctern_config::evaluate_keep_rules(keep, &entries)
-        .map_err(|e| format!("keep-rule evaluation: {e}"))?;
+    let destroy_idx = arctern_config::evaluate_keep_rules(keep, &entries)?;
     for i in destroy_idx {
         let target = &full_names[i];
         tracing::info!(snapshot = %target, "destroying snapshot");
-        match zfs
+        let snapshot = zfs
             .snapshot(target.clone())
-            .map_err(|e| e.to_string())?
-            .destroy(&DestroyOptions::new())
-            .await
-        {
+            .map_err(|e| PruneError::Destroy {
+                snapshot: target.clone(),
+                source: ZfsError::from(e),
+            })?;
+        match snapshot.destroy(&DestroyOptions::new()).await {
             Ok(()) => {}
-            Err(zfskit::ZfsError::SnapshotHeld { .. }) => {
+            Err(ZfsError::SnapshotHeld { .. }) => {
                 tracing::warn!(snapshot = %target, "snapshot is held; skipping");
             }
             // A `zfs send -I` in flight keeps its intermediate snapshots
-            // busy without a hold. Like a hold, that is a reason to skip
-            // this one and keep pruning, not to abandon the dataset.
-            Err(zfskit::ZfsError::Busy { .. }) => {
+            // busy without a hold.
+            Err(ZfsError::Busy { .. }) => {
                 tracing::warn!(snapshot = %target, "snapshot is busy (a send is using it); skipping");
             }
-            Err(e) => {
-                return Err(format!("destroy {target}: {e}"));
+            Err(source) => {
+                return Err(PruneError::Destroy {
+                    snapshot: target.clone(),
+                    source,
+                });
             }
         }
     }
@@ -241,11 +310,10 @@ impl JobManager {
         }
     }
 
-    /// Spawn `job` as a background task. The returned `JobManager` keeps
-    /// a handle for status + cancellation.
+    /// Spawn `job` as a background task and keep a handle for status +
+    /// cancellation.
     pub fn spawn<J: Job + 'static>(&self, job: Arc<J>, ctx: JobContext) {
         let name = job.name().to_string();
-        let kind = job.kind();
         let cancel = CancellationToken::new();
         let cancel_for_task = cancel.clone();
         let job_for_task = job.clone();
@@ -255,67 +323,53 @@ impl JobManager {
         let job_dyn: Arc<dyn Job> = job;
         self.handles.lock().unwrap().push(JobHandle {
             name,
-            kind,
             cancel,
             task,
             job: job_dyn,
         });
     }
 
-    pub fn statuses(&self) -> Vec<(String, &'static str, JobStatusInner)> {
+    pub fn statuses(&self) -> Vec<JobStatus> {
         self.handles
             .lock()
             .unwrap()
             .iter()
-            .map(|h| (h.name.clone(), h.kind, h.job.status()))
+            .map(|h| h.job.status())
             .collect()
     }
 
-    /// Trigger the named job's `wakeup()`. Returns false if no job
-    /// with that name is registered. Cheap to call (microseconds for
-    /// the lookup + a `Notify::notify_one`).
+    fn with_job<T>(&self, name: &str, f: impl FnOnce(&dyn Job) -> T) -> Option<T> {
+        let handles = self.handles.lock().unwrap();
+        handles
+            .iter()
+            .find(|h| h.name == name)
+            .map(|h| f(h.job.as_ref()))
+    }
+
+    /// Trigger the named job's `wakeup()`. False if no job with that
+    /// name is registered.
     pub fn wakeup_by_name(&self, name: &str) -> bool {
-        let handles = self.handles.lock().unwrap();
-        if let Some(h) = handles.iter().find(|h| h.name == name) {
-            h.job.wakeup();
-            true
-        } else {
-            false
-        }
+        self.with_job(name, |job| job.wakeup()).is_some()
     }
 
-    /// `None` = no such job; `Some(supported)` otherwise.
-    pub fn cancel_by_name(&self, name: &str) -> Option<bool> {
-        let handles = self.handles.lock().unwrap();
-        handles
-            .iter()
-            .find(|h| h.name == name)
-            .map(|h| h.job.cancel_current())
+    pub fn cancel_by_name(&self, name: &str) -> ControlOutcome {
+        self.with_job(name, |job| job.cancel_current())
+            .unwrap_or(ControlOutcome::NoSuchJob)
     }
 
-    pub fn pause_by_name(&self, name: &str) -> Option<bool> {
-        let handles = self.handles.lock().unwrap();
-        handles
-            .iter()
-            .find(|h| h.name == name)
-            .map(|h| h.job.pause())
+    pub fn pause_by_name(&self, name: &str) -> ControlOutcome {
+        self.with_job(name, |job| job.pause())
+            .unwrap_or(ControlOutcome::NoSuchJob)
     }
 
-    pub fn resume_by_name(&self, name: &str) -> Option<bool> {
-        let handles = self.handles.lock().unwrap();
-        handles
-            .iter()
-            .find(|h| h.name == name)
-            .map(|h| h.job.resume())
+    pub fn resume_by_name(&self, name: &str) -> ControlOutcome {
+        self.with_job(name, |job| job.resume())
+            .unwrap_or(ControlOutcome::NoSuchJob)
     }
 
-    /// `None` = no such job; `Some(result)` otherwise.
-    pub fn request_push_by_name(&self, name: &str, peer: &str) -> Option<Result<(), String>> {
-        let handles = self.handles.lock().unwrap();
-        handles
-            .iter()
-            .find(|h| h.name == name)
-            .map(|h| h.job.request_push(peer))
+    pub fn request_push_by_name(&self, name: &str, peer: &str) -> Result<(), PushRequestError> {
+        self.with_job(name, |job| job.request_push(peer))
+            .unwrap_or(Err(PushRequestError::NoSuchJob))
     }
 
     /// Trigger every cancellation token, then wait up to `deadline`
@@ -352,11 +406,11 @@ mod tests {
         fn name(&self) -> &str {
             "noop"
         }
-        fn kind(&self) -> &'static str {
-            "snap"
-        }
-        fn status(&self) -> JobStatusInner {
-            JobStatusInner::default()
+        fn status(&self) -> JobStatus {
+            JobStatus::Snap(PeriodicJobStatus {
+                name: "noop".into(),
+                ..Default::default()
+            })
         }
         fn wakeup(&self) {
             self.woken.store(true, Ordering::SeqCst);
@@ -373,20 +427,18 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn cancellation_joins_cleanly() {
-        // No real runner needed; the test job ignores it. Use a sentinel
-        // CommandRunner via a placeholder Arc.
-        struct FakeRunner;
-        #[async_trait::async_trait]
-        impl CommandRunner for FakeRunner {
-            async fn run(
-                &self,
-                _cmd: zfskit::runner::Cmd,
-            ) -> Result<std::process::Output, std::io::Error> {
-                unreachable!()
-            }
+    struct FakeRunner;
+    #[async_trait::async_trait]
+    impl CommandRunner for FakeRunner {
+        async fn run(
+            &self,
+            _cmd: zfskit::runner::Cmd,
+        ) -> Result<std::process::Output, std::io::Error> {
+            unreachable!()
         }
+    }
+
+    fn noop_manager() -> (JobManager, Arc<NoopJob>) {
         let mgr = JobManager::new();
         let job = Arc::new(NoopJob {
             flag: AtomicBool::new(false),
@@ -399,37 +451,39 @@ mod tests {
                 state: None,
             },
         );
+        (mgr, job)
+    }
+
+    #[tokio::test]
+    async fn cancellation_joins_cleanly() {
+        let (mgr, job) = noop_manager();
         mgr.shutdown(Duration::from_secs(2)).await;
         assert!(job.flag.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
     async fn wakeup_by_name_dispatches_to_named_job() {
-        struct FakeRunner;
-        #[async_trait::async_trait]
-        impl CommandRunner for FakeRunner {
-            async fn run(
-                &self,
-                _cmd: zfskit::runner::Cmd,
-            ) -> Result<std::process::Output, std::io::Error> {
-                unreachable!()
-            }
-        }
-        let mgr = JobManager::new();
-        let job = Arc::new(NoopJob {
-            flag: AtomicBool::new(false),
-            woken: AtomicBool::new(false),
-        });
-        mgr.spawn(
-            job.clone(),
-            JobContext {
-                zfs: zfskit::Zfs::with_runner(FakeRunner),
-                state: None,
-            },
-        );
+        let (mgr, job) = noop_manager();
         assert!(mgr.wakeup_by_name("noop"));
         assert!(!mgr.wakeup_by_name("does-not-exist"));
         assert!(job.woken.load(Ordering::SeqCst));
+        mgr.shutdown(Duration::from_secs(2)).await;
+    }
+
+    #[tokio::test]
+    async fn control_outcomes_tell_missing_from_unsupported() {
+        let (mgr, _job) = noop_manager();
+        assert_eq!(mgr.cancel_by_name("noop"), ControlOutcome::Unsupported);
+        assert_eq!(mgr.pause_by_name("noop"), ControlOutcome::Unsupported);
+        assert_eq!(mgr.resume_by_name("nowhere"), ControlOutcome::NoSuchJob);
+        assert_eq!(
+            mgr.request_push_by_name("noop", "mira"),
+            Err(PushRequestError::Unsupported)
+        );
+        assert_eq!(
+            mgr.request_push_by_name("nowhere", "mira"),
+            Err(PushRequestError::NoSuchJob)
+        );
         mgr.shutdown(Duration::from_secs(2)).await;
     }
 
@@ -451,7 +505,6 @@ mod tests {
             watch.take_change(&filters, &present),
             Some(vec!["tank/data/home".to_string()])
         );
-        // Same misconfiguration on the next cycle: no repeat.
         assert_eq!(watch.take_change(&filters, &present), None);
         assert_eq!(watch.take_change(&filters, &present), None);
     }
@@ -462,8 +515,6 @@ mod tests {
         let watch = UnmatchedFilters::default();
         watch.take_change(&filters, &["tank/data/home_new", "tank/data/root"]);
 
-        // The dataset is renamed back: an empty set is a change, and the
-        // caller logs the all-clear.
         assert_eq!(
             watch.take_change(&filters, &["tank/data/home", "tank/data/root"]),
             Some(Vec::new())

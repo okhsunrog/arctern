@@ -6,6 +6,7 @@
 
 import { computed, ref } from 'vue'
 import type { JobStatus } from '../client'
+import { asPushJob } from '../utils/jobs'
 import { jobActivity } from '../utils/status'
 import ConfirmModal from './ConfirmModal.vue'
 
@@ -25,6 +26,8 @@ const props = defineProps<{
 
 const confirmStop = ref(false)
 const iconOnly = () => (props.variant ?? 'label') === 'icon'
+// Pause/resume/stop only exist for push jobs; the others just wake.
+const push = computed(() => asPushJob(props.job))
 
 function askStop() {
   confirmStop.value = true
@@ -65,7 +68,7 @@ const stop = computed(() =>
       />
     </UTooltip>
 
-    <UTooltip v-if="job.running && !job.paused" text="Pause (keeps the partial transfer)">
+    <UTooltip v-if="push && job.running && !push.paused" text="Pause (keeps the partial transfer)">
       <UButton
         size="xs"
         :variant="iconOnly() ? 'ghost' : 'soft'"
@@ -78,7 +81,7 @@ const stop = computed(() =>
       />
     </UTooltip>
 
-    <UTooltip v-if="job.paused" text="Resume from the partial transfer">
+    <UTooltip v-if="push?.paused" text="Resume from the partial transfer">
       <UButton
         size="xs"
         :variant="iconOnly() ? 'ghost' : 'soft'"
@@ -93,7 +96,7 @@ const stop = computed(() =>
 
     <!-- `cancellable` is the daemon's own answer: it drops to false once
          every slot has handed off to zfs recv, where cancel is a no-op. -->
-    <UTooltip v-if="job.cancellable" :text="stop.label">
+    <UTooltip v-if="push?.cancellable" :text="stop.label">
       <UButton
         size="xs"
         :variant="iconOnly() ? 'ghost' : 'soft'"

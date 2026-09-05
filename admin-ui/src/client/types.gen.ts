@@ -16,8 +16,7 @@ export type ApiErrorBody = {
 
 /**
  * One row of `GET /api/v1/system/arc/history`. Slim by design —
- * only the fields the dashboard chart consumes. Add more columns
- * (and migrate `arcstats_history`) when a future view needs them.
+ * only the fields the dashboard chart consumes.
  */
 export type ArcHistoryPoint = {
     /**
@@ -33,9 +32,7 @@ export type ArcHistoryPoint = {
 /**
  * `GET /api/v1/system/arc` — a typed echo of the kernel's
  * `/proc/spl/kstat/zfs/arcstats`, plus a precomputed hit_ratio
- * (NaN encoded as `null` for empty caches). Fields mirror the
- * zfskit `ArcStats` struct; raw map omitted from the wire to
- * keep responses small.
+ * (NaN encoded as `null` for empty caches).
  */
 export type ArcStats = {
     size: number;
@@ -70,10 +67,7 @@ export type ArcStats = {
 
 /**
  * Body of `GET /api/v1/config` — the on-disk TOML the daemon was
- * started with, plus its absolute path. Read-only: there is no
- * write-back endpoint, so this is a faithful echo of what's loaded,
- * not what the daemon may have parsed (you can spot drift by
- * comparing to the other endpoints).
+ * started with, plus its absolute path. Read-only.
  */
 export type ConfigView = {
     path: string;
@@ -104,22 +98,23 @@ export type CreateSnapshotRequest = {
 };
 
 /**
- * Slim projection of [`zfskit::ZfsListEntry`] suitable for HTTP +
- * OpenAPI. Native ZFS properties carry typed data (bytes, bool, …) but
+ * Slim projection of a `zfs list` entry suitable for HTTP + OpenAPI.
+ * Native ZFS properties carry typed data (bytes, bool, …) but
  * `BTreeMap<String, String>` serializes more cleanly through utoipa;
  * consumers parse property values as needed.
  */
 export type DatasetSummary = {
     name: string;
-    /**
-     * `"filesystem" | "volume" | "snapshot" | "bookmark"` — lowercase
-     * to match `zfs(8)`'s output and avoid leaking zfskit's enum repr.
-     */
-    dataset_type: string;
+    dataset_type: DatasetType;
     properties?: {
         [key: string]: string;
     };
 };
+
+/**
+ * `zfs list -t` kinds, lowercase as `zfs(8)` prints them.
+ */
+export type DatasetType = 'filesystem' | 'volume' | 'snapshot' | 'bookmark';
 
 /**
  * One row of `job_runs` returned by `GET /api/v1/jobs/{name}/runs`.
@@ -129,58 +124,22 @@ export type DatasetSummary = {
 export type JobRun = {
     started_at: number;
     finished_at?: number | null;
-    status: string;
+    status: RunStatus;
     error_message?: string | null;
     bytes_sent?: number | null;
 };
 
 /**
- * One entry in the response of `GET /api/v1/jobs`. RFC3339 timestamps
- * are nullable: `last_run` is null until the job has completed at
- * least one cycle; `next_run` is set as soon as the loop knows when
- * it will fire next; `last_error` is null when the most recent cycle
- * finished cleanly.
+ * One entry in the response of `GET /api/v1/jobs`, discriminated by
+ * `kind`.
  */
-export type JobStatus = {
-    name: string;
-    kind: string;
-    last_run?: string | null;
-    next_run?: string | null;
-    last_error?: string | null;
-    /**
-     * True while a cycle is currently executing (e.g. a multi-hour
-     * full send). `last_*` fields describe the previous cycle.
-     */
-    running?: boolean;
-    /**
-     * True while the job is paused: the current transfer was aborted
-     * (resumably) and scheduled cycles are suspended until resumed.
-     */
-    paused?: boolean;
-    /**
-     * True while a cancel request would actually abort something. False
-     * once every in-flight transfer has passed the point where cancel is
-     * a no-op (finalizing/committing) — the decision belongs to the job,
-     * not to each UI surface that draws a stop button.
-     */
-    cancellable?: boolean;
-    /**
-     * Push jobs configured with `dry_run = true`: every cycle plans and
-     * logs but sends nothing, so the job can never be "synced". Runs and
-     * target outcomes carry the status `dry_run` instead of `ok`.
-     */
-    dry_run?: boolean;
-    /**
-     * In-flight transfers, one per parallel send slot. UI derives
-     * speed from `bytes_sent` deltas between live snapshots.
-     */
-    transfers?: Array<TransferInfo>;
-    /**
-     * Push jobs: per-target replication policy + last outcome.
-     * Empty for snap/prune jobs.
-     */
-    targets?: Array<TargetStatus>;
-};
+export type JobStatus = (PeriodicJobStatus & {
+    kind: 'snap';
+}) | (PeriodicJobStatus & {
+    kind: 'prune';
+}) | (PushJobStatus & {
+    kind: 'push';
+});
 
 /**
  * One row in `GET /api/v1/events` (and the proxied
@@ -198,6 +157,11 @@ export type LogEvent = {
     job_name?: string | null;
     message: string;
 };
+
+/**
+ * Replication policy for one peer of a push job.
+ */
+export type PeerMode = 'auto' | 'manual';
 
 /**
  * Reachability classification for one configured peer. The daemon
@@ -231,12 +195,7 @@ export type PeerRoute = {
      * Whether scheduled (auto) replication may run over this route.
      */
     auto: boolean;
-    /**
-     * `"connected" | "failed" | "unknown"` — last connect result for
-     * this route. Lower-priority routes are only probed on failover /
-     * re-rank, so `unknown` is the common idle state.
-     */
-    health: string;
+    health: RouteHealth;
     last_error?: string | null;
     /**
      * RFC3339 timestamp of the last connect attempt, if any.
@@ -255,6 +214,30 @@ export type PeerSummary = {
      */
     active_route?: string | null;
     routes: Array<PeerRoute>;
+};
+
+/**
+ * Fields every job kind reports.
+ */
+export type PeriodicJobStatus = {
+    name: string;
+    /**
+     * RFC3339; null until the job has completed at least one cycle.
+     */
+    last_run?: string | null;
+    /**
+     * RFC3339; set as soon as the loop knows when it fires next.
+     */
+    next_run?: string | null;
+    /**
+     * Null when the most recent cycle finished cleanly.
+     */
+    last_error?: string | null;
+    /**
+     * True while a cycle is currently executing. `last_*` describe the
+     * previous cycle.
+     */
+    running?: boolean;
 };
 
 /**
@@ -292,6 +275,42 @@ export type PoolSummary = {
 };
 
 /**
+ * Status of a push job: the periodic fields plus transfer state.
+ */
+export type PushJobStatus = {
+    name: string;
+    last_run?: string | null;
+    next_run?: string | null;
+    last_error?: string | null;
+    running?: boolean;
+    /**
+     * True while the job is paused: the current transfer was aborted
+     * (resumably) and scheduled cycles are suspended until resumed.
+     */
+    paused?: boolean;
+    /**
+     * True while a cancel request would actually abort something. False
+     * once every in-flight transfer has passed the point where cancel is
+     * a no-op (finalizing/committing).
+     */
+    cancellable?: boolean;
+    /**
+     * Configured with `dry_run = true`: every cycle plans and logs but
+     * sends nothing, so the job can never be "synced".
+     */
+    dry_run?: boolean;
+    /**
+     * In-flight transfers, one per parallel send slot. UI derives
+     * speed from `bytes_sent` deltas between live snapshots.
+     */
+    transfers?: Array<TransferInfo>;
+    /**
+     * Per-target replication policy + last outcome.
+     */
+    targets?: Array<TargetStatus>;
+};
+
+/**
  * One completed inbound transfer, as recorded by the recv channel on
  * this host. `GET /api/v1/transfers/recent`.
  */
@@ -316,6 +335,19 @@ export type RecvTransfer = {
     duration_ms: number;
 };
 
+/**
+ * Last connect result for one route. Lower-priority routes are only
+ * probed on failover / re-rank, so `unknown` is the common idle
+ * state.
+ */
+export type RouteHealth = 'unknown' | 'connected' | 'failed';
+
+/**
+ * Terminal (or in-flight) state of one job cycle, as stored in
+ * `job_runs.status` and `push_syncs.status`.
+ */
+export type RunStatus = 'ok' | 'error' | 'running' | 'cancelled' | 'dry_run' | 'interrupted';
+
 export type ScanSummary = {
     /**
      * `"SCRUB"`, `"RESILVER"`, `"NONE"`.
@@ -336,13 +368,15 @@ export type ScanSummary = {
 };
 
 /**
+ * `zpool scrub` verbs.
+ */
+export type ScrubAction = 'start' | 'pause' | 'resume' | 'stop';
+
+/**
  * Body of `POST /api/v1/pools/{name}/scrub`.
  */
 export type ScrubRequest = {
-    /**
-     * `"start"`, `"pause"`, `"resume"`, or `"stop"`.
-     */
-    action: string;
+    action: ScrubAction;
 };
 
 /**
@@ -372,10 +406,7 @@ export type SystemInfo = {
  */
 export type TargetStatus = {
     peer: string;
-    /**
-     * `"auto" | "manual"`.
-     */
-    mode: string;
+    mode: PeerMode;
     connected: boolean;
     /**
      * Active route name while connected (e.g. `"lan"`).
@@ -388,8 +419,7 @@ export type TargetStatus = {
     /**
      * A manual push to this peer is queued and will run on the next
      * cycle. Set from the moment the request is accepted until the
-     * cycle that drains it starts, so an operator who pressed "send
-     * now" during a running transfer can see that it was taken.
+     * cycle that drains it starts.
      */
     manual_queued?: boolean;
     /**
@@ -406,10 +436,7 @@ export type TargetStatus = {
      * Unix seconds of the most recent attempted sync, regardless of outcome.
      */
     last_attempt?: number | null;
-    /**
-     * `"ok" | "error" | "cancelled"` for the most recent attempt.
-     */
-    last_outcome?: string | null;
+    last_outcome?: null | RunStatus;
     /**
      * Human-readable context for the most recent non-successful attempt.
      */
@@ -427,10 +454,7 @@ export type TargetStatus = {
 export type TransferInfo = {
     dataset: string;
     peer: string;
-    /**
-     * `"full" | "incremental" | "resume"`.
-     */
-    kind: string;
+    kind: TransferKind;
     bytes_sent: number;
     /**
      * Dry-run estimate. None for resume sends (no estimate available).
@@ -440,18 +464,24 @@ export type TransferInfo = {
      * Unix seconds.
      */
     started_at: number;
-    /**
-     * Current executor phase. Kept as a string so future phases remain
-     * backwards-compatible: `sending`, `waiting_sender`,
-     * `waiting_receiver`, `finalizing`, or `committing`.
-     */
-    phase?: string;
+    phase?: TransferPhase;
     /**
      * Unix seconds when `phase` last changed. Lets clients render a live
      * wait duration even while no byte-count events are arriving.
      */
     phase_since?: number;
 };
+
+/**
+ * What kind of `zfs send` stream a transfer carries.
+ */
+export type TransferKind = 'full' | 'incremental' | 'resume';
+
+/**
+ * Where the executor is in one transfer. Phases past `finalizing`
+ * cannot be cancelled: the bytes are with the receiver.
+ */
+export type TransferPhase = 'sending' | 'waiting_sender' | 'waiting_receiver' | 'finalizing' | 'committing' | 'cancelling';
 
 /**
  * Recursive vdev tree as a flat list of trees. Wire-friendlier than
@@ -964,6 +994,10 @@ export type PushToPeerErrors = {
      * No such job
      */
     404: unknown;
+    /**
+     * Job kind does not support manual push
+     */
+    409: unknown;
 };
 
 export type PushToPeerError = PushToPeerErrors[keyof PushToPeerErrors];

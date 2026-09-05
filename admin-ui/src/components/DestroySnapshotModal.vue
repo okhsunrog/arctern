@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 
 const props = defineProps<{
+  host?: string
   open: boolean
   snapshotName: string | null
 }>()
@@ -43,8 +44,11 @@ function go() {
   >
     <template #body>
       <div class="space-y-3 text-sm">
+        <p class="text-muted">
+          Host: <strong class="text-highlighted">{{ host || 'this host' }}</strong>
+        </p>
         <div>
-          <span class="text-gray-500">Target:</span>
+          <span class="text-muted">Target:</span>
           <code class="ml-1 font-mono text-error-600 break-all">{{ snapshotName }}</code>
         </div>
         <div>Type the full snapshot name to enable the Destroy button.</div>

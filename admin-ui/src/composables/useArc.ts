@@ -15,6 +15,7 @@ export function useArcHistory(scope: MaybeRefOrGetter<string> = '', limit = 120)
   const query = useQuery(() => arcHistoryQuery({ scope: toValue(scope), limit }))
   return {
     history: computed(() => query.data.value ?? []),
+    loading: computed(() => query.isPending.value && !query.data.value),
     error: computed(() => query.error.value?.message ?? null),
   }
 }

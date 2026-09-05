@@ -25,6 +25,7 @@ const { host, scope, prefix } = useHost()
 const {
   jobs,
   error: jobsError,
+  loading: jobsLoading,
   warning: jobsWarning,
   wake,
   cancel,
@@ -127,13 +128,14 @@ const tableColumns = computed<TableColumn<JobRun>[]>(() => [
           :title="jobsWarning"
           icon="i-lucide-triangle-alert"
         />
+        <p v-if="jobsLoading" role="status" class="text-muted text-sm">Loading job…</p>
         <UEmpty
-          v-if="!job"
+          v-else-if="!job && !jobsError"
           icon="i-lucide-search-x"
           title="Job not found"
           :description="`No job named ${name} is configured.`"
         />
-        <template v-else>
+        <template v-if="job">
           <UCard :class="jobStatus(job).rail">
             <div class="flex items-start justify-between gap-6 flex-wrap">
               <dl class="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1 text-sm">
@@ -167,11 +169,11 @@ const tableColumns = computed<TableColumn<JobRun>[]>(() => [
             Loading runs…
           </div>
           <UEmpty
-            v-else-if="runs.length === 0"
+            v-else-if="runs.length === 0 && !runsError"
             icon="i-lucide-history"
             title="No runs recorded yet"
           />
-          <template v-else>
+          <template v-if="runs.length">
             <RunsCharts :runs="runs" />
             <div>
               <div class="microlabel mb-2">recent runs</div>

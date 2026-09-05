@@ -13,7 +13,7 @@ import VdevTree from '../components/VdevTree.vue'
 const route = useRoute()
 const name = computed(() => String(route.params.name))
 const { host, scope, prefix } = useHost()
-const { pool, error, scrub, isScrubbing } = usePool(name, scope)
+const { pool, error, loading, scrub, isScrubbing } = usePool(name, scope)
 
 // Stopping discards the scan's progress: the next scrub restarts from
 // the beginning rather than resuming, so it asks first. Pause does not.
@@ -91,8 +91,8 @@ const scrubPct = computed(() => {
       <div class="mx-auto w-full max-w-7xl space-y-6">
         <UAlert v-if="error" color="error" :title="error" icon="i-lucide-circle-x" />
 
-        <div v-if="!pool" class="text-muted text-sm">Loading…</div>
-        <template v-else>
+        <div v-if="loading" role="status" class="text-muted text-sm">Loading pool…</div>
+        <template v-if="pool">
           <div class="text-xs text-muted font-mono">
             guid {{ pool.pool_guid }} · txg {{ pool.txg }}
           </div>
@@ -231,7 +231,7 @@ const scrubPct = computed(() => {
           v-model:open="confirmStop"
           title="Stop this scrub?"
           description="The scan's progress is discarded — the next scrub starts over from the beginning rather than resuming."
-          :subject="name"
+          :subject="`${host ?? 'this host'} · ${name}`"
           confirm-label="Stop scrub"
           :loading="isScrubbing('stop')"
           @confirm="scrubAction('stop')"

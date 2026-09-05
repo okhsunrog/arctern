@@ -110,7 +110,11 @@ const bytesOpts = computed(() => {
         <div class="font-semibold">Cycle duration</div>
       </template>
       <div class="h-64">
-        <Line :data="durationData" :options="durationOpts" />
+        <Line
+          aria-label="Job cycle duration; values are listed in the recent runs table"
+          :data="durationData"
+          :options="durationOpts"
+        />
       </div>
     </UCard>
     <UCard>
@@ -118,7 +122,11 @@ const bytesOpts = computed(() => {
         <div class="font-semibold">Bytes sent per cycle</div>
       </template>
       <div class="h-64">
-        <Bar :data="bytesData" :options="bytesOpts" />
+        <Bar
+          aria-label="Bytes sent per cycle; values are listed in the recent runs table"
+          :data="bytesData"
+          :options="bytesOpts"
+        />
       </div>
     </UCard>
   </div>

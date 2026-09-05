@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vite-plus/test'
-import { createApp } from 'vue'
+import { createApp, effectScope } from 'vue'
+import { useEvents } from '../composables/useEvents'
 import { createPinia, setActivePinia } from 'pinia'
 import type { LogEvent } from '../client'
 import { eventsStreamPath, useEventsStream } from './eventsStream'
@@ -135,18 +136,22 @@ describe('useEventsStream', () => {
     expect(store.buffers['']?.map((e) => e.id)).toEqual([1, 2])
   })
 
-  it('stops appending while paused and keeps the connection', () => {
+  it('freezes the view while continuing to collect events for resume', () => {
     const store = harness()
     store.subscribe('')
     latest().push({ id: 1 })
-    store.togglePause()
+    const scope = effectScope()
+    const view = scope.run(() => useEvents(''))!
+    view.togglePause()
     latest().push({ id: 2 })
-    expect(store.buffers['']?.map((e) => e.id)).toEqual([1])
+    expect(view.events.value.map((e) => e.id)).toEqual([1])
+    expect(store.buffers['']?.map((e) => e.id)).toEqual([1, 2])
     expect(latest().closed).toBe(false)
 
-    store.togglePause()
+    view.togglePause()
     latest().push({ id: 3 })
-    expect(store.buffers['']?.map((e) => e.id)).toEqual([1, 3])
+    expect(view.events.value.map((e) => e.id)).toEqual([1, 2, 3])
+    scope.stop()
   })
 
   it('keeps scopes apart', () => {

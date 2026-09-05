@@ -49,12 +49,23 @@ const jobOptions = computed(() => {
           <USelect
             v-model="levelFilter"
             :items="levelOptions"
+            aria-label="Filter by severity"
             placeholder="all levels"
             class="w-32"
           />
-          <USelect v-model="jobFilter" :items="jobOptions" placeholder="all jobs" class="w-48" />
+          <USelect
+            aria-label="Filter by job"
+            v-model="jobFilter"
+            :items="jobOptions"
+            placeholder="all jobs"
+            class="w-48"
+          />
         </div>
+        <p v-if="paused" role="status" class="text-muted text-sm">
+          Display paused. New events continue to be collected (up to 5,000).
+        </p>
         <EventsLog
+          :auto-scroll="!paused"
           :events="events"
           :level-filter="levelFilter || undefined"
           :job-filter="jobFilter || undefined"

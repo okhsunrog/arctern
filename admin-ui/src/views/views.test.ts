@@ -14,6 +14,7 @@ import ArcView from './ArcView.vue'
 import EventsView from './EventsView.vue'
 import ConfigView from './ConfigView.vue'
 import PeersView from './PeersView.vue'
+import { listJobs } from '../client'
 
 vi.mock('../composables/useToaster', () => ({
   useToaster: () => ({ report: vi.fn(), success: vi.fn(), failure: vi.fn() }),
@@ -54,27 +55,56 @@ const views = [
   PeersView,
 ]
 
+async function mountPage(component: (typeof views)[number], prefix = '') {
+  vi.stubGlobal('EventSource', SilentEventSource)
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: '/:name', component },
+      { path: '/h/:host/:name', component },
+    ],
+  })
+  await router.push(`${prefix}/backup`)
+  const wrapper = shallowMount(component, {
+    global: {
+      plugins: [router, createPinia(), [PiniaColada, {}]],
+      stubs: {
+        DashboardPanel: { template: '<main><slot name="header"/><slot name="body"/></main>' },
+      },
+    },
+  })
+  wrappers.push(wrapper)
+  return wrapper
+}
+
 describe.each(['', '/h/mira'])('page startup in scope %j', (prefix) => {
   it.each(views)('mounts $__name', async (component) => {
-    vi.stubGlobal('EventSource', SilentEventSource)
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [
-        { path: '/:name', component },
-        { path: '/h/:host/:name', component },
-      ],
-    })
-    await router.push(`${prefix}/backup`)
-    const wrapper = shallowMount(component, {
-      global: {
-        plugins: [router, createPinia(), [PiniaColada, {}]],
-        stubs: {
-          DashboardPanel: { template: '<main><slot name="header"/><slot name="body"/></main>' },
-        },
-      },
-    })
-    wrappers.push(wrapper)
+    const wrapper = await mountPage(component, prefix)
     await flushPromises()
     expect(wrapper.find('main').exists()).toBe(true)
   })
+})
+
+it('distinguishes a job still loading from an unavailable job list', async () => {
+  let reject!: (reason: Error) => void
+  vi.mocked(listJobs).mockImplementationOnce(
+    () =>
+      new Promise<never>((_resolve, fail) => {
+        reject = fail
+      }),
+  )
+  const wrapper = await mountPage(JobDetailView)
+  expect(wrapper.text()).toContain('Loading job…')
+  expect(wrapper.html()).not.toContain('Job not found')
+  reject(new Error('Peer unavailable'))
+  await flushPromises()
+  expect(wrapper.html()).toContain('Peer unavailable')
+  expect(wrapper.html()).not.toContain('Job not found')
+  expect(wrapper.text()).not.toContain('Loading job…')
+})
+
+it('shows not found only after loading an empty job list', async () => {
+  const wrapper = await mountPage(JobDetailView)
+  await flushPromises()
+  expect(wrapper.html()).toContain('Job not found')
 })

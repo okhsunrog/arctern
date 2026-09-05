@@ -20,6 +20,13 @@ function speed(t: RecvTransfer): string | null {
 </script>
 
 <template>
+  <UAlert
+    v-if="query.error.value"
+    color="warning"
+    title="Incoming transfers unavailable"
+    :description="query.error.value.message"
+    class="mb-3"
+  />
   <UCard v-if="rows.length">
     <template #header>
       <div class="flex items-center gap-2">

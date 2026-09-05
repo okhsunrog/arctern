@@ -29,12 +29,12 @@ const {
   isResuming,
   isPushing,
 } = useJobs(scope)
-const { events, connected } = useEvents(scope)
-const { arc } = useArc(scope)
-const { pools } = usePools(scope)
+const { events, connected, error: eventsError } = useEvents(scope)
+const { arc, error: arcError } = useArc(scope)
+const { pools, error: poolsError } = usePools(scope)
 // The peer tiles describe THIS host's outbound links; inside a peer's
 // console they would show the peer's own (usually empty) peer list.
-const { peers } = usePeers()
+const { peers, error: peersError } = usePeers()
 const title = computed(() => (host.value ? `${host.value} · Dashboard` : 'Dashboard'))
 
 const tail = computed(() => events.value.slice(-50))
@@ -71,6 +71,19 @@ const jobsSummary = computed(() => {
         <UAlert v-if="error" color="error" :title="error" icon="i-lucide-circle-x" />
         <UAlert v-if="warning" color="warning" :title="warning" icon="i-lucide-triangle-alert" />
 
+        <UAlert
+          v-if="poolsError"
+          color="warning"
+          title="Pools unavailable"
+          :description="poolsError"
+        />
+        <UAlert v-if="arcError" color="warning" title="ARC unavailable" :description="arcError" />
+        <UAlert
+          v-if="!host && peersError"
+          color="warning"
+          title="Peer links unavailable"
+          :description="peersError"
+        />
         <!-- Stat tiles -->
         <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
           <UCard
@@ -110,13 +123,25 @@ const jobsSummary = computed(() => {
 
           <UCard
             :ui="{ body: 'p-4 sm:p-4' }"
-            :class="jobsSummary.failing ? 'rail rail-err' : 'rail rail-ok'"
+            :class="
+              error || loading
+                ? 'rail rail-idle'
+                : jobsSummary.failing
+                  ? 'rail rail-err'
+                  : 'rail rail-ok'
+            "
           >
             <RouterLink :to="`${prefix}/jobs`" class="block">
               <div class="microlabel mb-1">jobs</div>
-              <div class="text-2xl font-semibold font-mono">{{ jobsSummary.total }}</div>
+              <div class="text-2xl font-semibold font-mono">
+                {{ loading || error ? '—' : jobsSummary.total }}
+              </div>
               <div class="text-xs mt-1" :class="jobsSummary.failing ? 'text-error' : 'text-muted'">
-                {{ jobsSummary.failing }} failing · {{ jobsSummary.running }} running
+                <template v-if="error">Status unavailable</template
+                ><template v-else-if="loading">Loading…</template
+                ><template v-else
+                  >{{ jobsSummary.failing }} failing · {{ jobsSummary.running }} running</template
+                >
               </div>
             </RouterLink>
           </UCard>
@@ -143,13 +168,13 @@ const jobsSummary = computed(() => {
           <div class="microlabel mb-2">replication jobs</div>
           <div v-if="loading && jobs.length === 0" class="text-muted text-sm">Loading…</div>
           <UEmpty
-            v-else-if="jobs.length === 0"
+            v-else-if="jobs.length === 0 && !error"
             icon="i-lucide-list-checks"
             title="No jobs configured"
             description="Add snap/push/prune jobs to /etc/arctern/arctern.toml and restart the daemon."
           />
           <JobsGrid
-            v-else
+            v-if="jobs.length"
             :jobs="jobs"
             :on-wake="wake"
             :on-cancel="cancel"
@@ -167,6 +192,7 @@ const jobsSummary = computed(() => {
         <!-- Events tail -->
         <div>
           <div class="microlabel mb-2">recent events</div>
+          <UAlert v-if="eventsError" color="warning" :title="eventsError" class="mb-2" />
           <EventsLog :events="tail" max-height-class="max-h-80" />
         </div>
       </div>

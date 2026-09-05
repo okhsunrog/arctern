@@ -4,7 +4,7 @@
 // Ref-counted per host scope, like the job stream.
 
 import { defineStore } from 'pinia'
-import { markRaw, reactive, ref } from 'vue'
+import { markRaw, reactive } from 'vue'
 import type { LogEvent } from '../client'
 import { createReconnectingEventSource } from '../composables/reconnectingEventSource'
 
@@ -43,8 +43,6 @@ export const useEventsStream = defineStore('events-stream', () => {
   /** Scope -> events, exposed reactively; markRaw'd rows stay cheap. */
   const buffers = reactive<Record<string, LogEvent[]>>({})
   const connected = reactive<Record<string, boolean>>({})
-  /** Global pause: stop appending, keep the connection open. */
-  const paused = ref(false)
 
   function open(scope: string): Entry {
     connected[scope] = false
@@ -57,7 +55,6 @@ export const useEventsStream = defineStore('events-stream', () => {
         url: () => eventsStreamPath(scope, newestId(buffers[scope])),
         subscribe(source) {
           source.addEventListener('message', (e) => {
-            if (paused.value) return
             let parsed: LogEvent
             try {
               parsed = JSON.parse(e.data) as LogEvent
@@ -114,9 +111,5 @@ export const useEventsStream = defineStore('events-stream', () => {
     if (list) list.length = 0
   }
 
-  function togglePause() {
-    paused.value = !paused.value
-  }
-
-  return { buffers, connected, paused, subscribe, clear, togglePause }
+  return { buffers, connected, subscribe, clear }
 })

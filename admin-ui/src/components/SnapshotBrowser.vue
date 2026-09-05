@@ -17,6 +17,7 @@ import { formatBytes } from '../utils/format'
 import { apiErrorCode, unwrap } from '../utils/errors'
 import CreateSnapshotModal from './CreateSnapshotModal.vue'
 import DestroySnapshotModal from './DestroySnapshotModal.vue'
+import BulkDestroySnapshotModal from './BulkDestroySnapshotModal.vue'
 
 // Host scoping happens at the transport level: a peer exposes the SAME
 // endpoints as the local host, so the browser is the same component
@@ -317,10 +318,16 @@ function askDestroy(tag: string) {
 }
 
 function confirmDestroy(full: string) {
-  destroyMutation.mutate({ ds: dataset.value, tag: tagOf(full) })
+  const at = full.indexOf('@')
+  destroyMutation.mutate({ ds: full.slice(0, at), tag: full.slice(at + 1) })
 }
 
 const bulkOpen = ref(false)
+const bulkTarget = ref({ ds: '', tags: [] as string[] })
+function askBulkDestroy() {
+  bulkTarget.value = { ds: dataset.value, tags: [...selectedTags.value] }
+  bulkOpen.value = true
+}
 const selectedTags = computed(() =>
   Object.entries(rowSelection.value)
     .filter(([, v]) => v)
@@ -330,8 +337,7 @@ const selectedTags = computed(() =>
 async function confirmBulkDestroy() {
   bulkOpen.value = false
   // Pinned once: the loop below awaits, and the tree stays clickable.
-  const ds = dataset.value
-  const tags = selectedTags.value
+  const { ds, tags } = bulkTarget.value
   let failed = 0
   for (const tag of tags) {
     try {
@@ -361,6 +367,7 @@ const UBadge = resolveComponent('UBadge')
 const UButton = resolveComponent('UButton')
 const UCheckbox = resolveComponent('UCheckbox')
 
+const compact = ref(true)
 const sorting = ref([{ id: 'created', desc: true }])
 
 function sortHeader(label: string) {
@@ -392,13 +399,13 @@ const columns = computed<TableColumn<SnapshotRow>[]>(() => [
           : table.getIsAllPageRowsSelected(),
         'onUpdate:modelValue': (v: boolean | 'indeterminate') =>
           table.toggleAllPageRowsSelected(!!v),
-        'aria-label': 'Select all',
+        'aria-label': 'Select all snapshots',
       }),
     cell: ({ row }) =>
       h(UCheckbox, {
         modelValue: row.getIsSelected(),
         'onUpdate:modelValue': (v: boolean | 'indeterminate') => row.toggleSelected(!!v),
-        'aria-label': 'Select row',
+        'aria-label': `Select ${row.original.tag}`,
       }),
     enableSorting: false,
   },
@@ -580,7 +587,7 @@ const columns = computed<TableColumn<SnapshotRow>[]>(() => [
                 icon="i-lucide-trash-2"
                 :loading="bulkBusy"
                 :disabled="bulkBusy"
-                @click="bulkOpen = true"
+                @click="askBulkDestroy"
               >
                 Destroy {{ selectedTags.length }} selected
               </UButton>
@@ -599,65 +606,49 @@ const columns = computed<TableColumn<SnapshotRow>[]>(() => [
               </UButton>
             </span>
           </div>
+          <div class="flex justify-between gap-3 text-xs text-muted">
+            <span>{{ selectedTags.length }} selected across all snapshots</span>
+            <USwitch v-model="compact" label="Compact rows" size="sm" />
+          </div>
           <UTable
+            :key="compact ? 'compact' : 'comfortable'"
+            sticky
+            :virtualize="{ estimateSize: compact ? 40 : 60 }"
+            :ui="{ td: compact ? 'px-3 py-1.5' : 'px-3 py-3', th: 'px-3 py-2' }"
+            :aria-label="`Snapshots in ${dataset}`"
             v-model:row-selection="rowSelection"
             v-model:sorting="sorting"
             :data="snapshots"
             :columns="columns"
             :get-row-id="(r: SnapshotRow) => r.tag"
             :loading="snapsLoading && snapshots.length === 0"
-            class="rounded-md border border-default bg-default"
+            class="max-h-[65vh] rounded-md border border-default bg-default"
           />
         </template>
       </div>
     </div>
 
-    <CreateSnapshotModal v-model:open="createOpen" :dataset="dataset" @confirm="confirmCreate" />
+    <CreateSnapshotModal
+      :host="hostLabel || 'this host'"
+      v-model:open="createOpen"
+      :dataset="dataset"
+      @confirm="confirmCreate"
+    />
     <DestroySnapshotModal
+      :host="hostLabel || 'this host'"
       v-model:open="destroyOpen"
       :snapshot-name="destroyTarget"
       @confirm="confirmDestroy"
     />
 
-    <!-- Bulk destroy confirm -->
-    <UModal
+    <BulkDestroySnapshotModal
       v-model:open="bulkOpen"
-      title="Destroy selected snapshots?"
-      :description="`${selectedTags.length} snapshots will be permanently removed${hostLabel ? ` on ${hostLabel}` : ''}.`"
-    >
-      <template #body>
-        <ul class="font-mono text-xs space-y-1 max-h-64 overflow-y-auto">
-          <li v-for="t in selectedTags" :key="t" class="flex items-center gap-2">
-            <UIcon
-              v-if="holdsFor(t).length > 0"
-              name="i-lucide-lock"
-              class="text-warning shrink-0"
-            />
-            <span class="break-all">{{ dataset }}@{{ t }}</span>
-          </li>
-        </ul>
-        <p
-          v-if="selectedTags.some((t) => holdsFor(t).length > 0)"
-          class="text-warning text-xs mt-3"
-        >
-          Locked snapshots are held and will fail to destroy until their holds are released.
-        </p>
-      </template>
-      <template #footer>
-        <div class="flex justify-end gap-2 w-full">
-          <UButton variant="ghost" @click="bulkOpen = false">Cancel</UButton>
-          <UButton
-            color="error"
-            icon="i-lucide-trash-2"
-            :loading="bulkBusy"
-            :disabled="bulkBusy"
-            @click="confirmBulkDestroy"
-          >
-            Destroy {{ selectedTags.length }}
-          </UButton>
-        </div>
-      </template>
-    </UModal>
+      :dataset="bulkTarget.ds"
+      :snapshots="bulkTarget.tags"
+      :host="hostLabel || 'this host'"
+      :loading="bulkBusy"
+      @confirm="confirmBulkDestroy"
+    />
 
     <!-- Snapshot detail modal -->
     <UModal v-model:open="detailOpen" :title="detailSnap?.tag ?? ''">

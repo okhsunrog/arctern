@@ -93,8 +93,9 @@ function formatTime(unixSec: number): string {
         <span
           class="inline-block size-1.5 rounded-full shrink-0 self-center"
           :class="dotClass(e.level)"
-          :title="e.level"
+          aria-hidden="true"
         />
+        <span class="w-10 shrink-0 text-[11px] font-medium">{{ e.level }}</span>
         <span v-if="e.job_name" class="text-primary/80 shrink-0 select-none">{{ e.job_name }}</span>
         <span
           class="whitespace-pre-wrap break-all text-highlighted/90 group-hover:text-highlighted"

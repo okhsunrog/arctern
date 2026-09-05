@@ -58,7 +58,13 @@ export function baseOptions(opts: {
   return {
     responsive: true,
     maintainAspectRatio: false,
-    animation: { duration: 250 },
+    animation: {
+      duration:
+        typeof window !== 'undefined' &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches
+          ? 0
+          : 250,
+    },
     interaction: { mode: 'index' as const, intersect: false },
     plugins: {
       legend: { display: false },

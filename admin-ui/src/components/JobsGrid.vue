@@ -26,7 +26,12 @@ defineProps<{
 
 <template>
   <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-    <UCard v-for="j in jobs" :key="j.name" :class="jobStatus(j).rail">
+    <UCard
+      :ui="{ header: 'p-3 sm:p-3', body: 'p-3 sm:p-3', footer: 'p-3 sm:p-3' }"
+      v-for="j in jobs"
+      :key="j.name"
+      :class="jobStatus(j).rail"
+    >
       <template #header>
         <div class="flex items-center justify-between">
           <div class="min-w-0">

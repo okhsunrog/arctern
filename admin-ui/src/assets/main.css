@@ -114,3 +114,10 @@ html:not(.dark) .ring.ring-default {
     opacity: 0.35;
   }
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse-dot,
+  .animate-spin {
+    animation: none;
+  }
+}

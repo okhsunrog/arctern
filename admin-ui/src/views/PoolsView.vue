@@ -23,7 +23,7 @@ const title = computed(() => (host.value ? `${host.value} · Pools` : 'Pools'))
         <UAlert v-if="error" color="error" :title="error" icon="i-lucide-circle-x" />
         <div v-if="loading && pools.length === 0" class="text-muted text-sm">Loading…</div>
         <UEmpty
-          v-else-if="pools.length === 0"
+          v-else-if="pools.length === 0 && !error"
           icon="i-lucide-hard-drive"
           title="No pools imported"
         />

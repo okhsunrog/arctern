@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 
 const props = defineProps<{
+  host?: string
   open: boolean
   dataset: string | null
 }>()
@@ -53,8 +54,11 @@ function go() {
   <UModal :open="open" title="Create snapshot" @update:open="emit('update:open', $event)">
     <template #body>
       <div class="space-y-3 text-sm">
+        <p class="text-muted">
+          Host: <strong class="text-highlighted">{{ host || 'this host' }}</strong>
+        </p>
         <div>
-          <span class="text-gray-500">Dataset:</span>
+          <span class="text-muted">Dataset:</span>
           <code class="ml-1 font-mono break-all">{{ dataset }}</code>
         </div>
         <UFormField label="Snapshot name">
@@ -66,7 +70,7 @@ function go() {
             @keydown.enter="go"
           />
         </UFormField>
-        <div class="text-xs text-gray-500 break-all">
+        <div class="text-xs text-muted break-all">
           Will create <code class="font-mono">{{ dataset }}@{{ trimmed || '…' }}</code>
         </div>
         <UCheckbox v-model="recursive" label="Recursive — also snapshot child datasets (-r)" />

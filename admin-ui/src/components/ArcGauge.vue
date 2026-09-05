@@ -29,11 +29,11 @@ const ratioColor = computed<'success' | 'warning' | 'error' | 'neutral'>(() => {
     <template #header>
       <div class="font-semibold">ARC</div>
     </template>
-    <div v-if="!arc" class="text-gray-500 text-sm">Loading…</div>
+    <div v-if="!arc" class="text-muted text-sm">Loading…</div>
     <template v-else>
       <div class="flex items-center justify-between mb-3">
         <div>
-          <div class="text-xs text-gray-500">Hit ratio</div>
+          <div class="text-xs text-muted">Hit ratio</div>
           <div class="text-3xl font-semibold">
             <template v-if="ratioPercent != null">{{ ratioPercent }}%</template>
             <template v-else>—</template>
@@ -44,7 +44,7 @@ const ratioColor = computed<'success' | 'warning' | 'error' | 'neutral'>(() => {
         </UBadge>
       </div>
       <div class="space-y-1">
-        <div class="flex justify-between text-xs text-gray-500">
+        <div class="flex justify-between text-xs text-muted">
           <span>{{ formatBytes(arc.size) }} / {{ formatBytes(arc.c_max) }} max</span>
           <span>{{ sizePercent }}% of c_max</span>
         </div>

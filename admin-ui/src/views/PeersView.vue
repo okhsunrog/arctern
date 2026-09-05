@@ -16,7 +16,7 @@ const { peers, error, loading } = usePeers()
         <UAlert v-if="error" color="error" :title="error" icon="i-lucide-circle-x" />
         <div v-if="loading && peers.length === 0" class="text-muted text-sm">Loading…</div>
         <UEmpty
-          v-else-if="peers.length === 0"
+          v-else-if="peers.length === 0 && !error"
           icon="i-lucide-radio-tower"
           title="No peers configured"
           description="Add [[peers]] entries to arctern.toml to replicate to another host."

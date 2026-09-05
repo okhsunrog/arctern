@@ -1,4 +1,12 @@
-import { computed, onScopeDispose, toValue, watch, type MaybeRefOrGetter } from 'vue'
+import {
+  computed,
+  ref,
+  shallowRef,
+  onScopeDispose,
+  toValue,
+  watch,
+  type MaybeRefOrGetter,
+} from 'vue'
 import type { LogEvent } from '../client'
 import { useEventsStream } from '../stores/eventsStream'
 
@@ -8,6 +16,8 @@ import { useEventsStream } from '../stores/eventsStream'
  */
 export function useEvents(scope: MaybeRefOrGetter<string> = '') {
   const store = useEventsStream()
+  const paused = ref(false)
+  const frozen = shallowRef<LogEvent[]>([])
 
   // Subscribing mutates the store, so it lives in a watcher rather than
   // in a computed — a getter must not have side effects on the state it
@@ -16,6 +26,8 @@ export function useEvents(scope: MaybeRefOrGetter<string> = '') {
   watch(
     () => toValue(scope),
     (next) => {
+      paused.value = false
+      frozen.value = []
       release?.()
       release = store.subscribe(next)
     },
@@ -23,7 +35,13 @@ export function useEvents(scope: MaybeRefOrGetter<string> = '') {
   )
   onScopeDispose(() => release?.())
 
-  const events = computed<LogEvent[]>(() => store.buffers[toValue(scope)] ?? [])
+  const events = computed<LogEvent[]>(() =>
+    paused.value ? frozen.value : (store.buffers[toValue(scope)] ?? []),
+  )
+  function togglePause() {
+    frozen.value = paused.value ? [] : [...events.value]
+    paused.value = !paused.value
+  }
 
   return {
     events,
@@ -33,8 +51,11 @@ export function useEvents(scope: MaybeRefOrGetter<string> = '') {
         ? 'Live event updates interrupted. Reconnecting…'
         : null,
     ),
-    paused: computed(() => store.paused),
-    clear: () => store.clear(toValue(scope)),
-    togglePause: store.togglePause,
+    paused: computed(() => paused.value),
+    clear: () => {
+      store.clear(toValue(scope))
+      frozen.value = []
+    },
+    togglePause,
   }
 }

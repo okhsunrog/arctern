@@ -13,8 +13,11 @@ Terminology used throughout:
   Needs only `sshd` and the `arctern` binary; running the daemon there
   is optional.
 
-Both need OpenZFS ≥ 2.3 (`zfs`/`zpool` on `PATH`; the pool views read
-`zpool status -j`, which arrived in 2.3) and OpenSSH.
+Both need OpenZFS ≥ 2.3 (`zfs`/`zpool` on `PATH`; arctern reads their
+`-j` JSON output, which arrived in 2.3), OpenSSH, and Linux. Replacing a
+zrepl setup? Read [`migrate-from-zrepl.md`](migrate-from-zrepl.md)
+alongside this guide; it says which `root_fs` continues zrepl's tree in
+place.
 
 ## 1. Install the binary (both hosts)
 
@@ -380,3 +383,19 @@ reason to make it.
   contain the *sender's* push job name, and `operations` must cover
   what the sender asks (see 3b; the daemon's journal on the receiver
   names the missing grant).
+- **"holds N snapshot(s) but shares no snapshot or bookmark with the
+  sender"** — the receiver dataset has data but no common base, so only
+  a full send would apply, and arctern never rolls a receiver back
+  (`recv -F`). Either `root_fs` points at the wrong tree, or the two
+  sides genuinely diverged; destroy the receiver dataset for a fresh
+  full send, or restore a common snapshot on the sender.
+- **"exists but has no snapshots"** — the receiver dataset is an empty
+  placeholder: created by hand, or by a child's receive before the
+  parent's own first sync. Destroy it if it has no children; the next
+  cycle sends it in full.
+- **A snapshot the grid should have destroyed is still there** — check
+  `zfs holds` on it. arctern skips held snapshots; a tag from another
+  tool (zrepl's, say) pins it until released.
+- **"skipped, the first full send of <parent> failed this cycle"** — a
+  descendant was held back because its parent's first send failed;
+  fix the parent's error and both go on the next cycle.

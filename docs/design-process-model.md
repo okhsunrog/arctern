@@ -24,9 +24,9 @@ transient processes.
 ### The plane split (the actual design rule)
 
 - **Data plane** — replication-critical, zfs-only, works with NO daemon on the
-  receiver: the recv stream and the planner RPCs (`ListReceiverGuids`,
-  `GetReceiveResumeToken`, `DiscardPartialRecv`). These are served by the
-  dispatch process directly shelling out to `zfs`.
+  receiver: the recv stream and the planner RPCs (`list_receiver_guids`,
+  which also carries the resume token, and `discard_partial_recv`). These
+  are served by the dispatch process directly shelling out to `zfs`.
 - **Control plane** — anything touching daemon state (job status, wakeups, the
   generic `Proxy`, host management, the event feed): dispatch **bridges** to
   the local daemon over its UNIX socket (`socket` key in arctern.toml). No

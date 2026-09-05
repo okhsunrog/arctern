@@ -73,8 +73,8 @@ daemon/        binary crate
   migrations/                SQLite schema, applied by sqlx::migrate! at open
 .sqlx/                       checked query data for offline `sqlx::query!` builds
 admin-ui/                    Vue 3 SPA, embedded via build.rs
-docs/                        install.md, deploy-snap-only.md, deploy-full-mirror.md,
-                             migrate-from-zrepl.md, roadmap.md, example-config.toml (+ diagrams/, screenshots/)
+docs/                        install.md, migrate-from-zrepl.md, design-process-model.md,
+                             roadmap.md, example-config.toml (+ diagrams/, screenshots/)
 packaging/systemd/           arctern.service unit
 ```
 

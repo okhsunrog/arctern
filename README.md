@@ -35,6 +35,28 @@ naming idiom (`<prefix><RFC3339-utc>`), same grid retention, same hold/cursor
 discipline — but built as a single Rust binary with an embedded web console
 that treats the peer as a first-class host, not a footnote.
 
+## Requirements, and who it is not for
+
+- **OpenZFS 2.3 or newer** on every host. arctern reads `zfs list -j`
+  and `zpool status -j`, which arrived in 2.3; Ubuntu 24.04 LTS and
+  Proxmox VE 8 ship 2.2 and cannot run it.
+- **Linux only.** ARC stats come from `/proc/spl/kstat`, the local API
+  authenticates over `SO_PEERCRED`, and nothing has been tried on
+  FreeBSD or TrueNAS CORE.
+- **OpenSSH** on both ends, 7.2 or newer for the `restrict` keyword in
+  `authorized_keys`.
+- **Root, or a delegated user.** The sender's daemon runs as root. The
+  receiver's forced command runs as whichever user owns the
+  `authorized_keys` line; a non-root user with `zfs allow` works but has
+  had far less exercise than root ([install.md](docs/install.md) says
+  which permissions it needs).
+- **Push only, SSH only.** No pull jobs, no TLS/TCP transport, no
+  pre/post hooks, no `zfs send -R`. A receiver that should replicate
+  onward runs its own push job.
+- **Tested on one topology.** The author's laptop pushing to one NAS,
+  daily since July 2026. Multi-target jobs and several senders into one
+  receiver are covered by tests, not by months of production.
+
 ## How it works
 
 <p align="center">
@@ -232,8 +254,9 @@ should take its own snapshots, prune what it received, or be
 manageable through the sender's console.
 
 See [`docs/install.md`](docs/install.md) for the step-by-step version
-of all of the above, and [`docs/example-config.toml`](docs/example-config.toml)
-for the annotated full schema.
+of all of the above, [`docs/example-config.toml`](docs/example-config.toml)
+for the annotated full schema, and [`docs/migrate-from-zrepl.md`](docs/migrate-from-zrepl.md)
+if a zrepl setup is what you are replacing.
 
 ## CLI
 
@@ -292,10 +315,11 @@ crate.
 
 ## Scope
 
-Push direction only (sender → receiver). A push job can target multiple peers,
-each with its own cursor state; a peer can be multi-homed via routes. Pull
-jobs, fan-out beyond a handful of peers, and pre/post hooks are out of scope
-for now — see [`ARCHITECTURE.md`](ARCHITECTURE.md#out-of-scope) and
+Push direction only (sender → receiver), Linux only, OpenZFS 2.3+. A push
+job can target multiple peers, each with its own cursor state; a peer can
+be multi-homed via routes. Pull jobs, fan-out beyond a handful of peers,
+and pre/post hooks are out of scope for now — see
+[`ARCHITECTURE.md`](ARCHITECTURE.md#out-of-scope) and
 [`docs/roadmap.md`](docs/roadmap.md) for where this is going.
 
 ## License

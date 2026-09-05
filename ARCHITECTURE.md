@@ -237,7 +237,8 @@ earliest auto target is due (last success + the peer's `auto_interval`) and
 wakes early on:
 
 - a manual "Send now" request (per-target) or a job wakeup,
-- any peer connectivity change (the reconnect tasks bump a watch channel).
+- any peer connectivity change (`PeersState::publish` bumps a watch channel
+  every push job subscribes to).
 
 A target is auto-eligible only while its ACTIVE route has `auto = true` —
 route reachability is the locality signal, so "auto at home over LAN, manual
@@ -456,14 +457,19 @@ tailing SQLite on a daemon-less receiver.
 
 ## Cancellation and backpressure
 
-Patterns in `push.rs`:
+Patterns in `jobs/push/step.rs`:
 
 - The bulk copy loop races the job/cycle `CancellationToken` inside
-  `tokio::select!` with `biased;` so cancel wins races.
-- On cancel: drop the recv channel (which closes the SSH child's stdin and
-  propagates SIGPIPE to remote `zfs recv`), `start_kill` the local `zfs send`
-  child, then `wait` to reap.
+  `tokio::select!` with `biased;` so cancel wins races. Each read and write
+  is polled to completion, never dropped mid-way: `write_all` is not
+  cancellation-safe and a dropped read loses bytes.
+- On cancel: shut down the recv channel's stdin (EOF to the remote
+  `zfs recv`, which keeps its resumable partial state), kill the local
+  `zfs send` child, then wait for the remote to exit so a retry cannot race
+  the old receiver for the same dataset.
 - Drain `zfs send` stderr on a separate `tokio::spawn` to avoid pipe deadlock.
+- A step that fails carries a typed `StepError`; a receiver's refusal keeps
+  its `ErrorCode` and message all the way into the run log.
 - Always `recv -s`, so partial state survives; the next cycle resumes via the
   token. Pause = cancel the in-flight transfer resumably + suspend scheduling.
 - After the copy completes, `shutdown()` the channel's stdin before reading

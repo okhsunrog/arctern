@@ -117,14 +117,16 @@ targets = ["nas", "nas-remote"]
 # Filesystems replicated concurrently per target peer (own recv channel
 # each). 1..=4; default 1 (sequential).
 # parallel = 2
-# How much history reaches the receiver. "all" (default) is zrepl's
-# behaviour: every filtered snapshot is replicated (one `zfs send -I`
-# per cycle), so the receiver mirrors the sender's history and its own
-# prune job has something to thin. "latest" sends only the newest
-# snapshot per push — the smallest possible delta, one snapshot per
-# push on the receiver; right for a metered link where the receiver is
-# a disaster copy rather than a history.
-# replicate = "all"
+# How much history reaches the receiver. "latest" (the default) sends
+# only the newest snapshot per push: the smallest possible delta, one
+# snapshot per push on the receiver — the laptop keeps the fine-grained
+# history for quick rollback, the NAS is the disaster copy. "all" is
+# zrepl's behaviour: every filtered snapshot is replicated (one
+# `zfs send -I` per cycle), so the receiver mirrors the sender's history
+# and its own prune job has something to thin; it costs the data written
+# and deleted between snapshots, which on a home directory can be
+# several times the single daily delta.
+# replicate = "latest"
 dry_run = true # first-run safety: plan and log actions without sending
 filesystems = { "novafs/arch0/" = true, "novafs/arch0" = false, "novafs/arch0/data" = false }
 [jobs.target]

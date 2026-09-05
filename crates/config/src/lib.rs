@@ -742,6 +742,41 @@ keep = [{keep}]
         assert!(parse(&prune_job(FS, KEEP, "0s")).is_err());
     }
 
+    // The default is the workstation case: fine-grained history stays on
+    // the sender, the receiver gets one snapshot per push. `all` is opt-in.
+    #[test]
+    fn push_jobs_replicate_only_the_latest_snapshot_by_default() {
+        let s = r#"
+[[peers]]
+name = "nas"
+ssh_target = "nas"
+
+[[jobs]]
+type = "push"
+name = "p"
+targets = ["nas"]
+filesystems = { "tank/data" = true }
+snapshot_filter = { prefix = "x_" }
+[jobs.target]
+root_fs = "backup"
+"#;
+        let c = parse(s).expect("parses");
+        let JobConfig::Push(p) = &c.jobs[0] else {
+            panic!("expected a push job");
+        };
+        assert_eq!(p.replicate, ReplicateMode::Latest);
+
+        let c = parse(&s.replace(
+            "targets = [\"nas\"]",
+            "targets = [\"nas\"]\nreplicate = \"all\"",
+        ))
+        .expect("parses");
+        let JobConfig::Push(p) = &c.jobs[0] else {
+            panic!("expected a push job");
+        };
+        assert_eq!(p.replicate, ReplicateMode::All);
+    }
+
     fn snap_job_with_grid(interval: &str, grid: &str) -> String {
         format!(
             r#"

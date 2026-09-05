@@ -327,6 +327,13 @@ pub enum KeepRule {
 }
 
 /// What a push job replicates of the sender's filtered snapshot history.
+///
+/// `Latest` is the default because it matches what arctern is for: a
+/// workstation that keeps its own fine-grained snapshots for quick
+/// rollback and pushes a disaster copy to a NAS on a schedule, often
+/// over a metered route. zrepl's model is the other way round (a thin
+/// sender, an archive receiver, replication after every snapshot), and
+/// `All` is there for operators who want that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplicateMode {
@@ -336,12 +343,11 @@ pub enum ReplicateMode {
     /// receiver-side prune job has something to thin and restores from
     /// the receiver can pick any point the sender still had at push
     /// time. Costs the data written and deleted between snapshots.
-    #[default]
     All,
     /// Only the newest filtered snapshot per cycle (`zfs send -i`
     /// straight to the head). The receiver holds one snapshot per push;
-    /// the transfer is the smallest possible delta. Right for a metered
-    /// link where the receiver is a disaster copy, not a history.
+    /// the transfer is the smallest possible delta.
+    #[default]
     Latest,
 }
 

@@ -69,15 +69,21 @@ packages once a few weeks of arctern operation look clean.
 
 ## How much history the receiver gets
 
-zrepl replicates every filtered snapshot. arctern does the same by
-default (`replicate = "all"` on the push job, one `zfs send -I` per
-cycle), so `received_prune` on mira has the sender's 15-minute history
-to thin and a restore from the NAS can pick any point the laptop still
-had at push time. Until 0.3.0 arctern sent only the newest snapshot per
-push; that behaviour is still available as `replicate = "latest"` and is
-the right choice when the WireGuard route is metered — the daily delta
-is smaller than the sum of the quarter-hourly ones because data written
-and deleted between snapshots never travels.
+zrepl replicates every filtered snapshot: its model is a thin sender and
+an archive receiver, with replication running after every snapshot.
+arctern's default is the opposite, `replicate = "latest"` on the push
+job: the laptop keeps the 15-minute history locally (that is what quick
+rollbacks and "the file I changed an hour ago" need), and mira gets one
+snapshot per push. The daily delta is also smaller than the sum of the
+quarter-hourly ones, because data written and deleted between snapshots
+never travels — which is what keeps the WireGuard route cheap. nova's
+config states `replicate = "latest"` explicitly even though it is the
+default, so the choice is visible next to the job.
+
+Set `replicate = "all"` (one `zfs send -I` per cycle) if you want zrepl's
+behaviour instead: `received_prune` on the receiver then has the sender's
+fine-grained history to thin, and a restore from the NAS can pick any
+point the sender still had at push time.
 
 ## Rollback
 

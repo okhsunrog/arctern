@@ -198,13 +198,14 @@ For a push job replicating one target peer:
    - Compute the plan via `pick_plan_with_token`: resume, full, incremental
      from snapshot, or incremental from bookmark (the no-common-snapshot
      fallback). The job's `replicate` mode decides how much history moves:
-     `all` (default, zrepl's behaviour) sends `zfs send -I` so every filtered
-     snapshot between the common base and the head reaches the receiver, and
-     a first sync starts from the oldest snapshot; `latest` sends `-i`
-     straight to the head, one snapshot per push, the smallest delta. A
-     bookmark cannot be the base of `-I`, so a cursor-based step in `all`
-     mode goes to the first snapshot past the bookmark and the next step
-     continues with `-I`.
+     `latest` (default) sends `-i` straight to the head, one snapshot per
+     push, the smallest delta — the sender keeps the fine-grained history,
+     the receiver is the disaster copy; `all` (zrepl's behaviour) sends
+     `zfs send -I` so every filtered snapshot between the common base and
+     the head reaches the receiver, and a first sync starts from the oldest
+     snapshot. A bookmark cannot be the base of `-I`, so a cursor-based step
+     in `all` mode goes to the first snapshot past the bookmark and the next
+     step continues with `-I`.
    - If the plan wants `discard_partial_recv`, call the RPC first — it's
      idempotent and makes the recv channel's first action a clean recv.
    - Place step holds (the `to` snapshot, plus the `from` snapshot for

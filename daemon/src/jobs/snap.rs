@@ -35,6 +35,7 @@ pub struct SnapJob {
     config: SnapJobConfig,
     status: Mutex<JobStatusInner>,
     wakeup: Arc<tokio::sync::Notify>,
+    unmatched: super::UnmatchedFilters,
 }
 
 impl SnapJob {
@@ -43,6 +44,7 @@ impl SnapJob {
             config,
             status: Mutex::new(JobStatusInner::default()),
             wakeup: Arc::new(tokio::sync::Notify::new()),
+            unmatched: super::UnmatchedFilters::default(),
         }
     }
 
@@ -162,6 +164,8 @@ impl SnapJob {
             .await
             .map_err(|e| format!("list datasets: {e}"))?;
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        self.unmatched
+            .report(&self.config.name, &self.config.filesystems, &names);
         let targets = resolve_all(&self.config.filesystems, &names);
         if targets.is_empty() {
             tracing::info!("no datasets matched filesystem filter");

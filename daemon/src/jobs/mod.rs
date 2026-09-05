@@ -17,6 +17,57 @@ use time::OffsetDateTime;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+/// Latches the set of `filesystems` entries that currently match no
+/// dataset, so the warning is emitted on change instead of every cycle.
+///
+/// Without this a standing misconfiguration reprints hourly and gets
+/// tuned out, which is the opposite of the point: the warning exists
+/// because a filter that matches nothing is otherwise silent.
+#[derive(Default)]
+pub struct UnmatchedFilters(Mutex<Vec<String>>);
+
+impl UnmatchedFilters {
+    /// The unmatched set, but only when it differs from the previous
+    /// call. Separated from the logging so the latch can be tested
+    /// without capturing a tracing subscriber.
+    fn take_change(
+        &self,
+        filters: &[arctern_config::FilesystemFilter],
+        candidates: &[&str],
+    ) -> Option<Vec<String>> {
+        let current: Vec<String> = arctern_config::filter::unmatched(filters, candidates)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let mut previous = self.0.lock().expect("unmatched filters mutex");
+        if *previous == current {
+            return None;
+        }
+        *previous = current.clone();
+        Some(current)
+    }
+
+    pub fn report(
+        &self,
+        job: &str,
+        filters: &[arctern_config::FilesystemFilter],
+        candidates: &[&str],
+    ) {
+        let Some(current) = self.take_change(filters, candidates) else {
+            return;
+        };
+        if current.is_empty() {
+            tracing::info!(job = %job, "every configured filesystem matches a dataset again");
+        } else {
+            tracing::warn!(
+                job = %job,
+                filesystems = %current.join(", "),
+                "configured filesystems match no dataset; the job reports success but does nothing for them"
+            );
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct JobStatusInner {
     pub last_run: Option<OffsetDateTime>,
@@ -371,5 +422,68 @@ mod tests {
         assert!(!mgr.wakeup_by_name("does-not-exist"));
         assert!(job.woken.load(Ordering::SeqCst));
         mgr.shutdown(Duration::from_secs(2)).await;
+    }
+
+    fn exact(path: &str) -> arctern_config::FilesystemFilter {
+        arctern_config::FilesystemFilter {
+            path: path.into(),
+            recursive: false,
+            exclude: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn unmatched_filters_reports_once_then_stays_quiet() {
+        let filters = [exact("tank/data/home"), exact("tank/data/root")];
+        let present = ["tank/data/home_new", "tank/data/root"];
+        let watch = UnmatchedFilters::default();
+
+        assert_eq!(
+            watch.take_change(&filters, &present),
+            Some(vec!["tank/data/home".to_string()])
+        );
+        // Same misconfiguration on the next cycle: no repeat.
+        assert_eq!(watch.take_change(&filters, &present), None);
+        assert_eq!(watch.take_change(&filters, &present), None);
+    }
+
+    #[test]
+    fn unmatched_filters_announces_recovery_after_a_rename() {
+        let filters = [exact("tank/data/home"), exact("tank/data/root")];
+        let watch = UnmatchedFilters::default();
+        watch.take_change(&filters, &["tank/data/home_new", "tank/data/root"]);
+
+        // The dataset is renamed back: an empty set is a change, and the
+        // caller logs the all-clear.
+        assert_eq!(
+            watch.take_change(&filters, &["tank/data/home", "tank/data/root"]),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            watch.take_change(&filters, &["tank/data/home", "tank/data/root"]),
+            None
+        );
+    }
+
+    #[test]
+    fn unmatched_filters_reports_again_when_the_set_grows() {
+        let filters = [exact("tank/data/home"), exact("tank/data/root")];
+        let watch = UnmatchedFilters::default();
+        watch.take_change(&filters, &["tank/data/root"]);
+
+        assert_eq!(
+            watch.take_change(&filters, &[]),
+            Some(vec![
+                "tank/data/home".to_string(),
+                "tank/data/root".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn a_healthy_config_never_reports() {
+        let filters = [exact("tank/data/home")];
+        let watch = UnmatchedFilters::default();
+        assert_eq!(watch.take_change(&filters, &["tank/data/home"]), None);
     }
 }

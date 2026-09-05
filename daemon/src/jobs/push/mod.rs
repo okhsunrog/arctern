@@ -126,6 +126,7 @@ pub struct PushJob {
     filter: CompiledFilter,
     status: Mutex<JobStatusInner>,
     wakeup: Arc<tokio::sync::Notify>,
+    unmatched: crate::jobs::UnmatchedFilters,
     /// Shared peers state. Each cycle looks up the configured peer name
     /// here so that a reconnect performed by the background task takes
     /// effect on the next cycle without restarting the job.
@@ -181,6 +182,7 @@ impl PushJob {
             filter,
             status: Mutex::new(JobStatusInner::default()),
             wakeup: Arc::new(tokio::sync::Notify::new()),
+            unmatched: crate::jobs::UnmatchedFilters::default(),
             peers,
             transfers: Arc::new(Mutex::new(HashMap::new())),
             paused: AtomicBool::new(false),
@@ -282,6 +284,8 @@ impl PushJob {
             .await
             .map_err(|e| format!("list datasets: {e}"))?;
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        self.unmatched
+            .report(&self.config.name, &self.config.filesystems, &names);
         Ok(
             arctern_config::filter::resolve_all(&self.config.filesystems, &names)
                 .into_iter()

@@ -134,6 +134,22 @@ pub fn resolve_all<'a>(filters: &[FilesystemFilter], candidates: &[&'a str]) -> 
     out
 }
 
+/// Paths of the filters that selected nothing out of `candidates`.
+///
+/// A filter matching no dataset makes the job a no-op that still reports
+/// success, so the misconfiguration is invisible: a receiver ran three
+/// months without retention because its prune job named a dataset that
+/// had since been renamed, while a second, matching filter kept the
+/// cycle's result non-empty. Checking the whole selection is therefore
+/// not enough — each filter has to be judged on its own.
+pub fn unmatched<'a>(filters: &'a [FilesystemFilter], candidates: &[&str]) -> Vec<&'a str> {
+    filters
+        .iter()
+        .filter(|f| f.resolve(candidates).is_empty())
+        .map(|f| f.path.as_str())
+        .collect()
+}
+
 fn is_under(candidate: &str, root: &str, recursive: bool) -> bool {
     if candidate == root {
         return true;
@@ -250,5 +266,44 @@ mod tests {
         let out = resolve_all(&[f1, f2], &cands);
         assert_eq!(out.len(), 3);
         assert!(out.contains(&"tank/data"));
+    }
+
+    #[test]
+    fn unmatched_is_empty_when_every_filter_hits() {
+        let cands = vec!["tank/data/home", "tank/data/root"];
+        let filters = [
+            f("tank/data/home", false, &[]),
+            f("tank/data/root", false, &[]),
+        ];
+        assert!(unmatched(&filters, &cands).is_empty());
+    }
+
+    #[test]
+    fn unmatched_reports_a_renamed_dataset_hidden_by_a_matching_sibling() {
+        // The mira failure: the receiving dataset was renamed to
+        // `home_new`, so the `home` filter selected nothing — but the
+        // `root` filter still did, leaving the cycle's overall result
+        // non-empty and the job reporting success every hour.
+        let cands = vec!["tank/data/home_new", "tank/data/root"];
+        let filters = [
+            f("tank/data/home", false, &[]),
+            f("tank/data/root", false, &[]),
+        ];
+        assert!(!resolve_all(&filters, &cands).is_empty());
+        assert_eq!(unmatched(&filters, &cands), vec!["tank/data/home"]);
+    }
+
+    #[test]
+    fn unmatched_flags_a_subtree_filter_that_selects_nothing() {
+        let cands = vec!["tank/var"];
+        let filters = [f("tank/data", true, &[])];
+        assert_eq!(unmatched(&filters, &cands), vec!["tank/data"]);
+    }
+
+    #[test]
+    fn a_filter_whose_every_hit_is_excluded_counts_as_unmatched() {
+        let cands = vec!["tank/data", "tank/data/home"];
+        let filters = [f("tank/data", true, &["tank/data/"])];
+        assert_eq!(unmatched(&filters, &cands), vec!["tank/data"]);
     }
 }

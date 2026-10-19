@@ -325,3 +325,5 @@ and pre/post hooks are out of scope for now — see
 ## License
 
 [MIT](LICENSE)
+
+NixOS packages and build instructions: [docs/nixos.md](docs/nixos.md).
